@@ -4,13 +4,18 @@ import pandas as pd
 from gymnasium import spaces
 
 class TradingEnvironment(gym.Env):
-    def __init__(self, df, initial_balance=10000, transaction_fee=0.001, window_size=20, leverage = 10, min_balance=0):
+    def __init__(self, df, initial_balance=10000, transaction_fee=0.001, window_size=20, future_window=5, leverage = 10, min_balance=0):
         super(TradingEnvironment, self).__init__()
         
-        self.df = df    #資料集
+        # 處理數據，排除時間欄位
+        self.df = df.copy()
+        datetime_columns = self.df.select_dtypes(include=['datetime64']).columns
+        self.df = self.df.drop(columns=datetime_columns)
+        
         self.initial_balance = initial_balance  # 初始資金
         self.transaction_fee = transaction_fee  # 交易手續費
         self.window_size = window_size # 窗口大小(K線數量)
+        self.future_window = future_window  # 未來數據窗口大小
         self.leverage = leverage    #槓桿倍數
         self.min_balance = min_balance  # 最小資金(資金不足時強制結束)
         self.stop_loss_price = 0.0    # 止損價格
@@ -25,13 +30,21 @@ class TradingEnvironment(gym.Env):
         )
         
         # 計算特徵數量
-        self.n_features = len(df.columns) + 5  # 價格特徵 + 賬戶狀態(5個)
+        self.price_columns = self.df.select_dtypes(include=[np.number]).columns
+        self.n_price_features = len(self.price_columns)
+        
+        # 新增未來數據特徵
+        self.n_future_features = self.n_price_features  # 未來數據使用相同的特徵
+        self.n_account_features = 5
+        
+        # 總特徵數 = 歷史價格特徵 + 未來數據特徵 + 賬戶狀態
+        self.n_features = self.n_price_features + self.n_future_features + self.n_account_features
         
         # 定義觀察空間
         self.observation_space = spaces.Box(
             low=-np.inf, 
             high=np.inf, 
-            shape=(self.n_features, window_size),  # 所有特徵 + 賬戶狀態
+            shape=(self.n_features, window_size),  
             dtype=np.float32
         )
         
@@ -54,16 +67,30 @@ class TradingEnvironment(gym.Env):
         # 獲取歷史數據窗口
         window_data = self.df.iloc[self.current_step - self.window_size:self.current_step]
         
+        # 獲取未來數據窗口
+        future_data = self.df.iloc[self.current_step:self.current_step + self.future_window]
+        
         # 計算特徵矩陣
         obs = np.zeros((self.n_features, self.window_size), dtype=np.float32)
         
-        # 一次性獲取所有價格特徵
-        price_features = window_data.values.T  # 轉置以匹配形狀
-        obs[:len(self.df.columns)] = price_features
+        # 1. 歷史價格特徵
+        # 只使用數值型數據作為特徵
+        price_features = window_data.select_dtypes(include=[np.number]).values.T
+        obs[:self.n_price_features] = price_features
         
-        # 填充賬戶狀態（重複最後的值）
+        # 2. 未來數據特徵
+        future_features = future_data.select_dtypes(include=[np.number]).values.T
+        # 將未來數據填充到觀察空間中
+        future_features_padded = np.pad(
+            future_features,
+            ((0, 0), (0, self.window_size - self.future_window)),
+            mode='edge'  # 使用邊緣值填充
+        )
+        obs[self.n_price_features:self.n_price_features + self.n_future_features] = future_features_padded
+        
+        # 3. 賬戶狀態特徵
+        account_features_start = self.n_price_features + self.n_future_features
         current_data = self.df.iloc[self.current_step]
-        account_features_start = len(self.df.columns)
         
         obs[account_features_start] = np.linspace(0, 1, self.window_size) * (self.current_step / len(self.df)) # 步驟進度
         obs[account_features_start + 1] = np.full(self.window_size, self.btc_held)         # 持倉
@@ -177,8 +204,13 @@ class TradingEnvironment(gym.Env):
         
         # 更新步驟
         self.current_step += 1
-
-        self.done = (self.current_step >= len(self.df) - 1
-                     or self.balance <= self.min_balance)  # 資金不足
+        
+        # 檢查是否結束
+        if self.current_step >= len(self.df) - self.future_window:  # 修改結束條件，考慮未來窗口
+            self.done = True
+            print("達到最大步驟，結束交易")
+        elif self.balance <= (self.min_balance * self.balance):
+            self.done = True
+            print("資金不足，結束交易")
         
         return self._get_observation(), reward, self.done, False, {} 
