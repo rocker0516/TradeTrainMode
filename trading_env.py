@@ -4,7 +4,7 @@ import pandas as pd
 from gymnasium import spaces
 
 class TradingEnvironment(gym.Env):
-    def __init__(self, df, initial_balance=10000, transaction_fee=0.001, window_size=20, leverage = 10, min_balance=0):
+    def __init__(self, df, initial_balance=10000, transaction_fee=0.001, window_size= 24 * 60 //5, leverage = 10, min_balance=0):
         super(TradingEnvironment, self).__init__()
         
         self.df = df    #資料集
@@ -67,7 +67,7 @@ class TradingEnvironment(gym.Env):
         
         obs[account_features_start] = np.linspace(0, 1, self.window_size) * (self.current_step / len(self.df)) # 步驟進度
         obs[account_features_start + 1] = np.full(self.window_size, self.btc_held)         # 持倉
-        obs[account_features_start + 2] = np.full(self.window_size, self.btc_held * current_data['close'] / self.leverage) # 持倉價值 (考慮槓桿)
+        obs[account_features_start + 2] = np.full(self.window_size, self.btc_held * current_data['close']) # 持倉價值
         obs[account_features_start + 3] = np.full(self.window_size, self.total_value)      # 總資產(持倉價值+資金)
         obs[account_features_start + 4] = np.full(self.window_size, self.balance)          # 資金
         
@@ -85,7 +85,18 @@ class TradingEnvironment(gym.Env):
         self.last_total_value = self.total_value
         
         return total_reward
-    
+    # 平倉
+    def _close_position(self, current_price):
+        if self.btc_held == 0:
+            return
+        # 返回保證金（考慮手續費）
+        self.balance += abs(self.btc_held) * current_price * (1 - self.transaction_fee) / self.leverage
+        self.btc_held = 0
+    # 更新倉位(加倉或減倉)
+    def _update_position(self, diff_position, current_price):
+        self.btc_held += diff_position
+        self.balance -= abs(diff_position) * current_price * (1 + self.transaction_fee) / self.leverage
+
     # 執行交易
     def _execute_trade(self, action):
         current_price = self.df.iloc[self.current_step]['close']    # 當前價格
@@ -96,75 +107,55 @@ class TradingEnvironment(gym.Env):
         stop_loss_percent = action[2]    # 止損比例
         
         # 計算目標倉位
-        target_position = self.balance * abs(position_percent) * self.leverage / current_price
+        target_position = self.total_value * position_percent * self.leverage / current_price
         
         
         if position_percent > 0:  # 做多
-
+                
             # 如果達到止盈或止損價格，平倉
-            if current_high >= self.take_profit_price:
-                self.balance += self.btc_held * self.take_profit_price * (1 - self.transaction_fee)
-                self.btc_held = 0
-            elif current_low <= self.stop_loss_price:
-                self.balance += self.btc_held * self.stop_loss_price * (1 - self.transaction_fee)
-                self.btc_held = 0
-
-            if self.btc_held >= 0:  # 當前是多倉或空倉
+            if  current_low <= self.stop_loss_price:
+                self._close_position(self.stop_loss_price)
+            elif current_high >= self.take_profit_price:
+                self._close_position(self.take_profit_price)
+            if self.btc_held >= 0:  # 當前是多倉或無倉位
                 # 計算需要調整的數量
                 position_diff = target_position - self.btc_held
                 if position_diff != 0:
-                    # 更新倉位
-                    self.btc_held += position_diff
-                    # 更新資金（考慮手續費）
-                    self.balance -= position_diff * current_price * (1 + self.transaction_fee)
+                    self._update_position(position_diff, current_price)
             else:  # 當前是空倉，需要平倉後開多
-                # 先平空倉
-                self.balance += abs(self.btc_held) * current_price * (1 - self.transaction_fee)
-                self.btc_held = 0
-                # 開多倉
-                self.btc_held = target_position
-                self.balance -= target_position * current_price * (1 + self.transaction_fee)
+                self._close_position(current_price)
+                self._update_position(target_position, current_price)
                 
         elif position_percent < 0:  # 做空
-            
-            # 如果達到止盈或止損價格，平倉
-            if current_low <= self.take_profit_price:
-                self.balance += abs(self.btc_held) * self.take_profit_price * (1 - self.transaction_fee)
-                self.btc_held = 0
-            elif current_high >= self.stop_loss_price:
-                self.balance += abs(self.btc_held) * self.stop_loss_price * (1 - self.transaction_fee)
-                self.btc_held = 0
 
-            if self.btc_held <= 0:  # 當前是空倉或多倉
+            # 如果達到止盈或止損價格，平倉
+            if  current_high >= self.stop_loss_price:
+                self._close_position(self.stop_loss_price)
+            elif current_low <= self.take_profit_price:
+                self._close_position(self.take_profit_price)
+
+            if self.btc_held <= 0:  # 當前是空倉或無倉位
                 # 計算需要調整的數量
-                position_diff = target_position + self.btc_held
+                position_diff = target_position - self.btc_held
                 if position_diff != 0:
-                    # 更新倉位
-                    self.btc_held -= position_diff
-                    # 更新資金（考慮手續費）
-                    self.balance += position_diff * current_price * (1 - self.transaction_fee)
+                    self._update_position(position_diff, current_price)
             else:  # 當前是多倉，需要平倉後開空
-                # 先平多倉
-                self.balance += self.btc_held * current_price * (1 - self.transaction_fee)
-                self.btc_held = 0
-                # 開空倉
-                self.btc_held = -target_position
-                self.balance += target_position * current_price * (1 - self.transaction_fee)
+                self._close_position(current_price)
+                self._update_position(target_position, current_price)
         
-        # 計算止盈止損價格
-        if self.btc_held > 0:
-            if position_percent > 0:
-                self.take_profit_price = current_price * (1 + take_profit_percent * 0.01)   # 止盈價格 = 當前價格 * (1 + 止盈比例)
-                self.stop_loss_price = current_price * (1 - stop_loss_percent * 0.01)       # 止損價格 = 當前價格 * (1 - 止損比例)
-            elif position_percent < 0:
-                self.take_profit_price = current_price * (1 - take_profit_percent * 0.01)   # 止盈價格 = 當前價格 * (1 - 止盈比例)
-                self.stop_loss_price = current_price * (1 + stop_loss_percent * 0.01)       # 止損價格 = 當前價格 * (1 + 止損比例)
-        else:
+        # 計算止盈止損價格（根據實際持倉方向）
+        if self.btc_held > 0:  # 做多倉位
+            self.take_profit_price = current_price * (1 + take_profit_percent * 0.01)   # 止盈價格 = 當前價格 * (1 + 止盈比例)
+            self.stop_loss_price = current_price * (1 - stop_loss_percent * 0.01)       # 止損價格 = 當前價格 * (1 - 止損比例)
+        elif self.btc_held < 0:  # 做空倉位
+            self.take_profit_price = current_price * (1 - take_profit_percent * 0.01)   # 止盈價格 = 當前價格 * (1 - 止盈比例)
+            self.stop_loss_price = current_price * (1 + stop_loss_percent * 0.01)       # 止損價格 = 當前價格 * (1 + 止損比例)
+        else:  # 無倉位
             self.take_profit_price = 0
             self.stop_loss_price = 0
 
         # 更新總價值
-        self.total_value = self.balance + (self.btc_held * current_price / self.leverage)
+        self.total_value = self.balance + (self.btc_held * current_price)
         
         return current_price
 
