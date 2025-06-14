@@ -2,6 +2,7 @@ import gymnasium as gym
 import numpy as np
 import pandas as pd
 from gymnasium import spaces
+import talib
 
 class TradingEnvironment(gym.Env):
     def __init__(self, df, initial_balance=10000, transaction_fee=0.001, window_size= 24 * 60 //5, leverage = 10, min_balance=0):
@@ -25,7 +26,8 @@ class TradingEnvironment(gym.Env):
         )
         
         # 計算特徵數量
-        self.n_features = len(df.columns) + 5  # 價格特徵 + 賬戶狀態(5個)
+        # 原始價格特徵 + 賬戶狀態(5個) + 時間特徵(5個) + 市場情緒特徵(8個)
+        self.n_features = len(df.columns) + 5 + 5 + 8
         
         # 定義觀察空間
         self.observation_space = spaces.Box(
@@ -36,6 +38,89 @@ class TradingEnvironment(gym.Env):
         )
         
         self.reset()
+    
+    def _calculate_market_sentiment_features(self, window_data):
+        """計算市場情緒特徵"""
+        close_prices = window_data['close'].values
+        high_prices = window_data['high'].values
+        low_prices = window_data['low'].values
+        volume = window_data['volume'].values if 'volume' in window_data.columns else np.ones_like(close_prices)
+        
+        # 創建特徵數組
+        sentiment_features = np.zeros((8, len(close_prices)), dtype=np.float32)
+        
+        # 1. RSI (相對強弱指數) - 14期
+        if len(close_prices) >= 14:
+            rsi = talib.RSI(close_prices, timeperiod=14)
+            sentiment_features[0] = np.nan_to_num(rsi, nan=50.0) / 100.0  # 標準化到0-1
+        
+        # 2. MACD 信號
+        if len(close_prices) >= 26:
+            macd, macd_signal, macd_hist = talib.MACD(close_prices)
+            sentiment_features[1] = np.nan_to_num(macd_hist, nan=0.0)  # MACD柱狀圖
+        
+        # 3. 布林帶位置 (價格在布林帶中的相對位置)
+        if len(close_prices) >= 20:
+            bb_upper, bb_middle, bb_lower = talib.BBANDS(close_prices, timeperiod=20)
+            bb_position = (close_prices - bb_lower) / (bb_upper - bb_lower)
+            sentiment_features[2] = np.nan_to_num(bb_position, nan=0.5)
+        
+        # 4. 價格變化率 (ROC) - 10期
+        if len(close_prices) >= 10:
+            roc = talib.ROC(close_prices, timeperiod=10)
+            sentiment_features[3] = np.nan_to_num(roc, nan=0.0) / 100.0  # 標準化
+        
+        # 5. 成交量變化率
+        if len(volume) >= 10:
+            volume_roc = talib.ROC(volume, timeperiod=10)
+            sentiment_features[4] = np.nan_to_num(volume_roc, nan=0.0) / 100.0
+        
+        # 6. ATR (平均真實波動幅度) - 標準化
+        if len(close_prices) >= 14:
+            atr = talib.ATR(high_prices, low_prices, close_prices, timeperiod=14)
+            atr_pct = atr / close_prices  # 轉換為百分比
+            sentiment_features[5] = np.nan_to_num(atr_pct, nan=0.01)
+        
+        # 7. 威廉姆斯%R
+        if len(close_prices) >= 14:
+            williams_r = talib.WILLR(high_prices, low_prices, close_prices, timeperiod=14)
+            sentiment_features[6] = np.nan_to_num(williams_r, nan=-50.0) / -100.0  # 標準化到0-1
+        
+        # 8. 隨機指標 %K
+        if len(close_prices) >= 14:
+            slowk, slowd = talib.STOCH(high_prices, low_prices, close_prices, 
+                                     fastk_period=14, slowk_period=3, slowd_period=3)
+            sentiment_features[7] = np.nan_to_num(slowk, nan=50.0) / 100.0  # 標準化到0-1
+        
+        return sentiment_features
+    
+    def _calculate_time_features(self, window_data):
+        """計算時間特徵"""
+        # 確保索引是 datetime 類型
+        if not isinstance(window_data.index, pd.DatetimeIndex):
+            # 如果沒有時間索引，創建一個虛擬的時間序列
+            timestamps = pd.date_range(start='2023-01-01', periods=len(window_data), freq='5T')
+        else:
+            timestamps = window_data.index
+        
+        time_features = np.zeros((5, len(window_data)), dtype=np.float32)
+        
+        # 1. 小時 (0-23) -> 標準化到 0-1
+        time_features[0] = timestamps.hour / 23.0
+        
+        # 2. 分鐘 (0-59) -> 標準化到 0-1  
+        time_features[1] = timestamps.minute / 59.0
+        
+        # 3. 星期幾 (0-6) -> 標準化到 0-1
+        time_features[2] = timestamps.dayofweek / 6.0
+        
+        # 4. 月份中的第幾天 (1-31) -> 標準化到 0-1
+        time_features[3] = (timestamps.day - 1) / 30.0
+        
+        # 5. 月份 (1-12) -> 標準化到 0-1
+        time_features[4] = (timestamps.month - 1) / 11.0
+        
+        return time_features
     
     def reset(self, seed=None):
         super().reset(seed=seed)
@@ -57,19 +142,31 @@ class TradingEnvironment(gym.Env):
         # 計算特徵矩陣
         obs = np.zeros((self.n_features, self.window_size), dtype=np.float32)
         
-        # 一次性獲取所有價格特徵
+        # 1. 一次性獲取所有價格特徵
         price_features = window_data.values.T  # 轉置以匹配形狀
         obs[:len(self.df.columns)] = price_features
         
-        # 填充賬戶狀態（重複最後的值）
-        current_data = self.df.iloc[self.current_step]
-        account_features_start = len(self.df.columns)
+        feature_idx = len(self.df.columns)
         
-        obs[account_features_start] = np.linspace(0, 1, self.window_size) * (self.current_step / len(self.df)) # 步驟進度
-        obs[account_features_start + 1] = np.full(self.window_size, self.btc_held)         # 持倉
-        obs[account_features_start + 2] = np.full(self.window_size, self.btc_held * current_data['close']) # 持倉價值
-        obs[account_features_start + 3] = np.full(self.window_size, self.total_value)      # 總資產(持倉價值+資金)
-        obs[account_features_start + 4] = np.full(self.window_size, self.balance)          # 資金
+        # 2. 填充賬戶狀態（重複最後的值）
+        current_data = self.df.iloc[self.current_step]
+        
+        obs[feature_idx] = np.linspace(0, 1, self.window_size) * (self.current_step / len(self.df)) # 步驟進度
+        obs[feature_idx + 1] = np.full(self.window_size, self.btc_held)         # 持倉
+        obs[feature_idx + 2] = np.full(self.window_size, self.btc_held * current_data['close']) # 持倉價值
+        obs[feature_idx + 3] = np.full(self.window_size, self.total_value)      # 總資產(持倉價值+資金)
+        obs[feature_idx + 4] = np.full(self.window_size, self.balance)          # 資金
+        
+        feature_idx += 5
+        
+        # 3. 添加時間特徵
+        time_features = self._calculate_time_features(window_data)
+        obs[feature_idx:feature_idx + 5] = time_features
+        feature_idx += 5
+        
+        # 4. 添加市場情緒特徵
+        sentiment_features = self._calculate_market_sentiment_features(window_data)
+        obs[feature_idx:feature_idx + 8] = sentiment_features
         
         return obs
     
