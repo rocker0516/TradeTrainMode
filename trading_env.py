@@ -99,7 +99,7 @@ class TradingEnvironment(gym.Env):
         # 確保索引是 datetime 類型
         if not isinstance(window_data.index, pd.DatetimeIndex):
             # 如果沒有時間索引，創建一個虛擬的時間序列
-            timestamps = pd.date_range(start='2023-01-01', periods=len(window_data), freq='5T')
+            timestamps = pd.date_range(start='2023-01-01', periods=len(window_data), freq='5min')
         else:
             timestamps = window_data.index
         
@@ -242,11 +242,11 @@ class TradingEnvironment(gym.Env):
         
         # 計算止盈止損價格（根據實際持倉方向）
         if self.btc_held > 0:  # 做多倉位
-            self.take_profit_price = current_price * (1 + take_profit_percent * 0.01)   # 止盈價格 = 當前價格 * (1 + 止盈比例)
-            self.stop_loss_price = current_price * (1 - stop_loss_percent * 0.01)       # 止損價格 = 當前價格 * (1 - 止損比例)
+            self.take_profit_price = current_price * (1 + take_profit_percent )   # 止盈價格 = 當前價格 * (1 + 止盈比例)
+            self.stop_loss_price = current_price * (1 - stop_loss_percent )       # 止損價格 = 當前價格 * (1 - 止損比例)
         elif self.btc_held < 0:  # 做空倉位
-            self.take_profit_price = current_price * (1 - take_profit_percent * 0.01)   # 止盈價格 = 當前價格 * (1 - 止盈比例)
-            self.stop_loss_price = current_price * (1 + stop_loss_percent * 0.01)       # 止損價格 = 當前價格 * (1 + 止損比例)
+            self.take_profit_price = current_price * (1 - take_profit_percent )   # 止盈價格 = 當前價格 * (1 - 止盈比例)
+            self.stop_loss_price = current_price * (1 + stop_loss_percent )       # 止損價格 = 當前價格 * (1 + 止損比例)
         else:  # 無倉位
             self.take_profit_price = 0
             self.stop_loss_price = 0
