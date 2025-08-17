@@ -16,12 +16,16 @@ class TradingEnvironment(gym.Env):
         self.min_balance = min_balance  # 最小資金(資金不足時強制結束)
         self.stop_loss_price = 0.0    # 止損價格
         self.take_profit_price = 0.0    # 止盈價格
+        self.entry_price = 0.0      # 平均進場價格
+        self.margin_used = 0.0      # 已用保證金
+        self.long_trades = 0
+        self.short_trades = 0
 
         # 定義動作空間
-        # [交易方向(0:不動作, 1:做多, -1:做空), 止盈比例(0-1000%), 止損比例(10-30%)]
+        # [交易方向(-1:做空, 1:做多), 倉位百分比(0-1), 止盈比例(0.2-10%), 止損比例(0.1-30%)]
         self.action_space = spaces.Box(
-            low=np.array([-1.0, 0.2, 0.1]),  
-            high=np.array([1.0, 10, 0.3]), #(動作方向，止盈，止損)
+            low=np.array([-1.0, 0.0, 0.2, 0.1]),  
+            high=np.array([1.0, 1.0, 10.0, 30.0]), #(動作方向, 倉位大小, 止盈%, 止損%)
             dtype=np.float32
         )
         
@@ -41,10 +45,10 @@ class TradingEnvironment(gym.Env):
     
     def _calculate_market_sentiment_features(self, window_data):
         """計算市場情緒特徵"""
-        close_prices = window_data['close'].values
-        high_prices = window_data['high'].values
-        low_prices = window_data['low'].values
-        volume = window_data['volume'].values if 'volume' in window_data.columns else np.ones_like(close_prices)
+        close_prices = window_data['close'].values.astype(np.float64)
+        high_prices = window_data['high'].values.astype(np.float64)
+        low_prices = window_data['low'].values.astype(np.float64)
+        volume = window_data['volume'].values.astype(np.float64) if 'volume' in window_data.columns else np.ones_like(close_prices)
         
         # 創建特徵數組
         sentiment_features = np.zeros((8, len(close_prices)), dtype=np.float32)
@@ -57,12 +61,24 @@ class TradingEnvironment(gym.Env):
         # 2. MACD 信號
         if len(close_prices) >= 26:
             macd, macd_signal, macd_hist = talib.MACD(close_prices)
-            sentiment_features[1] = np.nan_to_num(macd_hist, nan=0.0)  # MACD柱狀圖
+            # 將 macd_hist 標準化，使其成為與價格相關的相對值
+            safe_close_prices = np.copy(close_prices)
+            safe_close_prices[safe_close_prices == 0] = 1 # 避免除以零
+            normalized_macd_hist = macd_hist / safe_close_prices
+            sentiment_features[1] = np.nan_to_num(normalized_macd_hist, nan=0.0)
         
         # 3. 布林帶位置 (價格在布林帶中的相對位置)
         if len(close_prices) >= 20:
             bb_upper, bb_middle, bb_lower = talib.BBANDS(close_prices, timeperiod=20)
-            bb_position = (close_prices - bb_lower) / (bb_upper - bb_lower)
+            bb_range = bb_upper - bb_lower
+            
+            # 建立一個預設值為0.5的數組 (代表價格在中間)
+            bb_position = np.full_like(bb_range, 0.5, dtype=np.float64)
+            
+            # 僅在布林帶寬度不為零時，才進行除法運算
+            non_zero_mask = bb_range != 0
+            bb_position[non_zero_mask] = (close_prices[non_zero_mask] - bb_lower[non_zero_mask]) / bb_range[non_zero_mask]
+            
             sentiment_features[2] = np.nan_to_num(bb_position, nan=0.5)
         
         # 4. 價格變化率 (ROC) - 10期
@@ -132,6 +148,10 @@ class TradingEnvironment(gym.Env):
         self.last_action = 0  # 記錄上一次的動作
         self.position_holding_time = 0  # 記錄持倉時間
         self.last_total_value = self.initial_balance  # 記錄上一次的總資產
+        self.entry_price = 0.0 # 重置進場價格
+        self.margin_used = 0.0 # 重置已用保證金
+        self.long_trades = 0
+        self.short_trades = 0
         
         return self._get_observation(), {}
     
@@ -183,76 +203,112 @@ class TradingEnvironment(gym.Env):
         
         return total_reward
     # 平倉
-    def _close_position(self, current_price):
+    def _close_position(self, price):
         if self.btc_held == 0:
             return
-        # 返回保證金（考慮手續費）
-        self.balance += abs(self.btc_held) * current_price * (1 - self.transaction_fee) / self.leverage
+
+        # 1. 計算已實現損益
+        pnl = self.btc_held * (price - self.entry_price)
+        
+        # 2. 計算平倉手續費
+        closing_fee = abs(self.btc_held) * price * self.transaction_fee
+        
+        # 3. 更新餘額：返還保證金 + 已實現損益 - 平倉手續費
+        self.balance += self.margin_used + pnl - closing_fee
+        
+        # 4. 重置倉位資訊
         self.btc_held = 0
-    # 更新倉位(加倉或減倉)
-    def _update_position(self, diff_position, current_price):
-        self.btc_held += diff_position
-        self.balance -= abs(diff_position) * current_price * (1 + self.transaction_fee) / self.leverage
+        self.entry_price = 0
+        self.margin_used = 0
+
+    # 開倉
+    def _open_position(self, target_position, price):
+        # 1. 計算開倉費用和保證金
+        fee = abs(target_position) * price * self.transaction_fee
+        self.margin_used = abs(target_position) * price / self.leverage
+        
+        # 2. 檢查資金是否充足
+        if self.balance < (self.margin_used + fee):
+            # print("資金不足，無法開倉") # 可選的除錯信息
+            self.done = True
+            return
+
+        # 3. 更新餘額
+        self.balance -= (self.margin_used + fee)
+        
+        # 4. 設定倉位
+        self.btc_held = target_position
+        self.entry_price = price
+        if target_position > 0:
+            self.long_trades += 1
+        elif target_position < 0:
+            self.short_trades += 1
 
     # 執行交易
     def _execute_trade(self, action):
         current_price = self.df.iloc[self.current_step]['close']    # 當前價格
         current_high = self.df.iloc[self.current_step]['high']    # 當前最高價
         current_low = self.df.iloc[self.current_step]['low']    # 當前最低價
-        position_percent = action[0]    # 交易方向（正負）和倉位百分比
-        take_profit_percent = action[1]    # 止盈比例
-        stop_loss_percent = action[2]    # 止損比例
         
-        # 計算目標倉位
-        target_position = self.total_value * position_percent * self.leverage / current_price
-        
-        
-        if position_percent > 0:  # 做多
-                
-            # 如果達到止盈或止損價格，平倉
-            if  current_low <= self.stop_loss_price:
+        # --- 止盈止損檢查 (應在所有交易決策之前) ---
+        if self.btc_held > 0:  # 多倉止盈止損
+            if self.stop_loss_price > 0 and current_low <= self.stop_loss_price:
                 self._close_position(self.stop_loss_price)
-            elif current_high >= self.take_profit_price:
+                # 觸發後，重置倉位相關目標，避免在本步做出錯誤決策
+                self.btc_held = 0 
+            elif self.take_profit_price > 0 and current_high >= self.take_profit_price:
                 self._close_position(self.take_profit_price)
-            if self.btc_held >= 0:  # 當前是多倉或無倉位
-                # 計算需要調整的數量
-                position_diff = target_position - self.btc_held
-                if position_diff != 0:
-                    self._update_position(position_diff, current_price)
-            else:  # 當前是空倉，需要平倉後開多
-                self._close_position(current_price)
-                self._update_position(target_position, current_price)
-                
-        elif position_percent < 0:  # 做空
-
-            # 如果達到止盈或止損價格，平倉
-            if  current_high >= self.stop_loss_price:
+                self.btc_held = 0
+        elif self.btc_held < 0: # 空倉止盈止損
+            if self.stop_loss_price > 0 and current_high >= self.stop_loss_price:
                 self._close_position(self.stop_loss_price)
-            elif current_low <= self.take_profit_price:
+                self.btc_held = 0
+            elif self.take_profit_price > 0 and current_low <= self.take_profit_price:
                 self._close_position(self.take_profit_price)
+                self.btc_held = 0
 
-            if self.btc_held <= 0:  # 當前是空倉或無倉位
-                # 計算需要調整的數量
-                position_diff = target_position - self.btc_held
-                if position_diff != 0:
-                    self._update_position(position_diff, current_price)
-            else:  # 當前是多倉，需要平倉後開空
-                self._close_position(current_price)
-                self._update_position(target_position, current_price)
+        # --- 根據 Action 計算目標倉位 ---
+        position_direction = action[0]  # -1 (空) to 1 (多)
+        position_percent = action[1]    # 0 to 1
+        take_profit_percent = action[2] # e.g., 5 for 5%
+        stop_loss_percent = action[3]   # e.g., 2 for 2%
         
-        # 計算止盈止損價格（根據實際持倉方向）
-        if self.btc_held > 0:  # 做多倉位
-            self.take_profit_price = current_price * (1 + take_profit_percent * 0.01)   # 止盈價格 = 當前價格 * (1 + 止盈比例)
-            self.stop_loss_price = current_price * (1 - stop_loss_percent * 0.01)       # 止損價格 = 當前價格 * (1 - 止損比例)
-        elif self.btc_held < 0:  # 做空倉位
-            self.take_profit_price = current_price * (1 - take_profit_percent * 0.01)   # 止盈價格 = 當前價格 * (1 - 止盈比例)
-            self.stop_loss_price = current_price * (1 + stop_loss_percent * 0.01)       # 止損價格 = 當前價格 * (1 + 止損比例)
+        signed_position_percent = position_direction * position_percent
+        
+        # 根據當前淨值計算目標倉位
+        equity = self.balance + self.margin_used # 在交易決策前的總資產
+        target_position = equity * signed_position_percent * self.leverage / current_price
+        
+        # --- 執行倉位調整 ---
+        # 只有在目標倉位與現有倉位不同時，才執行平倉和開倉
+        if not np.isclose(target_position, self.btc_held):
+            # 1. 如果有現有倉位，先平倉
+            if self.btc_held != 0:
+                self._close_position(current_price)
+            
+            # 2. 如果目標倉位不為零，開新倉
+            if not np.isclose(target_position, 0):
+                self._open_position(target_position, current_price)
+
+        # --- 更新止盈止損價格 (基於新的開倉價) ---
+        if self.btc_held != 0 and self.entry_price > 0:
+            if self.btc_held > 0:  # 做多倉位
+                self.take_profit_price = self.entry_price * (1 + take_profit_percent * 0.01)
+                self.stop_loss_price = self.entry_price * (1 - stop_loss_percent * 0.01)
+            else:  # 做空倉位
+                self.take_profit_price = self.entry_price * (1 - take_profit_percent * 0.01)
+                self.stop_loss_price = self.entry_price * (1 + stop_loss_percent * 0.01)
         else:  # 無倉位
             self.take_profit_price = 0
             self.stop_loss_price = 0
 
-        # 更新總價值
-        self.total_value = self.balance + (self.btc_held * current_price)
+        # --- 核心修改：修正 total_value 的計算 ---
+        # 總資產(淨值) = 可用餘額 + 已用保證金 + 未實現損益
+        unrealized_pnl = 0
+        if self.btc_held != 0:
+            unrealized_pnl = self.btc_held * (current_price - self.entry_price)
+        
+        self.total_value = self.balance + self.margin_used + unrealized_pnl
         
         return current_price
 
@@ -269,4 +325,9 @@ class TradingEnvironment(gym.Env):
         self.done = (self.current_step >= len(self.df) - 1
                      or self.balance <= self.min_balance)  # 資金不足
         
-        return self._get_observation(), reward, self.done, False, {} 
+        info = {}
+        if self.done:
+            info['long_trades'] = self.long_trades
+            info['short_trades'] = self.short_trades
+            
+        return self._get_observation(), reward, self.done, False, info 

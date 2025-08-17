@@ -1,0 +1,14 @@
+# Core ML/RL Libraries
+torch
+gymnasium
+
+# Data Handling & Numerics
+pandas
+numpy
+TA-Lib
+
+# Testing
+pytest
+
+# Plotting
+matplotlib 
