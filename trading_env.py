@@ -8,7 +8,19 @@ class TradingEnvironment(gym.Env):
                  reward_weights=None):
         super(TradingEnvironment, self).__init__()
         
-        self.df = df    #資料集
+        # 只保留數值列，並確保包含必要的OHLCV列
+        required_columns = ['open', 'high', 'low', 'close', 'volume']
+        
+        # 檢查必要列是否存在
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            raise ValueError(f"數據缺少必要列: {missing_columns}")
+        
+        # 過濾數值列
+        numeric_columns = df.select_dtypes(include=[np.number]).columns
+        self.df = df[numeric_columns].copy()  # 只保留數值列
+        
+        print(f"使用的數據列: {list(self.df.columns)}")
         self.initial_balance = initial_balance  # 初始資金
         self.transaction_fee = transaction_fee  # 交易手續費
         self.window_size = window_size # 窗口大小(K線數量)
@@ -18,13 +30,14 @@ class TradingEnvironment(gym.Env):
         self.stop_loss_price = 0.0    # 止損價格
         self.take_profit_price = 0.0    # 止盈價格
         
-        # 獎勵權重配置
+        # 獎勵權重配置（添加風險管理）
         default_weights = {
-            'pnl': 0.6,         # PnL獎勵權重
-            'entry': 0.2,       # 進場質量權重  
-            'stop': 0.1,        # 止盈止損權重
-            'holding': 0.05,    # 持倉管理權重
-            'penalty': 0.05     # 交易懲罰權重
+            'pnl': 0.4,              # PnL獎勵權重 (降低)
+            'entry': 0.15,           # 進場質量權重  
+            'stop': 0.1,             # 止盈止損權重
+            'holding': 0.05,         # 持倉管理權重
+            'penalty': 0.05,         # 交易懲罰權重
+            'risk_management': 0.25  # 風險管理權重 (新增，重要！)
         }
         self.reward_weights = reward_weights if reward_weights is not None else default_weights
         
@@ -98,10 +111,10 @@ class TradingEnvironment(gym.Env):
         # 1. 一次性獲取所有價格特徵（正規化）
         price_features = window_data.values.T  # 轉置以匹配形狀
         
-        # 正規化價格特徵（使用窗口內的最大最小值）
+        # 正規化價格特徵（現在所有列都是數值列）
         for i in range(len(self.df.columns)):
             feature_data = price_features[i]
-            if feature_data.max() != feature_data.min():
+            if len(feature_data) > 0 and feature_data.max() != feature_data.min():
                 price_features[i] = (feature_data - feature_data.min()) / (feature_data.max() - feature_data.min())
             else:
                 price_features[i] = np.zeros_like(feature_data)
@@ -162,7 +175,8 @@ class TradingEnvironment(gym.Env):
             'entry': 0.0,
             'stop': 0.0,
             'holding': 0.0,
-            'penalty': 0.0
+            'penalty': 0.0,
+            'risk_management': 0.0  # 新增風險管理獎勵
         }
         
         # 1. PnL獎勵（平倉時）
@@ -190,12 +204,16 @@ class TradingEnvironment(gym.Env):
             penalty_score = -self.transaction_fee * 0.5
             reward_components['penalty'] = self._normalize_penalty(penalty_score)
         
-        # 6. 加權合成最終獎勵
+        # 6. 風險管理獎勵/懲罰
+        risk_score = self._calculate_risk_management_reward(action)
+        reward_components['risk_management'] = risk_score
+        
+        # 7. 加權合成最終獎勵
         total_reward = 0.0
         for component, weight in self.reward_weights.items():
             total_reward += reward_components[component] * weight
         
-        # 7. 最終裁剪到合理範圍
+        # 8. 最終裁剪到合理範圍
         total_reward = np.clip(total_reward, 
                               -self.reward_normalization['clip_range'], 
                               self.reward_normalization['clip_range'])
@@ -332,8 +350,18 @@ class TradingEnvironment(gym.Env):
         # 更新步驟
         self.current_step += 1
 
-        self.done = (self.current_step >= len(self.df) - 1
-                     or self.balance <= self.min_balance)  # 資金不足
+        # 檢查結束條件並記錄原因
+        data_exhausted = self.current_step >= len(self.df) - 1
+        balance_insufficient = self.total_value <= self.min_balance
+        
+        self.done = data_exhausted or balance_insufficient
+        
+        # 調試：記錄結束原因
+        if self.done:
+            if data_exhausted:
+                print(f"Episode結束：數據用完 (step={self.current_step}, data_len={len(self.df)})")
+            if balance_insufficient:
+                print(f"Episode結束：資金不足 (balance={self.balance:.2f}, min={self.min_balance})")
         
         # 確保不會超出數據範圍
         if self.current_step >= len(self.df):
@@ -468,4 +496,55 @@ class TradingEnvironment(gym.Env):
         if self.position_holding_time > 100:  # 超過100個time steps
             holding_reward -= 0.0001 * (self.position_holding_time - 100)
         
-        return holding_reward 
+        return holding_reward
+    
+    def _calculate_risk_management_reward(self, action):
+        """計算風險管理獎勵/懲罰"""
+        risk_reward = 0.0
+        current_price = self.df.iloc[self.current_step]['close']
+        
+        # 1. 破產風險懲罰 - 最重要！
+        balance_ratio = self.total_value / self.initial_balance
+        
+        if balance_ratio > 1.0:  # 盈利獎勵
+            risk_reward += 0.05 * (balance_ratio - 1.0)
+        elif balance_ratio > 0.8:  # 資產保持良好
+            risk_reward += 0.01
+        elif balance_ratio < 0.5:  # 資產剩餘不到50%
+            risk_reward -= 0.2 * (0.5 - balance_ratio)  # 中等懲罰
+        elif balance_ratio < 0.2:  # 資產剩餘不到20%
+            risk_reward -= 0.5  # 強烈懲罰
+        
+        if self.total_value <= self.min_balance:  # 破產
+            risk_reward -= 1.0  # 最強懲罰（但不要過度）
+        
+        # 2. 槓桿使用懲罰
+        if self.btc_held != 0:
+            position_value = abs(self.btc_held * current_price)
+            leverage_used = position_value / self.total_value if self.total_value > 0 else 10
+            
+            if leverage_used > 0.8:  # 使用超過80%資金
+                risk_reward -= 0.1 * (leverage_used - 0.8)
+            
+            if leverage_used > 0.95:  # 使用超過95%資金
+                risk_reward -= 0.5  # 強烈懲罰高風險
+        
+        # 3. 保守交易獎勵
+        position_percent = abs(action[0])
+        if position_percent < 0.3:  # 保守倉位
+            risk_reward += 0.01
+        elif position_percent > 0.8:  # 激進倉位
+            risk_reward -= 0.05
+        
+        # 4. 止損設置獎勵
+        stop_loss_percent = action[2]
+        if stop_loss_percent > 1.0:  # 設置了合理的止損
+            risk_reward += 0.005
+        elif stop_loss_percent < 0.5:  # 止損設置過小
+            risk_reward -= 0.002
+        
+        # 5. 生存獎勵 - 每活一步給小獎勵
+        if self.total_value > self.initial_balance * 0.8:  # 資產保持在80%以上
+            risk_reward += 0.001
+        
+        return risk_reward 
