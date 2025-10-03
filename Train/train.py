@@ -291,16 +291,13 @@ def main():
     parser.add_argument('--end_date', type=int, required=True, help='結束日期')
     
     # 指定用於並行訓練的向量化環境數量的參數。
-    parser.add_argument('--vec_envs', type=int, default=16)
+    parser.add_argument('--vec_envs', type=int, default=16, help='並行環境數量')
     
-    # 指定訓練的總步數的參數。
-    parser.add_argument('--total_timesteps', type=int, default=100000)  # 總訓練步數
+    # 指定訓練的回合數的參數（每個環境跑的回合數）【必需】
+    parser.add_argument('--episodes', type=int, required=True, help='每個環境訓練的回合數（必需參數）')
     
-    # 指定訓練的回合數的參數（每個環境平均跑的回合數）。若 >0，總回合數 = episodes × vec_envs
-    parser.add_argument('--episodes', type=int, default=0, help='>0 時以回合數為停止條件（每個環境平均跑此數量）')
-    
-    # 指定每回合的最大步數的參數。用於設置每回合的時間限制。
-    parser.add_argument('--episode_steps', type=int, default=0, help='每回合最大步數（TimeLimit）')
+    # 指定每回合的最大步數的參數【必需】
+    parser.add_argument('--episode_steps', type=int, required=True, help='每回合最大步數（必需參數）')
     
     # 指定窗口大小的參數，決定每次觀察使用的數據點數量。
     parser.add_argument('--window_size', type=int, default=288)
@@ -376,24 +373,28 @@ def main():
         policy_kwargs=policy_kwargs,
     )#創建 SAC 模型
 
-    # 停止條件：以回合數優先
-    callbacks = []
-    total_episodes_target = None
-    if args.episodes and args.episodes > 0:
-        # 總回合數 = 每環境回合數 × 環境數
-        total_episodes_target = args.episodes * args.vec_envs
-        callbacks.append(StopTrainingOnMaxEpisodes(max_episodes=total_episodes_target, verbose=1))
-        print(f"訓練目標：{args.episodes} 回合/環境 × {args.vec_envs} 環境 = {total_episodes_target} 總回合")
-    callback = CallbackList(callbacks) if len(callbacks) > 1 else (callbacks[0] if callbacks else None)
-
-    # 估算 timesteps 上限（實際由 callback 截止）
-    if total_episodes_target and args.episode_steps > 0:
-        estimated_steps = total_episodes_target * args.episode_steps * 2  # 2 倍保險
-    else:
-        estimated_steps = args.total_timesteps
-
+    # 計算訓練總步數：vec_envs × episodes × episode_steps
+    total_episodes = args.vec_envs * args.episodes
+    total_timesteps = total_episodes * args.episode_steps
+    
+    # 訓練參數摘要
+    print(f"\n{'='*60}")
+    print(f"訓練配置摘要")
+    print(f"{'='*60}")
+    print(f"並行環境數：{args.vec_envs}")
+    print(f"每環境回合數：{args.episodes}")
+    print(f"每回合步數：{args.episode_steps}")
+    print(f"總回合數：{total_episodes} (= {args.vec_envs} × {args.episodes})")
+    print(f"總訓練步數：{total_timesteps:,} (= {args.vec_envs} × {args.episodes} × {args.episode_steps})")
+    print(f"{'='*60}\n")
+    
+    # 設置停止條件：以回合數為準
+    callbacks = [StopTrainingOnMaxEpisodes(max_episodes=total_episodes, verbose=1)]
+    callback = callbacks[0]
+    
+    # 訓練（留 20% 緩衝以防提前結束）
     start = time.time()
-    model.learn(total_timesteps=estimated_steps, progress_bar=True, callback=callback)
+    model.learn(total_timesteps=int(total_timesteps * 1.2), progress_bar=True, callback=callback)
     elapsed = time.time() - start
     print(f"Training finished in {elapsed/60:.2f} min")
 
