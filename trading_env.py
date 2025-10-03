@@ -25,19 +25,19 @@ class TradingEnvironment(gym.Env):
         self.transaction_fee = transaction_fee  # 交易手續費
         self.window_size = window_size # 窗口大小(K線數量)
         self.leverage = leverage    #槓桿倍數
-        self.min_balance = min_balance  # 最小資金(資金不足時強制結束)
+        self.min_balance = max(min_balance, 100)  # 最小資金(資金不足時強制結束，至少 100)
         self.min_trade_amount = min_trade_amount  # 最低交易金額(USDT)
         self.stop_loss_price = 0.0    # 止損價格
         self.take_profit_price = 0.0    # 止盈價格
         
-        # 獎勵權重配置（添加風險管理）
+        # 獎勵權重配置（添加風險管理與交易頻率）
         default_weights = {
-            'pnl': 0.4,              # PnL獎勵權重 (降低)
-            'entry': 0.15,           # 進場質量權重  
-            'stop': 0.1,             # 止盈止損權重
-            'holding': 0.05,         # 持倉管理權重
-            'penalty': 0.05,         # 交易懲罰權重
-            'risk_management': 0.25  # 風險管理權重 (新增，重要！)
+            'pnl': 0.4,              # PnL獎勵權重（提高，收益率優先！）
+            'entry': 0.05,           # 進場質量權重  
+            'stop': 0.05,            # 止盈止損權重
+            'holding': 0.03,         # 持倉管理權重
+            'penalty': 0.02,         # 交易懲罰權重（降低以鼓勵交易）
+            'risk_management': 0.45  # 風險管理權重（仍重要但讓位給 PnL）
         }
         self.reward_weights = reward_weights if reward_weights is not None else default_weights
         
@@ -77,7 +77,7 @@ class TradingEnvironment(gym.Env):
         
         self.reset()
     
-    def reset(self, seed=None):
+    def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.current_step = self.window_size  # 從window_size開始，確保有足夠的歷史數據
         self.balance = self.initial_balance
@@ -127,10 +127,17 @@ class TradingEnvironment(gym.Env):
         current_data = self.df.iloc[self.current_step]
         
         obs[feature_idx] = np.linspace(0, 1, self.window_size) * (self.current_step / len(self.df)) # 步驟進度
-        obs[feature_idx + 1] = np.full(self.window_size, self.btc_held / (self.initial_balance / current_data['close']))  # 持倉（正規化）
-        obs[feature_idx + 2] = np.full(self.window_size, (self.btc_held * current_data['close']) / self.initial_balance) # 持倉價值（正規化）
-        obs[feature_idx + 3] = np.full(self.window_size, self.total_value / self.initial_balance)      # 總資產（正規化）
-        obs[feature_idx + 4] = np.full(self.window_size, self.balance / self.initial_balance)          # 資金（正規化）
+        
+        # 安全除法與正規化（避免 NaN）
+        close_price = float(current_data['close'])
+        max_position = (self.initial_balance / close_price) if close_price > 0 else 1.0
+        obs[feature_idx + 1] = np.full(self.window_size, np.clip(self.btc_held / max_position, -10, 10))  # 持倉（正規化）
+        obs[feature_idx + 2] = np.full(self.window_size, np.clip((self.btc_held * close_price) / self.initial_balance, -10, 10)) # 持倉價值（正規化）
+        obs[feature_idx + 3] = np.full(self.window_size, np.clip(self.total_value / self.initial_balance, -10, 10))      # 總資產（正規化）
+        obs[feature_idx + 4] = np.full(self.window_size, np.clip(self.balance / self.initial_balance, 0, 10))          # 資金（正規化）
+        
+        # 最終 NaN 檢查與修正
+        obs = np.nan_to_num(obs, nan=0.0, posinf=10.0, neginf=-10.0)
         
         return obs
     
@@ -199,10 +206,18 @@ class TradingEnvironment(gym.Env):
             holding_score = self._evaluate_holding_decision()
             reward_components['holding'] = self._normalize_holding_reward(holding_score)
         
-        # 5. 交易頻率懲罰
+        # 5. 交易頻率獎勵/懲罰（輕度鼓勵有效交易）
         if abs(action[0]) > 0.05:  # 有交易行為
-            penalty_score = -self.transaction_fee * 0.5
-            reward_components['penalty'] = self._normalize_penalty(penalty_score)
+            # 盈利交易：明顯獎勵
+            if self._position_closed_this_step() and self._calculate_closed_trade_pnl() > 0:
+                penalty_score = 0.001  # 盈利交易獎勵（提高 10 倍）
+            # 開倉：小獎勵鼓勵
+            elif self._just_opened_position():
+                penalty_score = 0.0005  # 開倉小獎勵（提高 10 倍）
+            # 一般交易：輕微懲罰（手續費成本）
+            else:
+                penalty_score = -self.transaction_fee * 0.2  # 進一步降低懲罰
+            reward_components['penalty'] = self._normalize_penalty(penalty_score) if penalty_score < 0 else np.clip(penalty_score * 50, 0, 0.1)
         
         # 6. 風險管理獎勵/懲罰
         risk_score = self._calculate_risk_management_reward(action)
@@ -231,8 +246,24 @@ class TradingEnvironment(gym.Env):
         # 記錄平倉交易信息
         self._track_trade_close(current_price)
         
-        # 返回保證金（考慮手續費）
-        self.balance += abs(self.btc_held) * current_price * (1 - self.transaction_fee) / self.leverage
+        # 簡化平倉：直接結算總資產，避免累積誤差
+        position_size = abs(self.btc_held)
+        
+        # 計算平倉後總資產（含盈虧與手續費）
+        if self.btc_held > 0:  # 做多
+            pnl = (current_price - self.avg_entry_price) * position_size
+        else:  # 做空
+            pnl = (self.avg_entry_price - current_price) * position_size
+        
+        # 扣除手續費
+        exit_fee = position_size * current_price * self.transaction_fee / self.leverage
+        net_pnl = pnl - exit_fee
+        
+        # 返還鎖定的保證金並結算盈虧
+        margin_locked = position_size * self.avg_entry_price / self.leverage
+        self.balance += margin_locked + net_pnl
+        self.balance = np.clip(self.balance, 0, self.initial_balance * 1000)  # 上限保護避免溢出
+        
         self.btc_held = 0
         self.avg_entry_price = 0
 
@@ -245,13 +276,18 @@ class TradingEnvironment(gym.Env):
         if trade_amount < self.min_trade_amount:
             return  # 不執行交易
         
-        # 記錄開倉信息（在更新持倉前）
+        # 檢查保證金是否足夠（全額鎖定）
         current_price = self.df.iloc[self.current_step]['close']
+        required_margin = abs(diff_position) * current_price / self.leverage
+        if required_margin > self.balance:
+            return  # 保證金不足，不執行交易
+        
+        # 記錄開倉信息（在更新持倉前）
         old_position = self.btc_held
         self._track_trade_open(current_price, diff_position, old_position)
             
         self.btc_held += diff_position
-        self.balance -= abs(diff_position) * real_price 
+        self.balance -= required_margin  # 鎖定保證金 
     
     # 檢查交易是否滿足最低金額要求
     def _is_trade_valid(self, diff_position, current_price):
@@ -325,8 +361,26 @@ class TradingEnvironment(gym.Env):
             self.take_profit_price = 0
             self.stop_loss_price = 0
 
-        # 更新總價值
-        self.total_value = self.balance + (self.btc_held * current_price)
+        # 更新總價值（含未實現損益）
+        if self.btc_held != 0:
+            position_size = abs(self.btc_held)
+            margin_used = position_size * self.avg_entry_price / self.leverage if self.avg_entry_price > 0 else 0
+            
+            if self.btc_held > 0:  # 做多
+                unrealized_pnl = (current_price - self.avg_entry_price) * position_size
+            else:  # 做空
+                unrealized_pnl = (self.avg_entry_price - current_price) * position_size
+            
+            # 保證金強制平倉檢查：若未實現虧損超過持倉保證金的 80%
+            if margin_used > 0 and unrealized_pnl < -margin_used * 0.8:
+                print(f"保證金不足強制平倉 (unrealized_pnl={unrealized_pnl:.2f}, margin={margin_used:.2f})")
+                self._close_position(current_price)
+                self.total_value = self.balance
+            else:
+                # 總資產 = 可用資金 + 未實現盈虧（加上限保護）
+                self.total_value = np.clip(self.balance + unrealized_pnl, 0, self.initial_balance * 1000)
+        else:
+            self.total_value = np.clip(self.balance, 0, self.initial_balance * 1000)
         
         return 
 
@@ -355,13 +409,17 @@ class TradingEnvironment(gym.Env):
         balance_insufficient = self.total_value <= self.min_balance
         
         self.done = data_exhausted or balance_insufficient
+        # 標記結束原因供外部統計
+        self.last_done_reason = None
         
         # 調試：記錄結束原因
         if self.done:
             if data_exhausted:
                 print(f"Episode結束：數據用完 (step={self.current_step}, data_len={len(self.df)})")
+                self.last_done_reason = 'data_exhausted'
             if balance_insufficient:
-                print(f"Episode結束：資金不足 (balance={self.balance:.2f}, min={self.min_balance})")
+                print(f"Episode結束：資金不足 (balance={self.total_value:.2f}, min={self.min_balance})")
+                self.last_done_reason = 'balance_insufficient'
         
         # 確保不會超出數據範圍
         if self.current_step >= len(self.df):
@@ -546,5 +604,20 @@ class TradingEnvironment(gym.Env):
         # 5. 生存獎勵 - 每活一步給小獎勵
         if self.total_value > self.initial_balance * 0.8:  # 資產保持在80%以上
             risk_reward += 0.001
+        
+        # 6. 交易頻率軟鼓勵（一天 20 次為目標，500 步約 1.7 天 → 35 次）
+        current_step_in_episode = self.current_step - self.window_size
+        if current_step_in_episode > 50:  # 至少跑 50 步後才評估
+            target_trades_per_day = 20
+            steps_per_day = 288  # 5 分鐘 K 線，一天 288 根
+            expected_trades = (current_step_in_episode / steps_per_day) * target_trades_per_day
+            actual_trades = len(self.closed_trades)
+            
+            # 達到或超過目標：小獎勵
+            if actual_trades >= expected_trades * 0.8:  # 達到 80% 即給獎勵
+                risk_reward += 0.005
+            # 低於目標但不過度懲罰（收益率優先）
+            elif actual_trades < expected_trades * 0.5:  # 低於 50% 給小提醒
+                risk_reward -= 0.002
         
         return risk_reward 
