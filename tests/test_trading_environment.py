@@ -4,7 +4,7 @@
 """
 import numpy as np
 import pandas as pd
-from trading_env import TradingEnvironment
+from Env.trading_env import TradingEnvironment
 import matplotlib.pyplot as plt
 
 def create_test_data(n_samples=2000):
