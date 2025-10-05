@@ -16,7 +16,11 @@ from .execution import (
 
 class TradingEnvironment(gym.Env):
     def __init__(self, df, initial_balance=10000, transaction_fee=0.001, window_size= 24 * 60 //5, leverage = 10, min_balance=0, min_trade_amount=10, 
-                 reward_weights=None, episode_length: int | None = None, random_start: bool = True):
+                 reward_weights=None, episode_length: int | None = None, random_start: bool = True,
+                 enable_curriculum: bool = False, curriculum: dict | None = None,
+                 adaptive_curriculum: bool = False, survival_window: int = 10, survival_target: float = 0.8,
+                 max_forced_liqs_in_window: int = 0, require_tp_sl: bool = True,
+                 min_tp_sl_triggers_in_window: int = 5, min_phase_episodes: int = 10):
         super(TradingEnvironment, self).__init__()
         
         # 只保留數值列，並確保包含必要的OHLCV列
@@ -52,6 +56,47 @@ class TradingEnvironment(gym.Env):
             'risk_management': 0.45  # 風險管理權重（仍重要但讓位給 PnL）
         }
         self.reward_weights = reward_weights if reward_weights is not None else default_weights
+
+        # 課程式學習（分階段權重）設定
+        self.enable_curriculum = bool(enable_curriculum)
+        self.adaptive_curriculum = bool(adaptive_curriculum)
+        self.survival_window = int(max(1, survival_window))
+        self.survival_target = float(min(max(survival_target, 0.0), 1.0))
+        self.max_forced_liqs_in_window = int(max(0, max_forced_liqs_in_window))
+        self.require_tp_sl = bool(require_tp_sl)
+        self.min_tp_sl_triggers_in_window = int(max(0, min_tp_sl_triggers_in_window))
+        self.min_phase_episodes = int(max(0, min_phase_episodes))
+        # 預設三階段：風險/止盈止損 → 過渡 → 正常交易
+        self.curriculum = curriculum or {
+            'phases': [
+                {
+                    'until_episode': 10,  # 前 10 回合：強化風險與止盈止損、持倉管理
+                    'weights': {
+                        'pnl': 0.05,
+                        'entry': 0.05,
+                        'stop': 0.25,
+                        'holding': 0.15,
+                        'penalty': 0.05,
+                        'risk_management': 0.45,
+                    }
+                },
+                {
+                    'until_episode': 30,  # 接著 20 回合：逐步引入損益與進場質量
+                    'weights': {
+                        'pnl': 0.20,
+                        'entry': 0.10,
+                        'stop': 0.20,
+                        'holding': 0.10,
+                        'penalty': 0.05,
+                        'risk_management': 0.35,
+                    }
+                },
+                {
+                    'until_episode': None,  # 之後：回到較均衡/默認配置
+                    'weights': default_weights,
+                }
+            ]
+        }
         
         # 獎勵正規化參數
         self.reward_normalization = {
@@ -107,10 +152,105 @@ class TradingEnvironment(gym.Env):
         # 驗證獎勵權重配置
         self._validate_weights()
         
+        # 追蹤回合索引（用於課程式學習）
+        self.episode_index = -1
+        # 自適應課程：近期回合統計緩存與狀態
+        self._recent_done_reasons = []
+        self._recent_forced_liqs = []
+        self._recent_tp_sl_triggers = []
+        self._current_phase_index = 0 if self.adaptive_curriculum else None
+        self._episodes_in_current_phase = 0
+        self._recent_tp_sl_triggers = []
+
         self.reset()
+
+    def _apply_curriculum_if_needed(self):
+        if not self.enable_curriculum or not isinstance(self.curriculum, dict):
+            return
+        phases = self.curriculum.get('phases', [])
+        selected = None
+        if self.adaptive_curriculum:
+            idx = 0 if self._current_phase_index is None else int(self._current_phase_index)
+            if 0 <= idx < len(phases):
+                selected = phases[idx]
+        else:
+            for phase in phases:
+                until_ep = phase.get('until_episode', None)
+                if until_ep is None or self.episode_index < until_ep:
+                    selected = phase
+                    break
+        if selected is None:
+            return
+        weights = selected.get('weights', {})
+        try:
+            # 更新 reward calculator 權重（保持 normalizer 不變）
+            self.reward_weights = weights
+            self.reward_calculator._weights = RewardWeights(**self.reward_weights)
+        except Exception:
+            pass
+
+    def _adaptive_advance_phase_if_ready(self):
+        """若啟用自適應課程，檢查近期回合是否達門檻，達成則推進到下一階段。
+
+        規則：
+            - 最近 survival_window 回合內，'data_exhausted' 比例 ≥ survival_target 視為存活（近似 time_limit）。
+            - 同窗內強制平倉總次數 ≤ max_forced_liqs_in_window。
+        注意：此為在環境層級評估，無法取得 TimeLimit 的 truncated 訊號，因此用 data_exhausted 近似。
+        """
+        if not (self.enable_curriculum and self.adaptive_curriculum):
+            return
+        if len(self._recent_done_reasons) < self.survival_window:
+            return
+        window_reasons = self._recent_done_reasons[-self.survival_window:]
+        window_liqs = self._recent_forced_liqs[-self.survival_window:]
+        time_limit_like = sum(1 for r in window_reasons if r == 'data_exhausted')
+        survival_ratio = time_limit_like / float(self.survival_window)
+        forced_liqs_sum = int(sum(window_liqs))
+        tp_sl_sum = int(sum(self._recent_tp_sl_triggers[-self.survival_window:])) if self._recent_tp_sl_triggers else 0
+        tp_sl_ok = (not self.require_tp_sl) or (tp_sl_sum >= self.min_tp_sl_triggers_in_window)
+        phase_min_ok = (self._episodes_in_current_phase >= self.min_phase_episodes)
+        if survival_ratio >= self.survival_target and forced_liqs_sum <= self.max_forced_liqs_in_window and tp_sl_ok and phase_min_ok:
+            try:
+                phases = self.curriculum.get('phases', [])
+                cur_idx = 0 if self._current_phase_index is None else int(self._current_phase_index)
+                next_idx = cur_idx + 1
+                if next_idx < len(phases):
+                    next_phase = phases[next_idx]
+                    next_weights = next_phase.get('weights') if isinstance(next_phase, dict) else None
+                    try:
+                        print(
+                            f"課程式學習：達門檻，將於下一回合切換至第{next_idx + 1}階段"
+                            f"（episode={self.episode_index + 1} 結束）；"
+                            f"存活率={survival_ratio:.2f}，窗口強平={forced_liqs_sum}，TP/SL觸發累計={tp_sl_sum}；"
+                            f"下一階段權重={next_weights}"
+                        )
+                    except Exception:
+                        pass
+                    self._current_phase_index = next_idx
+                    self._episodes_in_current_phase = 0
+            except Exception:
+                pass
     
+    def _get_current_phase(self):
+        if not (self.enable_curriculum and isinstance(self.curriculum, dict)):
+            return None, None
+        phases = self.curriculum.get('phases', [])
+        if self.adaptive_curriculum:
+            idx = 0 if self._current_phase_index is None else int(self._current_phase_index)
+            if 0 <= idx < len(phases):
+                return idx, phases[idx]
+            return None, None
+        else:
+            for i, phase in enumerate(phases):
+                until_ep = phase.get('until_episode', None)
+                if until_ep is None or self.episode_index < until_ep:
+                    return i, phase
+        return None, None
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        # 每次開始新回合，更新回合索引並應用課程式權重
+        self.episode_index = int(self.episode_index) + 1
         if self.random_start:
             start = np.random.randint(self.window_size, len(self.df) - self.episode_length - 1)
             self.current_step = int(start)
@@ -141,6 +281,20 @@ class TradingEnvironment(gym.Env):
         # 回撤統計
         self.peak_value = float(self.initial_balance)
         self.max_drawdown = 0.0
+        # 應用課程式學習的獎勵權重（若啟用）
+        self._apply_curriculum_if_needed()
+        # 顯示目前階段
+        try:
+            idx, phase = self._get_current_phase()
+            if phase is not None:
+                print(f"課程式學習：目前處於第{int(idx)+1}階段（episode={self.episode_index} 開始）；權重={phase.get('weights')}")
+            # 階段駐留計數
+            if idx != self._current_phase_index:
+                self._current_phase_index = idx
+                self._episodes_in_current_phase = 0
+            self._episodes_in_current_phase += 1
+        except Exception:
+            pass
         
         return self._get_observation(), {}
     
@@ -326,6 +480,22 @@ class TradingEnvironment(gym.Env):
             if balance_insufficient:
                 print(f"Episode結束：資金不足 (balance={self.total_value:.2f}, min={self.min_balance})")
                 self.last_done_reason = 'balance_insufficient'
+            # 記錄於自適應課程的滑動窗口，並嘗試推進階段
+            try:
+                self._recent_done_reasons.append(self.last_done_reason)
+                self._recent_forced_liqs.append(int(self.trades_forced_liquidation_count))
+                self._recent_tp_sl_triggers.append(int(self.trades_take_profit_count + self.trades_stop_loss_count))
+                # 限制緩存大小，避免無限制增長
+                max_cache = max(self.survival_window * 3, 10)
+                if len(self._recent_done_reasons) > max_cache:
+                    self._recent_done_reasons = self._recent_done_reasons[-max_cache:]
+                if len(self._recent_forced_liqs) > max_cache:
+                    self._recent_forced_liqs = self._recent_forced_liqs[-max_cache:]
+                if len(self._recent_tp_sl_triggers) > max_cache:
+                    self._recent_tp_sl_triggers = self._recent_tp_sl_triggers[-max_cache:]
+                self._adaptive_advance_phase_if_ready()
+            except Exception:
+                pass
         
         # 確保不會超出數據範圍
         if self.current_step >= len(self.df):
@@ -389,6 +559,13 @@ class TradingEnvironment(gym.Env):
             'fees_paid': float(self.transaction_fee),  # 簡化：本步費率指示；可改為累計
             'steps_in_episode': int(self.steps_in_episode),
             'done_reason': self.last_done_reason,
+            'curriculum': (lambda _self=self: (lambda _idx_phase: {
+                'enabled': bool(getattr(_self, 'enable_curriculum', False)),
+                'adaptive': bool(getattr(_self, 'adaptive_curriculum', False)),
+                'episode_index': int(getattr(_self, 'episode_index', -1)),
+                'phase_index': (int(_idx_phase[0]) if _idx_phase[0] is not None else None),
+                'phase_weights': (_idx_phase[1].get('weights') if isinstance(_idx_phase[1], dict) else None),
+            })(_self._get_current_phase()))(),
             'account': {
                 'total_value': float(self.total_value),
                 'balance': float(self.balance),

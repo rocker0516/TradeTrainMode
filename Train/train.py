@@ -15,7 +15,7 @@ from stable_baselines3 import SAC
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecMonitor
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.callbacks import StopTrainingOnMaxEpisodes, CallbackList
+from stable_baselines3.common.callbacks import StopTrainingOnMaxEpisodes, CallbackList, BaseCallback
 
 import sys
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -54,7 +54,11 @@ def read_csv_date_range(csv_path: str, start_date: Date, end_date: Date) -> pd.D
     if len(df) == 0:
         raise ValueError('CSV 無資料')
 
-    df_slice = df.loc[df.index >= start_date and df.index <= end_date].copy()
+    # 將輸入日期（可能為 int/str/datetime）轉為 Timestamp，並使用向量化條件篩選
+    start_ts = pd.to_datetime(str(start_date))
+    end_ts = pd.to_datetime(str(end_date))
+    mask = (df.index >= start_ts) & (df.index <= end_ts)
+    df_slice = df.loc[mask].copy()
     if len(df_slice) < 1000:
         warnings.warn('近三個月資料樣本過少，訓練效果可能受限')
     return df_slice
@@ -171,7 +175,7 @@ class EpisodeStatsWrapper(gym.Wrapper):
         os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
         if not os.path.exists(self.log_file):
             with open(self.log_file, 'w', encoding='utf-8') as f:
-                f.write('env_id,episode,steps,end_total_value,min_total_value,max_drawdown,episode_reward,return_rate,trade_count,aggressive_step_ratio,done_reason\n')
+                f.write('env_id,episode,steps,end_total_value,min_total_value,max_drawdown,episode_reward,return_rate,trade_count,aggressive_step_ratio,tp_set_mean,sl_set_mean,tp_triggered,sl_triggered,forced_liquidations,done_reason\n')
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -188,6 +192,11 @@ class EpisodeStatsWrapper(gym.Wrapper):
         self._aggressive_count = 0
         self._trade_count = 0
         self._last_position = 0
+        # 止盈止損「設定」的統計（使用動作映射後的百分比）
+        self._tp_set_sum = 0.0
+        self._sl_set_sum = 0.0
+        self._tp_set_count = 0
+        self._sl_set_count = 0
         return obs, info
 
     def step(self, action):
@@ -202,6 +211,19 @@ class EpisodeStatsWrapper(gym.Wrapper):
         except Exception:
             pass
         
+        # 累計每步的止盈/止損設定（將原始動作映射為百分比，與 ActionTransformWrapper 一致）
+        try:
+            a1 = float(action[1])
+            a2 = float(action[2])
+            a1_mapped = (float(np.clip(a1, -1.0, 1.0)) + 1.0) * 0.5 * 50.0  # 止盈 0~50%
+            a2_mapped = (float(np.clip(a2, -1.0, 1.0)) + 1.0) * 0.5 * 20.0  # 止損 0~20%
+            self._tp_set_sum += a1_mapped
+            self._sl_set_sum += a2_mapped
+            self._tp_set_count += 1
+            self._sl_set_count += 1
+        except Exception:
+            pass
+
         # 計算交易次數（倉位變化即為交易）
         base_env = getattr(self.env, 'unwrapped', self.env)
         current_position = getattr(base_env, 'btc_held', 0)
@@ -233,9 +255,16 @@ class EpisodeStatsWrapper(gym.Wrapper):
             aggressive_ratio = (self._aggressive_count / self._steps) if self._steps > 0 else 0.0
             # 計算收益率
             return_rate = (end_tv - self._initial_balance) / self._initial_balance if self._initial_balance > 0 else 0.0
+            # 觸發次數：從環境內部統計讀取（回合維度）
+            tp_triggered = getattr(base_env, 'trades_take_profit_count', 0)
+            sl_triggered = getattr(base_env, 'trades_stop_loss_count', 0)
+            forced_liqs = getattr(base_env, 'trades_forced_liquidation_count', 0)
+            # 平均設定（避免除 0）
+            tp_set_mean = (self._tp_set_sum / self._tp_set_count) if self._tp_set_count > 0 else 0.0
+            sl_set_mean = (self._sl_set_sum / self._sl_set_count) if self._sl_set_count > 0 else 0.0
             try:
                 with open(self.log_file, 'a', encoding='utf-8') as f:
-                    f.write(f"{self.env_id},{self.episode_idx},{self._steps},{end_tv},{self._min_total_value},{self._max_drawdown},{self._episode_reward},{return_rate},{self._trade_count},{aggressive_ratio},{done_reason}\n")
+                    f.write(f"{self.env_id},{self.episode_idx},{self._steps},{end_tv},{self._min_total_value},{self._max_drawdown},{self._episode_reward},{return_rate},{self._trade_count},{aggressive_ratio},{tp_set_mean},{sl_set_mean},{tp_triggered},{sl_triggered},{forced_liqs},{done_reason}\n")
             except Exception:
                 pass
             self.episode_idx += 1
@@ -243,9 +272,45 @@ class EpisodeStatsWrapper(gym.Wrapper):
         return obs, reward, done, truncated, info
 
 
+class CurriculumPhasePrintCallback(BaseCallback):
+    """當課程階段變更時，於訓練期間打印 info 中的課程階段資訊。"""
+    def __init__(self):
+        super().__init__()
+        self._last_phase_by_env = {}
+
+    def _on_step(self) -> bool:
+        try:
+            infos = self.locals.get('infos', None)
+            if not infos:
+                return True
+            for env_idx, info in enumerate(infos):
+                if not isinstance(info, dict):
+                    continue
+                cur = info.get('curriculum')
+                if not isinstance(cur, dict):
+                    continue
+                phase_idx = cur.get('phase_index')
+                if env_idx not in self._last_phase_by_env or self._last_phase_by_env.get(env_idx) != phase_idx:
+                    self._last_phase_by_env[env_idx] = phase_idx
+                    weights = cur.get('phase_weights')
+                    ep_index = cur.get('episode_index')
+                    enabled = cur.get('enabled')
+                    adaptive = cur.get('adaptive')
+                    try:
+                        print(f"[Curriculum] t={self.num_timesteps} env={env_idx} episode={ep_index} enabled={enabled} adaptive={adaptive} phase={(None if phase_idx is None else int(phase_idx)+1)} weights={weights}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return True
+
+
 def make_env_fn(df_slice: pd.DataFrame, window_size: int, initial_balance: float,
                 transaction_fee: float, leverage: int, min_trade_amount: float, seed: int,
-                log_dir: str, env_index: int, episode_steps: int = 0, position_scale: float = 0.5):
+                log_dir: str, env_index: int, episode_steps: int = 0, position_scale: float = 0.5,
+                enable_curriculum: bool = False, adaptive_curriculum: bool = False,
+                survival_window: int = 10, survival_target: float = 0.8, max_forced_liqs_in_window: int = 0,
+                require_tp_sl: bool = False, min_tp_sl_triggers_in_window: int = 5, min_phase_episodes: int = 10):
     def _thunk():
         env = TradingEnvironment(
             df=df_slice,
@@ -253,7 +318,15 @@ def make_env_fn(df_slice: pd.DataFrame, window_size: int, initial_balance: float
             transaction_fee=transaction_fee,
             window_size=window_size,
             leverage=leverage,
-            min_trade_amount=min_trade_amount
+            min_trade_amount=min_trade_amount,
+            enable_curriculum=enable_curriculum,
+            adaptive_curriculum=adaptive_curriculum,
+            survival_window=survival_window,
+            survival_target=survival_target,
+            max_forced_liqs_in_window=max_forced_liqs_in_window,
+            require_tp_sl=require_tp_sl,
+            min_tp_sl_triggers_in_window=min_tp_sl_triggers_in_window,
+            min_phase_episodes=min_phase_episodes
         )
         # 每回合步數上限（TimeLimit）
         if episode_steps and episode_steps > 0:
@@ -300,7 +373,7 @@ def main():
     parser.add_argument('--episode_steps', type=int, required=True, help='每回合最大步數（必需參數）')
     
     # 指定窗口大小的參數，決定每次觀察使用的數據點數量。
-    parser.add_argument('--window_size', type=int, default=288)
+    parser.add_argument('--window_size', type=int, default=288)#288 = 24 * 60 / 5 = 288
     
     # 指定交易環境的初始資金的參數。
     parser.add_argument('--initial_balance', type=float, default=10000.0)
@@ -319,6 +392,15 @@ def main():
     
     # 指定動作倉位比例縮放的參數（a0 將被限制在 [-position_scale, position_scale]）
     parser.add_argument('--position_scale', type=float, default=0.5, help='倉位比例上限 (0~1)')
+    parser.add_argument('--print_curriculum_info', action='store_true', help='訓練期間打印課程階段資訊（來自 infos）')
+    parser.add_argument('--enable_curriculum', action='store_true', help='啟用課程式學習：先學止盈止損與風險，再學交易')
+    parser.add_argument('--adaptive_curriculum', action='store_true', help='啟用自適應門檻轉階（以生存率、強平與TP/SL觸發決定換階）')
+    parser.add_argument('--survival_window', type=int, default=10, help='自適應門檻的滑動回合窗口')
+    parser.add_argument('--survival_target', type=float, default=0.8, help='窗口內達時限（近似存活）的比例門檻')
+    parser.add_argument('--max_forced_liqs_in_window', type=int, default=0, help='窗口內允許的強制平倉總次數上限')
+    parser.add_argument('--require_tp_sl', action='store_true', help='要求近期窗口內達到最低TP/SL觸發數才換階')
+    parser.add_argument('--min_tp_sl_triggers_in_window', type=int, default=5, help='近期窗口內最低TP/SL觸發次數')
+    parser.add_argument('--min_phase_episodes', type=int, default=10, help='每一階段至少停留的回合數')
     args = parser.parse_args()
 
     np.random.seed(42)
@@ -327,7 +409,9 @@ def main():
     df = read_csv_date_range(args.csv, args.start_date, args.end_date)
 
     # 建立 16 個 shard，盡量平均切分 3 個月資料
-    min_len = args.window_size + 500  # 保證每個 shard 至少有可交易步數
+    # 動態計算每個 shard 的最小長度：觀察視窗 + 單回合步數，
+    # 確保至少能支援一個完整回合（受 TimeLimit 約束的 episode_steps）
+    min_len = args.window_size + args.episode_steps
 
     shards = split_dataframe_into_shards(df, args.vec_envs, min_len)
     if len(shards) < args.vec_envs:
@@ -342,7 +426,15 @@ def main():
         env_fns.append(make_env_fn(shards[i], args.window_size, args.initial_balance,
                                    args.transaction_fee, args.leverage, args.min_trade_amount, seed,
                                    log_dir=args.logdir, env_index=i, episode_steps=args.episode_steps,
-                                   position_scale=args.position_scale))
+                                   position_scale=args.position_scale,
+                                   enable_curriculum=args.enable_curriculum,
+                                   adaptive_curriculum=args.adaptive_curriculum,
+                                   survival_window=args.survival_window,
+                                   survival_target=args.survival_target,
+                                   max_forced_liqs_in_window=args.max_forced_liqs_in_window,
+                                   require_tp_sl=args.require_tp_sl,
+                                   min_tp_sl_triggers_in_window=args.min_tp_sl_triggers_in_window,
+                                   min_phase_episodes=args.min_phase_episodes))
 
     # Windows 上 SubprocVecEnv 需要 if __name__ == '__main__' 保護，這裡已符合
     vec_env = SubprocVecEnv(env_fns) if args.vec_envs > 1 else DummyVecEnv(env_fns)
@@ -390,13 +482,41 @@ def main():
     
     # 設置停止條件：以回合數為準
     callbacks = [StopTrainingOnMaxEpisodes(max_episodes=total_episodes, verbose=1)]
+    if args.print_curriculum_info:
+        callbacks.append(CurriculumPhasePrintCallback())
     callback = callbacks[0]
     
-    # 訓練（留 20% 緩衝以防提前結束）
+    # 根據歷史早退率決定 timesteps slack（無參數，內建預設 0.2）
+    slack_default = 0.2
+    slack = 1.0
+    early_end_rate = None
+    try:
+        ep_stats_dir = os.path.join(args.logdir, 'episode_stats')
+        files = [f for f in os.listdir(ep_stats_dir) if f.endswith('.csv')]
+        total_eps = 0
+        early_eps = 0
+        for fname in files:
+            path = os.path.join(ep_stats_dir, fname)
+            try:
+                df_ep = pd.read_csv(path)
+                if 'done_reason' in df_ep.columns:
+                    total_eps += len(df_ep)
+                    early_eps += int((df_ep['done_reason'] != 'time_limit').sum())
+            except Exception:
+                pass
+        if total_eps > 0:
+            early_end_rate = early_eps / total_eps
+    except Exception:
+        early_end_rate = None
+    if early_end_rate is None:
+        early_end_rate = max(0.0, float(slack_default))
+    slack = 1.0 + float(early_end_rate)
+
+    # 訓練（加入 slack 以防在達成目標回合前因步數上限而停止）
     start = time.time()
-    model.learn(total_timesteps=int(total_timesteps * 1.2), progress_bar=True, callback=callback)
+    model.learn(total_timesteps=int(total_timesteps * slack), progress_bar=True, callback=callback)
     elapsed = time.time() - start
-    print(f"Training finished in {elapsed/60:.2f} min")
+    print(f"Training finished in {elapsed/60:.2f} min (slack={slack:.3f}{'' if early_end_rate is None else f', early_end_rate={early_end_rate:.3f}'})")
 
     # 保存模型
     pathlib.Path(args.logdir).mkdir(parents=True, exist_ok=True)
