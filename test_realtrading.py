@@ -38,10 +38,12 @@ def test_build_observation_and_action_mapping():
 
 
 def test_place_delta_order_skips_small_notional():
-    import RealTrading.RealTrading as rt
-    fake_client = mock.MagicMock()
-    res = rt.place_delta_order(
-        fake_client,
+    from ApiTrading.Trading import BinanceFuturesClient
+    fake_binance_client = mock.MagicMock()
+    client = BinanceFuturesClient.__new__(BinanceFuturesClient)
+    client.client = fake_binance_client
+    
+    res = client.place_delta_order(
         symbol='BTCUSDT',
         delta=0.00009,
         step_size=0.001,
@@ -50,30 +52,33 @@ def test_place_delta_order_skips_small_notional():
         dry_run=False,
     )
     assert res is None
-    fake_client.futures_create_order.assert_not_called()
+    fake_binance_client.futures_create_order.assert_not_called()
 
 
 def test_account_and_positions_parsing():
-    import RealTrading.RealTrading as rt
-    fake_client = mock.MagicMock()
-    fake_client.futures_account.return_value = {
+    from ApiTrading.Trading import BinanceFuturesClient
+    fake_binance_client = mock.MagicMock()
+    fake_binance_client.futures_account.return_value = {
         'availableBalance': '100.1',
         'assets': [
             {'asset': 'USDT', 'walletBalance': '150.5', 'unrealizedProfit': '2.3', 'marginBalance': '152.8'}
         ]
     }
-    fake_client.futures_position_information.return_value = [
+    fake_binance_client.futures_position_information.return_value = [
         {'symbol': 'BTCUSDT', 'positionAmt': '0.01', 'entryPrice': '50000', 'unRealizedProfit': '5', 'leverage': '10'},
         {'symbol': 'ETHUSDT', 'positionAmt': '0.0', 'entryPrice': '2000', 'unRealizedProfit': '0', 'leverage': '5'},
     ]
+    
+    client = BinanceFuturesClient.__new__(BinanceFuturesClient)
+    client.client = fake_binance_client
 
-    summary = rt.get_account_summary(fake_client)
+    summary = client.get_account_summary()
     assert summary['wallet_balance'] == 150.5
     assert summary['available_balance'] == 100.1
     assert summary['unrealized_pnl'] == 2.3
     assert summary['margin_balance'] == 152.8
 
-    positions = rt.get_open_positions(fake_client)
+    positions = client.get_open_positions()
     assert len(positions) == 1
     assert positions[0]['symbol'] == 'BTCUSDT'
 

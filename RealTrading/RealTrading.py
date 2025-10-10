@@ -1,40 +1,46 @@
 from __future__ import annotations
 
 import argparse
-import math
 import os
+import sys
 import time
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 
+# 從 ApiTrading 模組匯入交易客戶端
+# 若以腳本方式執行，將父層資料夾加入路徑以便匯入
+if __name__ == '__main__':
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-# ========== Data fetching (public) ==========
+from ApiTrading import ITradingClient, build_trading_client
+
+
+# ========== 公開資料擷取 ==========
 
 
 def build_data_client() -> Any:
-    """Construct a lightweight Binance client for public data.
+    """建立僅用於公開資料的輕量 Binance 客戶端。
 
-    Uses no credentials for public endpoints.
+    公開端點不需要憑證。
     """
     from binance.client import Client
 
-    # Public endpoints do not require API keys
+    # 公開端點不需要 API 金鑰
     return Client(api_key=None, api_secret=None)
 
 
 def fetch_klines_5m(client: Any, symbol: str, limit: int) -> pd.DataFrame:
-    """Fetch latest 5m klines and compute derived columns to match training data.
+    """抓取最新 5 分鐘 K 線，並計算與訓練資料一致的衍生欄位。
 
-    Args:
-        client: python-binance Client or compatible mock.
-        symbol: Symbol like "BTCUSDT".
-        limit: Number of candles to fetch (window_size).
-    Returns:
-        DataFrame with columns:
-        ['timestamp','open','high','low','close','volume', 'buy_volume','sell_volume',
+    參數:
+        client: python-binance 的 Client 或相容的 mock。
+        symbol: 例如 "BTCUSDT" 的交易對。
+        limit: 需要抓取的 K 線筆數（視窗大小）。
+    回傳:
+        具有以下欄位的 DataFrame：
+        ['timestamp','open','high','low','close','volume','buy_volume','sell_volume',
          'volume_ratio','long_short_ratio','trades','quote_volume']
     """
     raw = client.futures_klines(symbol=symbol, interval="5m", limit=limit)
@@ -52,12 +58,12 @@ def fetch_klines_5m(client: Any, symbol: str, limit: int) -> pd.DataFrame:
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     for col in ['open', 'high', 'low', 'close', 'volume', 'quote_volume']:
         df[col] = df[col].astype(float)
-    # taker buy base/quote may be strings
+    # 吃單買量可能為字串，需轉為浮點數
     df['taker_buy_base'] = df['taker_buy_base'].astype(float)
-    # Derived
+    # 衍生欄位
     df['buy_volume'] = df['taker_buy_base']
     df['sell_volume'] = df['volume'] - df['taker_buy_base']
-    # avoid divide by zero
+    # 避免除以零
     eps = 1e-12
     df['volume_ratio'] = df['buy_volume'] / (df['sell_volume'] + eps)
     df['long_short_ratio'] = df['taker_buy_base'] / (df['volume'] - df['taker_buy_base'] + eps)
@@ -69,78 +75,17 @@ def fetch_klines_5m(client: Any, symbol: str, limit: int) -> pd.DataFrame:
     return out
 
 
-# ========== Trading client (authenticated) ==========
+# ========== 交易客戶端（需授權） ==========
+# 注意：交易客戶端相關函式已移至 ApiTrading/Trading.py
 
 
-def build_trade_client() -> Any:
-    """Construct an authenticated Binance UM-Futures client from env.
-
-    Required env vars: BINANCE_TRADE_API_KEY, BINANCE_TRADE_API_SECRET
-    Optional: BINANCE_TESTNET=1 to use futures testnet endpoints.
-    """
-    from binance.client import Client
-
-    api_key = os.getenv('BINANCE_TRADE_API_KEY') or os.getenv('BINANCE_API_KEY')
-    api_secret = os.getenv('BINANCE_TRADE_API_SECRET') or os.getenv('BINANCE_API_SECRET')
-    if not api_key or not api_secret:
-        raise RuntimeError('Missing BINANCE_TRADE_API_KEY/SECRET or BINANCE_API_KEY/SECRET')
-
-    use_testnet = os.getenv('BINANCE_TESTNET', '0') == '1'
-    try:
-        client = Client(api_key, api_secret, testnet=use_testnet)  # type: ignore[arg-type]
-    except TypeError:
-        client = Client(api_key, api_secret)
-        if use_testnet:
-            try:
-                client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
-            except Exception:
-                pass
-    return client
-
-
-@dataclass
-class SymbolFilters:
-    step_size: float
-    min_qty: float
-    min_notional: float
-
-
-def get_symbol_filters(client: Any, symbol: str, default_min_notional: float) -> SymbolFilters:
-    """Fetch quantity filters for a futures symbol."""
-    info = client.futures_exchange_info()
-    syms: List[Dict[str, Any]] = info.get('symbols', [])
-    s = next((x for x in syms if x.get('symbol') == symbol), None)
-    if not s:
-        # Fallback generic
-        return SymbolFilters(step_size=0.0001, min_qty=0.0001, min_notional=default_min_notional)
-    step = 0.0001
-    min_qty = 0.0001
-    min_notional = default_min_notional
-    for f in s.get('filters', []):
-        if f.get('filterType') == 'LOT_SIZE':
-            step = float(f.get('stepSize', step))
-            min_qty = float(f.get('minQty', min_qty))
-        if f.get('filterType') == 'MIN_NOTIONAL':
-            # Some futures APIs use NOTIONAL
-            min_notional = float(f.get('notional', default_min_notional))
-        if f.get('filterType') == 'NOTIONAL':
-            min_notional = float(f.get('notional', default_min_notional))
-    return SymbolFilters(step_size=step, min_qty=min_qty, min_notional=min_notional)
-
-
-def floor_to_step(value: float, step: float) -> float:
-    if step <= 0:
-        return value
-    return math.floor(value / step) * step
-
-
-# ========== Observation builder ==========
+# ========== 特徵觀測構建 ==========
 
 
 def build_observation(df: pd.DataFrame, window_size: int) -> np.ndarray:
-    """Build observation tensor with z-score features and zeroed account channels.
+    """建立包含 z-score 特徵與歸零帳戶通道的觀測張量。
 
-    Shape: (n_features, window_size) where n_features = len(price_cols) + 5.
+    張量形狀: (n_features, window_size)，其中 n_features = 價格特徵數量 + 5。
     """
     price_cols = ['open', 'high', 'low', 'close', 'volume', 'buy_volume', 'sell_volume',
                   'volume_ratio', 'long_short_ratio', 'trades', 'quote_volume']
@@ -156,19 +101,19 @@ def build_observation(df: pd.DataFrame, window_size: int) -> np.ndarray:
     n_features = len(price_cols) + 5
     obs = np.zeros((n_features, window_size), dtype=np.float32)
     obs[:len(price_cols)] = price_z
-    # Account channels remain zeros for live inference baseline
+    # 帳戶通道在即時推論基線中維持為 0
     return obs
 
 
-# ========== Action mapping ==========
+# ========== 動作映射 ==========
 
 
 def map_policy_action(raw_action: np.ndarray, position_scale: float) -> np.ndarray:
-    """Map model action to environment semantics used in training.
+    """將模型動作映射為訓練環境所使用的語義。
 
-    - a0 in [-1, 1] scaled by position_scale
-    - a1 in [-1, 1] -> [0, 50] (take profit percent)
-    - a2 in [-1, 1] -> [0, 20] (stop loss percent)
+    - a0 ∈ [-1, 1]，再乘上 position_scale
+    - a1 ∈ [-1, 1] 轉換為 [0, 50]（止盈百分比）
+    - a2 ∈ [-1, 1] 轉換為 [0, 20]（止損百分比）
     """
     a0 = float(np.clip(raw_action[0], -1.0, 1.0)) * float(max(0.0, min(position_scale, 1.0)))
     a1 = (float(np.clip(raw_action[1], -1.0, 1.0)) + 1.0) * 0.5 * 50.0
@@ -176,7 +121,7 @@ def map_policy_action(raw_action: np.ndarray, position_scale: float) -> np.ndarr
     return np.array([a0, a1, a2], dtype=np.float32)
 
 
-# ========== Trading loop ==========
+# ========== 交易迴圈 ==========
 
 
 def determine_device() -> str:
@@ -187,92 +132,12 @@ def determine_device() -> str:
         return 'cpu'
 
 
-def get_equity_usdt(client: Any) -> float:
-    """Fetch USDT wallet balance for UM futures."""
-    balances = client.futures_account_balance()
-    for b in balances:
-        if b.get('asset') == 'USDT':
-            return float(b.get('balance', 0.0))
-    return 0.0
-
-
-def get_current_position_size(client: Any, symbol: str) -> float:
-    """Return current base-asset position size (>0 long, <0 short)."""
-    positions = client.futures_position_information(symbol=symbol)
-    if not positions:
-        return 0.0
-    pos_amt = float(positions[0].get('positionAmt', 0.0))
-    return pos_amt
-
-
-def get_account_summary(client: Any) -> Dict[str, float]:
-    """Return key USDT-M futures account metrics.
-
-    Returns:
-        dict with keys: wallet_balance, available_balance, unrealized_pnl, margin_balance
-    """
-    acc = client.futures_account()
-    total_wb = 0.0
-    total_ab = 0.0
-    total_upnl = 0.0
-    total_mb = 0.0
-    try:
-        assets = acc.get('assets', [])
-        for a in assets:
-            if a.get('asset') == 'USDT':
-                total_wb = float(a.get('walletBalance', 0.0))
-                total_upnl = float(a.get('unrealizedProfit', 0.0))
-                total_mb = float(a.get('marginBalance', 0.0))
-        total_ab = float(acc.get('availableBalance', 0.0))
-    except Exception:
-        pass
-    return {
-        'wallet_balance': total_wb,
-        'available_balance': total_ab,
-        'unrealized_pnl': total_upnl,
-        'margin_balance': total_mb,
-    }
-
-
-def get_open_positions(client: Any) -> List[Dict[str, Any]]:
-    """List non-zero positions across all symbols with key fields."""
-    pos = client.futures_position_information()
-    out: List[Dict[str, Any]] = []
-    for p in pos:
-        amt = float(p.get('positionAmt', 0.0))
-        if abs(amt) > 0:
-            out.append({
-                'symbol': p.get('symbol'),
-                'position_amt': amt,
-                'entry_price': float(p.get('entryPrice', 0.0)),
-                'unrealized_pnl': float(p.get('unRealizedProfit', 0.0)),
-                'leverage': float(p.get('leverage', 0.0)),
-            })
-    return out
-
-# 調整當前持倉至目標持倉
-# client: 交易客戶端
-# symbol: 交易對
-# delta: 目標與當前持倉的差異
-# step_size: 步長
-# min_notional: 最小名義價值
-# last_price: 資產的最新價格
-# dry_run: 是否是模擬交易
-def place_delta_order(client: Any, symbol: str, delta: float, step_size: float, min_notional: float, last_price: float, dry_run: bool = False) -> Optional[Dict[str, Any]]:
-    """Place a market order to adjust position by delta quantity.
-
-    Positive delta -> BUY; Negative delta -> SELL. Quantity rounded to step_size.
-    Skips if notional below min_notional.
-    """
-    side = 'BUY' if delta > 0 else 'SELL'
-    qty = floor_to_step(abs(delta), step_size)
-    if qty <= 0:
-        return None
-    if (qty * last_price) < min_notional:
-        return None
-    if dry_run:
-        return {"dry_run": True, "side": side, "quantity": qty}
-    return client.futures_create_order(symbol=symbol, side=side, type='MARKET', quantity=qty)
+# 注意：帳戶與持倉相關查詢已移至 ApiTrading/Trading.py
+# - get_equity_usdt -> client.get_equity_usdt()
+# - get_current_position_size -> client.get_current_position_size(symbol)
+# - get_account_summary -> client.get_account_summary()
+# - get_open_positions -> client.get_open_positions()
+# - place_delta_order -> client.place_delta_order(...)
 
 
 def trading_loop(
@@ -286,36 +151,35 @@ def trading_loop(
     deterministic: bool,
     dry_run: bool,
 ) -> None:
-    """Main live trading loop.
+    """即時交易主迴圈。
 
-    Fetches klines, builds observation, predicts action, and adjusts position.
+    抓取 K 線、建立觀測、進行動作預測，並調整持倉。
     """
     data_client = build_data_client()
-    trade_client = build_trade_client()
+    trade_client: ITradingClient = build_trading_client(
+        testnet=(os.getenv('BINANCE_TESTNET', '0') == '1')
+    )
 
-    # Set leverage once at start
+    # 啟動時設定一次槓桿
     lev = int(max(1, min(leverage, 125)))
-    try:
-        trade_client.futures_change_leverage(symbol=symbol, leverage=lev)
-    except Exception:
-        pass
+    trade_client.set_leverage(symbol=symbol, leverage=lev)
 
-    # Load model
+    # 載入模型
     from stable_baselines3 import SAC
     device = determine_device()
     model = SAC.load(model_path, device=device)
 
-    # Symbol filters
-    filters = get_symbol_filters(trade_client, symbol, default_min_notional=min_notional_usdt)
+    # 取得交易對限制
+    filters = trade_client.get_symbol_filters(symbol=symbol, default_min_notional=min_notional_usdt)
 
     last_candle_open_ms: Optional[int] = None
 
     while True:
         try:
             df = fetch_klines_5m(data_client, symbol, limit=window_size)
-            # Identify latest candle by open timestamp
+            # 以開盤時間辨識最新 K 線
             latest_open_ms = int(df['timestamp'].iloc[-1].value // 1_000_000)
-            # Ensure we process once per new candle
+            # 確保每根新 K 線只處理一次
             if last_candle_open_ms is not None and latest_open_ms == last_candle_open_ms:
                 time.sleep(poll_interval_sec)
                 continue
@@ -325,22 +189,16 @@ def trading_loop(
             act_raw, _ = model.predict(obs, deterministic=deterministic)
             act_mapped = map_policy_action(np.asarray(act_raw).reshape(3,), position_scale=position_scale)
 
-            # Compute target position based on equity and leverage
+            # 依據權益與槓桿計算目標持倉
             price = float(df['close'].iloc[-1])
-            equity = get_equity_usdt(trade_client)
+            equity = trade_client.get_equity_usdt()
             target_position = (equity * float(act_mapped[0]) * float(lev)) / max(price, 1e-12)
-            current_position = get_current_position_size(trade_client, symbol)
+            current_position = trade_client.get_current_position_size(symbol)
             delta = target_position - current_position
 
-            #
-            # 這段程式碼用於下單以調整當前持倉至目標持倉。
-            # 它使用 `place_delta_order` 函數，該函數考慮了交易客戶端、
-            # 交易對(symbol)、目標與當前持倉的差異(delta)、步長(step size)、
-            # 最小名義價值(min notional)、資產的最新價格(last price)，
-            # 以及是模擬交易(dry run)還是真實下單。
-            res = place_delta_order(
-                trade_client,
-                symbol,
+            # 下市價單以調整持倉至目標值
+            res = trade_client.place_delta_order(
+                symbol=symbol,
                 delta=delta,
                 step_size=filters.step_size,
                 min_notional=filters.min_notional,
@@ -353,13 +211,13 @@ def trading_loop(
             else:
                 print({"skipped": True, "reason": "small_delta_or_notional", "equity": equity, "price": price})
 
-            # Sleep until near next candle
+            # 休眠直到接近下一根 K 線
             time.sleep(poll_interval_sec)
         except KeyboardInterrupt:
-            print("Interrupted by user. Exiting.")
+            print("使用者中斷，結束執行。")
             break
         except Exception as exc:
-            # Log and continue
+            # 記錄錯誤並持續執行
             print(f"Error in loop: {exc}")
             time.sleep(poll_interval_sec)
 
@@ -376,7 +234,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument('--deterministic', action='store_true')
     parser.add_argument('--dry_run', action='store_true', help='If set, do not place real orders')
     sub = parser.add_subparsers(dest='cmd')
-    # optional subcommands for account/positions
+    # 可選子命令：帳戶/持倉
     if sub is not None:
         sub.add_parser('account', help='Print futures account summary')
         sub.add_parser('positions', help='Print non-zero open positions')
@@ -386,13 +244,13 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     if getattr(args, 'cmd', None) == 'account':
-        client = build_trade_client()
-        summary = get_account_summary(client)
+        client = build_trading_client(testnet=(os.getenv('BINANCE_TESTNET', '0') == '1'))
+        summary = client.get_account_summary()
         print(summary)
         return
     if getattr(args, 'cmd', None) == 'positions':
-        client = build_trade_client()
-        print(get_open_positions(client))
+        client = build_trading_client(testnet=(os.getenv('BINANCE_TESTNET', '0') == '1'))
+        print(client.get_open_positions())
         return
     trading_loop(
         symbol=args.symbol,
