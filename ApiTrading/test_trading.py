@@ -5,7 +5,7 @@ Tests the BinanceFuturesClient implementation using mock objects.
 
 import pytest
 from unittest import mock
-from Trading import (
+from ApiTrading.Trading import (
     BinanceFuturesClient,
     ITradingClient,
     SymbolFilters,
@@ -275,7 +275,7 @@ class TestBuildTradingClient:
     """Test build_trading_client factory function."""
 
     @mock.patch.dict("os.environ", {"BINANCE_TRADE_API_KEY": "test_key", "BINANCE_TRADE_API_SECRET": "test_secret"})
-    @mock.patch("Trading.Client")
+    @mock.patch("ApiTrading.Trading.Client")
     def test_build_trading_client(self, mock_client_class: mock.MagicMock) -> None:
         """Test building trading client."""
         client = build_trading_client(testnet=False)

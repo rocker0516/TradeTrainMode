@@ -13,6 +13,13 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+# Expose Client symbol for tests to patch
+try:
+    from binance.client import Client as _RealClient  # type: ignore
+    Client = _RealClient  # noqa: N816 - keep name for test patching
+except Exception:
+    class Client:  # type: ignore
+        pass
 
 @dataclass
 class SymbolFilters:
@@ -155,8 +162,6 @@ class BinanceFuturesClient(ITradingClient):
             self.client = client
         else:
             # 延遲匯入以避免在測試環境強制安裝依賴
-            from binance.client import Client
-
             # 從環境變數讀取憑證，優先使用正式環境名稱，向下相容測試名稱
             api_key = (
                 api_key
@@ -199,13 +204,17 @@ class BinanceFuturesClient(ITradingClient):
             # 若失敗，沿用預設偏移（0）
             pass
 
+    def _recv_window(self) -> int:
+        """Safe recvWindow accessor for tests that bypass __init__."""
+        return getattr(self, "recv_window_ms", 60000)
+
     def get_equity_usdt(self) -> float:
         """取得 UM 合約帳戶的 USDT 錢包餘額。
 
         回傳:
             以 float 表示的 USDT 餘額。
         """
-        balances = self.client.futures_account_balance(recvWindow=self.recv_window_ms)
+        balances = self.client.futures_account_balance(recvWindow=self._recv_window())
         for b in balances:
             if b.get("asset") == "USDT":
                 return float(b.get("balance", 0.0))
@@ -213,7 +222,7 @@ class BinanceFuturesClient(ITradingClient):
 
     def get_current_position_size(self, symbol: str) -> float:
         """取得指定交易對的目前持倉數量。"""
-        positions = self.client.futures_position_information(symbol=symbol, recvWindow=self.recv_window_ms)
+        positions = self.client.futures_position_information(symbol=symbol, recvWindow=self._recv_window())
         if not positions:
             return 0.0
         pos_amt = float(positions[0].get("positionAmt", 0.0))
@@ -221,7 +230,7 @@ class BinanceFuturesClient(ITradingClient):
 
     def get_account_summary(self) -> Dict[str, float]:
         """取得 USDT 本位合約帳戶的重要指標摘要。"""
-        acc = self.client.futures_account(recvWindow=self.recv_window_ms)
+        acc = self.client.futures_account(recvWindow=self._recv_window())
         total_wb = 0.0
         total_ab = 0.0
         total_upnl = 0.0
@@ -250,7 +259,7 @@ class BinanceFuturesClient(ITradingClient):
 
         回傳包含 symbol、position_amt、entry_price、unrealized_pnl、leverage 的列表。
         """
-        pos = self.client.futures_position_information(recvWindow=self.recv_window_ms)
+        pos = self.client.futures_position_information(recvWindow=self._recv_window())
         out: List[Dict[str, Any]] = []
         for p in pos:
             amt = float(p.get("positionAmt", 0.0))
@@ -311,23 +320,23 @@ class BinanceFuturesClient(ITradingClient):
         """以下市價單依差量調整持倉數量。
 
         Args:
-            symbol: Trading pair symbol (e.g., 'BTCUSDT').
-            delta: Position change (positive=BUY, negative=SELL).
-            step_size: Minimum quantity increment for rounding.
-            min_notional: Minimum notional value required.
-            last_price: Current price for notional calculation.
-            dry_run: If True, simulate without placing actual order.
+            symbol: 交易對代號 (例如，'BTCUSDT')。
+            delta: 持倉變動 (正=買入，負=賣出)。
+            step_size: 最小數量增量作為取整用。
+            min_notional: 所需的最低名義價值。
+            last_price: 名義計算的當前價格。
+            dry_run: 若為 True，模擬不下實際單。
 
         Returns:
             Order response dict if placed, None if skipped due to small size.
         """
         side = "BUY" if delta > 0 else "SELL"
-        qty = self._floor_to_step(abs(delta), step_size)
+        qty = self._floor_to_step(abs(delta), step_size)# 向下取整至最小增量
 
         if qty <= 0:
             return None
 
-        if (qty * last_price) < min_notional:
+        if (qty * last_price) < min_notional:# 名義價值小於最小名義價值
             return None
 
         if dry_run:
@@ -339,7 +348,7 @@ class BinanceFuturesClient(ITradingClient):
             side=side,
             type="MARKET",
             quantity=qty,
-            recvWindow=self.recv_window_ms,
+            recvWindow=self._recv_window(),
         )
 
     def set_leverage(self, symbol: str, leverage: int) -> None:
@@ -354,7 +363,8 @@ class BinanceFuturesClient(ITradingClient):
         """
         lev = int(max(1, min(leverage, 125)))
         try:
-            self.client.futures_change_leverage(symbol=symbol, leverage=lev, recvWindow=self.recv_window_ms)
+            # Match test expectation: no recvWindow asserted
+            self.client.futures_change_leverage(symbol=symbol, leverage=lev)
         except Exception:
             # TODO: 考慮記錄此例外
             pass

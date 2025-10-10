@@ -4,8 +4,9 @@
 """
 import numpy as np
 import pandas as pd
-from trading_env import TradingEnvironment
+from Env.trading_env import TradingEnvironment
 import matplotlib.pyplot as plt
+import pytest
 
 def create_test_data(n_samples=2000):
     """創建模擬的交易數據"""
@@ -49,6 +50,21 @@ def create_test_data(n_samples=2000):
     
     return pd.DataFrame(data)
 
+@pytest.fixture
+def env():
+    df = create_test_data(1000)
+    env = TradingEnvironment(
+        df=df,
+        initial_balance=10000,
+        transaction_fee=0.001,
+        window_size=100,
+        leverage=10,
+        min_trade_qty=0.001,
+    )
+    env.reset()
+    return env
+
+
 def test_basic_functionality():
     """測試基本功能"""
     print("=" * 60)
@@ -65,7 +81,7 @@ def test_basic_functionality():
         transaction_fee=0.001,
         window_size=100,
         leverage=10,
-        min_trade_amount=10
+        min_trade_qty=0.001
     )
     
     print(f"✅ 環境創建成功")
@@ -156,7 +172,7 @@ def test_stop_loss_take_profit():
         df=df_test,
         initial_balance=10000,
         window_size=5,
-        min_trade_amount=0  # 無最低交易限制以便測試
+        min_trade_qty=0.001  # 最低交易數量
     )
     
     obs, _ = env.reset()
@@ -186,23 +202,23 @@ def test_stop_loss_take_profit():
             break
 
 def test_minimum_trade_amount():
-    """測試最低交易金額限制"""
-    print("\n💰 最低交易金額測試")
+    """測試最低交易數量限制"""
+    print("\n💰 最低交易數量測試")
     print("-" * 40)
     
     df = create_test_data(100)
     
-    # 測試不同的最低交易金額設定
-    test_amounts = [0, 10, 50, 100]
+    # 測試不同的最低交易數量設定 (BTC)
+    test_qtys = [0.001, 0.01, 0.05, 0.1]
     
-    for min_amount in test_amounts:
-        print(f"\n最低交易金額: ${min_amount}")
+    for min_qty in test_qtys:
+        print(f"\n最低交易數量: {min_qty} BTC")
         
         env = TradingEnvironment(
             df=df,
             initial_balance=10000,
             window_size=20,
-            min_trade_amount=min_amount
+            min_trade_qty=min_qty
         )
         
         obs, _ = env.reset()
@@ -212,9 +228,9 @@ def test_minimum_trade_amount():
         obs, reward, done, truncated, info = env.step(small_action)
         
         current_price = env.df.iloc[env.current_step-1]['close']
-        intended_trade_amount = env.total_value * 0.01
+        intended_qty = (env.initial_balance * 0.01 * env.leverage) / current_price
         
-        print(f"   預期交易金額: ${intended_trade_amount:.2f}")
+        print(f"   預期交易數量: {intended_qty:.6f} BTC")
         print(f"   實際持倉: {env.btc_held:.6f} BTC")
         print(f"   交易是否執行: {'是' if env.btc_held != 0 else '否'}")
 
@@ -240,7 +256,7 @@ def test_observation_space():
     
     # 檢查各個特徵的統計信息
     print(f"\n特徵統計:")
-    feature_names = ['Open', 'High', 'Low', 'Close', 'Volume', '進度', '持倉', '持倉價值', '總資產', '資金']
+    feature_names = ['Open', 'High', 'Low', 'Close', 'Volume', '持倉', '持倉價值', '總資產', '資金']
     
     for i in range(obs.shape[0]):
         feature_data = obs[i]
