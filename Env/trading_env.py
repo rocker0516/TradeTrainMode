@@ -99,6 +99,7 @@ class TradingEnvironment(gym.Env):
         equity_norm = self.executor.equity(current_price) / self.initial_balance
         wallet_norm = self.executor.wallet_balance / self.initial_balance
 
+        # 初始化帳戶狀態時間序列（用當前值填滿至 current_step 作為初始歷史） 
         for key, value in (
             ('position', pos_norm),
             ('position_value', pos_value_norm),

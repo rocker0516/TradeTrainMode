@@ -1,0 +1,35 @@
+{
+  "model": {
+    "lstm_hidden_dim": 128,
+    "lstm_layers": 2,
+    "hidden_dim": 256,
+    "lr": 0.0003,
+    "gamma": 0.99,
+    "tau": 0.005,
+    "alpha": 0.2,
+    "auto_alpha": true
+  },
+  "training": {
+    "total_episodes": 1000,
+    "eval_interval": 10,
+    "buffer_size": 100000,
+    "batch_size": 256,
+    "warmup_steps": 1000,
+    "update_interval": 1,
+    "save_dir": "./models",
+    "log_dir": "./logs",
+    "log_interval": 1,
+    "device": "cuda"
+  },
+  "environment": {
+    "data_path": "./Data/BTCUSDT_futures_volume_5years_5min.csv",
+    "initial_balance": 10000.0,
+    "transaction_fee": 0.001,
+    "window_size": 288,
+    "leverage": 10.0,
+    "min_balance": 0.0,
+    "min_trade_qty": 0.001,
+    "max_stop_loss_percent": 1000.0,
+    "max_take_profit_percent": 50.0
+  }
+}
