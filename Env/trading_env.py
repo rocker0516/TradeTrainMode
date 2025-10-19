@@ -4,8 +4,20 @@ import pandas as pd
 from gymnasium import spaces
 from .trade_executor import TradeExecutor
 
+'''
+    交易環境
+    
+    Args:
+        df: 交易數據
+        initial_balance: 初始資金
+        transaction_fee: 交易手續費
+        window_size: 窗口大小(K線數量)
+        leverage: 槓桿倍數
+        min_balance: 最小資金(資金不足時強制結束)
+        min_trade_qty: 最低交易數量(BTC)
+'''
 class TradingEnvironment(gym.Env):
-    def __init__(self, df, initial_balance=10000, transaction_fee=0.001, window_size= 24 * 60 //5, leverage = 10, min_balance=0, min_trade_qty=0.001, max_stop_loss_percent=1000, max_take_profit_percent=50,
+    def __init__(self, df, initial_balance=10000, transaction_fee=0.001, window_size= 24 * 60 //5, leverage = 10, min_balance=0, min_trade_qty=0.001,
                  reward_weights=None):
         super(TradingEnvironment, self).__init__()
         
@@ -28,20 +40,10 @@ class TradingEnvironment(gym.Env):
         self.leverage = leverage    #槓桿倍數
         self.min_balance = min_balance  # 最小資金(資金不足時強制結束)
         self.min_trade_qty = min_trade_qty  # 最低交易數量(BTC)
-        self.max_stop_loss_percent = max_stop_loss_percent  # 最大止損比例
-        self.max_take_profit_percent = max_take_profit_percent  # 最大止盈比例
-        self.stop_loss_price = 0.0    # 止損價格
-        self.take_profit_price = 0.0    # 止盈價格
         
-
         # 定義動作空間
-        # [交易方向和倉位百分比(-1~1), 止盈比例(0~10%), 止損比例(0~10%)]
-        self.action_space = spaces.Box(
-            low=np.array([-1.0, 0.0, 0.0]),  # 最小值：[倉位比例, 止盈%, 止損%]
-            high=np.array([1.0, 1.0, 1.0]), # 最大值：[倉位比例, 止盈%, 止損%]
-            shape=(3,),
-            dtype=np.float32
-        )
+        # 目標持倉比例 (-1.0 ~ 1.0)
+        self.action_space = spaces.Box(-1.0, 1.0, (1,), dtype=np.float32)
         
         # 計算特徵數量（包含帳戶狀態 4 項：持倉、持倉價值、總資產、資金）
         self.n_features = len(df.columns) + 4
@@ -60,8 +62,6 @@ class TradingEnvironment(gym.Env):
             fee_rate=self.transaction_fee,
             leverage=self.leverage,
             min_trade_qty=self.min_trade_qty,
-            max_stop_loss_percent=self.max_stop_loss_percent,
-            max_take_profit_percent=self.max_take_profit_percent,
         )
 
         # 帳戶狀態時間序列（逐筆滾動保存）
@@ -146,54 +146,36 @@ class TradingEnvironment(gym.Env):
         
         return obs
     
-    # 已移除複雜獎勵計算：獎勵改為總資產變化的簡單歸一化
-
-    # 執行交易改由 TradeExecutor 處理
-
     def step(self, action):
         # 取得當前K線
-        candle = self.df.iloc[self.current_step]
-        current_price = float(candle['close'])
-        current_high = float(candle['high'])
-        current_low = float(candle['low'])
-
-        last_equity = self.executor.equity(current_price)
-
-        position_percent = float(action[0])
-        take_profit_percent = float(action[1])
-        stop_loss_percent = float(action[2])
+        candle = self.df.iloc[self.current_step]＃ 當前K線
+        current_price = float(candle['close']) # 當前價格
+        current_high = float(candle['high']) # 當前最高價
+        current_low = float(candle['low']) # 當前最低價
+        last_equity = self.executor.equity(current_price) # 上一步的權益
+        position_percent = float(action) # 目標持倉比例 (-1.0 ~ 1.0)
 
         # 執行交易
         self.executor.execute(
-            position_percent=position_percent,
-            take_profit_percent=take_profit_percent,
-            stop_loss_percent=stop_loss_percent,
-            current_price=current_price,
-            high=current_high,
-            low=current_low,
-            equity=last_equity,
+            position_percent=position_percent, # 目標持倉比例 (-1.0 ~ 1.0)
+            current_price=current_price, # 當前價格
+            high=current_high, # 當前最高價
+            low=current_low, # 當前最低價
+            equity=last_equity, # 上一步的權益
         )
 
         # 同步帳戶狀態
-        new_equity = self.executor.equity(current_price)
-        self.balance = self.executor.wallet_balance
-        self.btc_held = self.executor.position.size
-        self.total_value = new_equity
+        new_equity = self.executor.equity(current_price) # 當前權益
+        self.balance = self.executor.wallet_balance # 當前資金
+        self.btc_held = self.executor.position.size # 當前持倉量
+        self.total_value = new_equity # 當前總資產
 
-        # 獎勵：本步權益變化
-        reward = (new_equity - last_equity) / self.initial_balance
-        
-        # 更新帳戶狀態時間序列（在當前索引寫入，之後再遞增步驟）
-        pos_norm = self.executor.position.size / (self.initial_balance / current_price) if current_price > 0 else 0.0
-        pos_value_norm = (self.executor.position.size * current_price) / self.initial_balance
-        equity_norm = new_equity / self.initial_balance
-        wallet_norm = self.executor.wallet_balance / self.initial_balance
-
+        # 更新帳戶狀態時間序列
         if 0 <= self.current_step < len(self.df):
-            self.account_series['position'][self.current_step] = float(pos_norm)
-            self.account_series['position_value'][self.current_step] = float(pos_value_norm)
-            self.account_series['equity'][self.current_step] = float(equity_norm)
-            self.account_series['wallet'][self.current_step] = float(wallet_norm)
+            self.account_series['position'][self.current_step] = float(self.executor.position.size)
+            self.account_series['position_value'][self.current_step] = float(self.executor.position.size * current_price)
+            self.account_series['equity'][self.current_step] = float(new_equity)
+            self.account_series['wallet'][self.current_step] = float(self.executor.wallet_balance)
 
         # 更新步驟
         self.current_step += 1
@@ -211,11 +193,4 @@ class TradingEnvironment(gym.Env):
             if balance_insufficient:
                 print(f"Episode結束：資金不足 (balance={self.balance:.2f}, min={self.min_balance})")
         
-        # 確保不會超出數據範圍
-        if self.current_step >= len(self.df):
-            self.current_step = len(self.df) - 1
-            self.done = True
-        
         return self._get_observation(), reward, self.done, False, {}
-    
-    # 已移除：與獎勵計算相關的輔助函式（進場質量、風險管理等）
