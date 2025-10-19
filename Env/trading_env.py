@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from gymnasium import spaces
 from .trade_executor import TradeExecutor
+from .reward import RewardCalculator
 
 '''
     交易環境
@@ -15,10 +16,11 @@ from .trade_executor import TradeExecutor
         leverage: 槓桿倍數
         min_balance: 最小資金(資金不足時強制結束)
         min_trade_qty: 最低交易數量(BTC)
+        margin_mode: 保證金模式 (cross: 全倉, isolated: 逐倉)
 '''
 class TradingEnvironment(gym.Env):
     def __init__(self, df, initial_balance=10000, transaction_fee=0.001, window_size= 24 * 60 //5, leverage = 10, min_balance=0, min_trade_qty=0.001,
-                 reward_weights=None):
+                 reward_weights=None, margin_mode: str = 'isolated', reward_calculator: RewardCalculator | None = None):
         super(TradingEnvironment, self).__init__()
         
         # 只保留數值列，並確保包含必要的OHLCV列
@@ -40,6 +42,7 @@ class TradingEnvironment(gym.Env):
         self.leverage = leverage    #槓桿倍數
         self.min_balance = min_balance  # 最小資金(資金不足時強制結束)
         self.min_trade_qty = min_trade_qty  # 最低交易數量(BTC)
+        self.margin_mode = str(margin_mode).lower()  # 保證金模式
         
         # 定義動作空間
         # 目標持倉比例 (-1.0 ~ 1.0)
@@ -62,6 +65,7 @@ class TradingEnvironment(gym.Env):
             fee_rate=self.transaction_fee,
             leverage=self.leverage,
             min_trade_qty=self.min_trade_qty,
+            margin_mode=self.margin_mode,
         )
 
         # 帳戶狀態時間序列（逐筆滾動保存）
@@ -72,6 +76,9 @@ class TradingEnvironment(gym.Env):
             'equity': np.zeros(series_len, dtype=np.float32),
             'wallet': np.zeros(series_len, dtype=np.float32),
         }
+
+        # 獎勵計算器
+        self.reward_calculator = reward_calculator or RewardCalculator(mode='delta_equity', scale=1.0)
 
         self.reset()
     
@@ -148,7 +155,7 @@ class TradingEnvironment(gym.Env):
     
     def step(self, action):
         # 取得當前K線
-        candle = self.df.iloc[self.current_step]＃ 當前K線
+        candle = self.df.iloc[self.current_step]# 當前K線
         current_price = float(candle['close']) # 當前價格
         current_high = float(candle['high']) # 當前最高價
         current_low = float(candle['low']) # 當前最低價
@@ -169,6 +176,8 @@ class TradingEnvironment(gym.Env):
         self.balance = self.executor.wallet_balance # 當前資金
         self.btc_held = self.executor.position.size # 當前持倉量
         self.total_value = new_equity # 當前總資產
+        # 回饋：使用獨立獎勵計算器
+        reward = self.reward_calculator.compute(last_equity=last_equity, new_equity=new_equity)
 
         # 更新帳戶狀態時間序列
         if 0 <= self.current_step < len(self.df):
@@ -192,5 +201,7 @@ class TradingEnvironment(gym.Env):
                 print(f"Episode結束：數據用完 (step={self.current_step}, data_len={len(self.df)})")
             if balance_insufficient:
                 print(f"Episode結束：資金不足 (balance={self.balance:.2f}, min={self.min_balance})")
+            else:
+                print(f"Episode結束：強平 (balance={self.balance:.2f})")
         
         return self._get_observation(), reward, self.done, False, {}

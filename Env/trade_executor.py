@@ -23,6 +23,10 @@ class TradeExecutor:
     權益（Equity）= 錢包餘額（wallet_balance）+ 未實現損益（unrealized_pnl）
     手續費：開倉/平倉依名目金額（notional）計收
     初始保證金：abs(持倉數量) * 進場價 / 槓桿
+
+    margin_mode:
+        - 'cross' 全倉：以整體錢包餘額作為保護抵押，強平使用 wallet_balance
+        - 'isolated' 逐倉：以倉位初始保證金作為抵押，強平使用 used_margin
     """
 
     def __init__(
@@ -33,19 +37,24 @@ class TradeExecutor:
         leverage: float, # 槓桿倍數
         min_trade_qty: float, # 最低交易數量(BTC)
         maintenance_margin_rate: float = 0.005, # 維持保證金率
+        margin_mode: str = 'cross', # 保證金模式：'cross' 或 'isolated'
     ) -> None:
         self.fee_rate = float(fee_rate)# 交易手續費
         self.leverage = float(leverage)# 槓桿倍數
         self.min_trade_qty = float(min_trade_qty)# 最低交易數量(BTC)
         self.maintenance_margin_rate = float(maintenance_margin_rate)# 維持保證金率
         self.initial_balance = float(initial_balance)# 初始資金
+        mode = str(margin_mode).lower()
+        if mode not in ("cross", "isolated"):
+            raise ValueError("margin_mode must be 'cross' or 'isolated'")
+        self.margin_mode = mode
 
         self.wallet_balance: float = float(initial_balance)# 錢包餘額
         self.position = PositionState()# 持倉狀態
         self.used_margin: float = 0.0# 已使用保證金
         self.closed_trades: List[Dict[str, float]] = []# 已平倉交易
 
-    def reset(self, initial_balance: float = self.initial_balance) -> None:
+    def reset(self, initial_balance: float) -> None:
         self.wallet_balance = float(initial_balance)# 錢包餘額
         self.position = PositionState()# 持倉狀態
         self.used_margin = 0.0# 已使用保證金
@@ -76,19 +85,28 @@ class TradeExecutor:
         low: float, # 當前最低價
         equity: float, # 當前權益
     ) -> None:
-    '''
-        if self.position.size != 0.0:
-            liq_price = self._calc_liquidation_price() # 強平價格
-            if liq_price is not None and liq_price > 0.0:
-                if (self.position.size > 0 and low <= liq_price) or (self.position.size < 0 and high >= liq_price):
-                    self._close_position(liq_price)
-                    return
-                '''
+    #
+     #   if self.position.size != 0.0:
+     #       liq_price = self._calc_liquidation_price() # 強平價格
+     #       if liq_price is not None and liq_price > 0.0:
+     #           if (self.position.size > 0 and low <= liq_price) or (self.position.size < 0 and high >= liq_price):
+     #               self._close_position(liq_price)
+     #               return
+    #
+
+        # 檢查價格最低價是否觸發強平
+        liq_price = self._calc_liquidation_price() # 強平價格
+        if liq_price is not None and liq_price > 0.0:# 強平價格存在且大於0
+            if (self.position.size > 0 and low <= liq_price) or (self.position.size < 0 and high >= liq_price):# 持倉方向與強平價格關係符合
+                self._close_position(liq_price)
+                self.done = True
+                return
 
         # 依最新權益與槓桿計算目標倉位數量
         current_equity = self.equity(current_price)# 當前權益 (錢包餘額 + 未實現損益)
         target_size = (current_equity * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
 
+        # 若無持倉，則依目標倉位數量開倉
         if self.position.size == 0.0:
             if abs(target_size) >= self.min_trade_qty:
                 self._increase_position(delta_size=target_size, price=current_price)
@@ -112,16 +130,16 @@ class TradeExecutor:
                         # 加倉
                         self._increase_position(delta_size=delta, price=current_price)
 
-        # 根據最終倉位方向，從當前價格更新止盈/止損價格
-        if self.position.size > 0:
-            self.position.take_profit_price = current_price * (1 + max(0.0, min(take_profit_percent, self.max_take_profit_percent)) * 0.01)
-            self.position.stop_loss_price = current_price * (1 - max(0.0, min(stop_loss_percent, self.max_stop_loss_percent)) * 0.01)
-        elif self.position.size < 0:
-            self.position.take_profit_price = current_price * (1 - max(0.0, min(take_profit_percent, self.max_take_profit_percent)) * 0.01)
-            self.position.stop_loss_price = current_price * (1 + max(0.0, min(stop_loss_percent, self.max_stop_loss_percent)) * 0.01)
-        else:
-            self.position.take_profit_price = 0.0
-            self.position.stop_loss_price = 0.0
+       # # 根據最終倉位方向，從當前價格更新止盈/止損價格
+        # if self.position.size > 0:
+        #     self.position.take_profit_price = current_price * (1 + max(0.0, min(take_profit_percent, self.max_take_profit_percent)) * 0.01)
+        #     self.position.stop_loss_price = current_price * (1 - max(0.0, min(stop_loss_percent, self.max_stop_loss_percent)) * 0.01)
+        # elif self.position.size < 0:
+        #     self.position.take_profit_price = current_price * (1 - max(0.0, min(take_profit_percent, self.max_take_profit_percent)) * 0.01)
+        #     self.position.stop_loss_price = current_price * (1 + max(0.0, min(stop_loss_percent, self.max_stop_loss_percent)) * 0.01)
+        # else:
+        #     self.position.take_profit_price = 0.0
+       #     self.position.stop_loss_price = 0.0
 
     # ---------- 內部操作 ----------
     def _fee(self, notional: float) -> float:
@@ -211,21 +229,23 @@ class TradeExecutor:
         # 觸發強平條件：equity(p) <= maintenance_margin(p)
         if self.position.size == 0.0 or self.position.entry_price == 0.0:
             return None
-        m = self.maintenance_margin_rate
-        s = self.position.size
-        e = self.position.entry_price
-        w = self.wallet_balance
+        m = self.maintenance_margin_rate# 維持保證金率
+        s = self.position.size# 持倉數量
+        e = self.position.entry_price# 進場價格
+
+        # 全倉使用錢包餘額作為抵押；逐倉使用倉位佔用保證金作為抵押
+        collateral = self.wallet_balance if self.margin_mode == "cross" else self.used_margin
         if s > 0:
             denom = s * (1.0 - m)
             if denom <= 0:
                 return None
-            price = (s * e - w) / denom
+            price = (s * e - collateral) / denom
             return max(0.0, price)
         else:
             u = abs(s)
             denom = u * (1.0 + m)
             if denom <= 0:
                 return None
-            price = (w + u * e) / denom
+            price = (collateral + u * e) / denom
             return max(0.0, price)
 
