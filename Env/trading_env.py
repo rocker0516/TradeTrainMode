@@ -2,6 +2,7 @@ import gymnasium as gym
 import numpy as np
 import pandas as pd
 from gymnasium import spaces
+import random
 from .trade_executor import TradeExecutor
 from .reward import RewardCalculator
 
@@ -19,8 +20,8 @@ from .reward import RewardCalculator
         margin_mode: 保證金模式 (cross: 全倉, isolated: 逐倉)
 '''
 class TradingEnvironment(gym.Env):
-    def __init__(self, df, initial_balance=10000, transaction_fee=0.001, window_size= 24 * 60 //5, leverage = 10, min_balance=0, min_trade_qty=0.001,
-                 reward_weights=None, margin_mode: str = 'isolated', reward_calculator: RewardCalculator | None = None):
+    def __init__(self, df, initial_balance=10000, transaction_fee=0.001, window_size= 24 * 60 //5, leverage = 10, min_balance=100, min_trade_qty=0.001,
+                 reward_weights=None, margin_mode: str = 'isolated', reward_calculator: RewardCalculator | None = None, random_start: bool = False):
         super(TradingEnvironment, self).__init__()
         
         # 只保留數值列，並確保包含必要的OHLCV列
@@ -43,6 +44,7 @@ class TradingEnvironment(gym.Env):
         self.min_balance = min_balance  # 最小資金(資金不足時強制結束)
         self.min_trade_qty = min_trade_qty  # 最低交易數量(BTC)
         self.margin_mode = str(margin_mode).lower()  # 保證金模式
+        self.random_start = bool(random_start)
         
         # 定義動作空間
         # 目標持倉比例 (-1.0 ~ 1.0)
@@ -82,9 +84,13 @@ class TradingEnvironment(gym.Env):
 
         self.reset()
     
-    def reset(self, seed=None):
+    def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self.current_step = self.window_size  # 從window_size開始，確保有足夠的歷史數據
+        # 若啟用隨機起點，從 [window_size, len(df)-2] 範圍中抽樣起始步
+        if self.random_start and len(self.df) > (self.window_size + 2):
+            self.current_step = int(random.randint(self.window_size, len(self.df) - 2))
+        else:
+            self.current_step = self.window_size  # 從window_size開始，確保有足夠的歷史數據
         self.executor.reset(self.initial_balance)
         self.balance = self.initial_balance
         self.btc_held = 0.0
@@ -151,7 +157,8 @@ class TradingEnvironment(gym.Env):
         obs[feature_idx + 2] = self.account_series['equity'][start_idx:end_idx]             # 總資產（正規化）
         obs[feature_idx + 3] = self.account_series['wallet'][start_idx:end_idx]             # 資金（正規化）
         
-        return obs
+        # 安全：確保觀察不含 NaN/Inf
+        return np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
     
     def step(self, action):
         # 取得當前K線
@@ -176,15 +183,20 @@ class TradingEnvironment(gym.Env):
         self.balance = self.executor.wallet_balance # 當前資金
         self.btc_held = self.executor.position.size # 當前持倉量
         self.total_value = new_equity # 當前總資產
-        # 回饋：使用獨立獎勵計算器
+        # 回饋：使用獨立獎勵計算器（done/原因 於末尾填入）
         reward = self.reward_calculator.compute(last_equity=last_equity, new_equity=new_equity)
 
         # 更新帳戶狀態時間序列
         if 0 <= self.current_step < len(self.df):
-            self.account_series['position'][self.current_step] = float(self.executor.position.size)
-            self.account_series['position_value'][self.current_step] = float(self.executor.position.size * current_price)
-            self.account_series['equity'][self.current_step] = float(new_equity)
-            self.account_series['wallet'][self.current_step] = float(self.executor.wallet_balance)
+            # 與 reset 一致：使用初始資金做正規化，避免尺度飄移
+            pos_norm = self.executor.position.size / (self.initial_balance / current_price) if self.initial_balance > 0 and current_price > 0 else 0.0
+            pos_value_norm = (self.executor.position.size * current_price) / self.initial_balance if self.initial_balance > 0 else 0.0
+            equity_norm = new_equity / self.initial_balance if self.initial_balance > 0 else 0.0
+            wallet_norm = self.executor.wallet_balance / self.initial_balance if self.initial_balance > 0 else 0.0
+            self.account_series['position'][self.current_step] = float(pos_norm)
+            self.account_series['position_value'][self.current_step] = float(pos_value_norm)
+            self.account_series['equity'][self.current_step] = float(equity_norm)
+            self.account_series['wallet'][self.current_step] = float(wallet_norm)
 
         # 更新步驟
         self.current_step += 1
@@ -195,6 +207,27 @@ class TradingEnvironment(gym.Env):
         
         self.done = data_exhausted or balance_insufficient
         
+        # 構造 info，提供結束原因
+        info = {}
+        if self.done:
+            if data_exhausted:
+                info['termination_reason'] = 'data_exhausted'
+            elif balance_insufficient:
+                info['termination_reason'] = 'balance_insufficient'
+            else:
+                info['termination_reason'] = 'other'
+            # 附加結算資訊供回調使用
+            info['final_balance'] = float(new_equity)
+            info['profit'] = float(new_equity - self.initial_balance)
+            info['profit_rate'] = float((info['profit'] / self.initial_balance) * 100) if self.initial_balance > 0 else 0.0
+            # 以終止資訊補充最後一步的獎勵（失敗懲罰）
+            reward = self.reward_calculator.compute(
+                last_equity=last_equity,
+                new_equity=new_equity,
+                done=True,
+                termination_reason=info['termination_reason']
+            )
+
         # 調試：記錄結束原因
         if self.done:
             if data_exhausted:
@@ -204,4 +237,4 @@ class TradingEnvironment(gym.Env):
             else:
                 print(f"Episode結束：強平 (balance={self.balance:.2f})")
         
-        return self._get_observation(), reward, self.done, False, {}
+        return self._get_observation(), reward, self.done, False, info

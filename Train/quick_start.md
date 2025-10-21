@@ -1,195 +1,164 @@
-# SAC + LSTM 交易模型 - 快速入门指南
+# 快速入門指南（SB3 SAC）
 
-## 🚀 5分钟快速开始
+## 🚀 3 分鐘開始訓練
 
-### 步骤 1: 安装依赖
-
-```bash
-pip install -r requirements.txt
-```
-
-### 步骤 2: 快速测试（50回合）
+### 步驟 1: 安裝依賴
 
 ```bash
-python Train/train.py --mode quick_test
+pip install stable-baselines3
 ```
 
-这将使用默认配置训练 50 个回合，用于验证代码是否正常工作。
-
-### 步骤 3: 完整训练（1000回合）
+### 步驟 2: 快速測試
 
 ```bash
-python Train/train.py
+python Train/train_sac.py --mode quick_test
 ```
 
-训练完成后，模型将保存在 `./models/` 目录。
+這將訓練 10,000 步（約 2-5 分鐘），驗證整個系統。
 
-### 步骤 4: 评估模型
+### 步驟 3: 完整訓練
 
 ```bash
-python Train/example_usage.py --model ./models/best_model.pth --data ./Data/BTCUSDT_futures_volume_5years_5min.csv --mode evaluate
+python Train/train_sac.py --timesteps 100000
 ```
 
-## 📚 常见用法
-
-### 使用不同的数据集
+### 步驟 4: 評估模型
 
 ```bash
-python Train/train.py --data ./Data/ETHUSDT_futures_volume_5years_5min.csv
+python Train/evaluate_sac.py --model ./models/best_model.zip --episodes 10
 ```
 
-### 指定训练回合数
+## 📋 常用命令
+
+### 訓練
 
 ```bash
-python Train/train.py --episodes 2000
+# 基本訓練（100K 步）
+python Train/train_sac.py
+
+# 長期訓練（500K 步）
+python Train/train_sac.py --timesteps 500000
+
+# 使用不同數據
+python Train/train_sac.py --data ./Data/ETHUSDT_futures_volume_5years_5min.csv
+
+# 自定義參數
+python Train/train_sac.py --initial_balance 20000 --leverage 20 --batch_size 512
+
+# 使用 CPU
+python Train/train_sac.py --device cpu
+
+# 繼續訓練
+python Train/train_sac.py --load_model ./models/best_model.zip --timesteps 50000
 ```
 
-### 使用 CPU 训练（如果没有 GPU）
+### 評估
 
 ```bash
-python Train/train.py --device cpu
+# 基本評估
+python Train/evaluate_sac.py --model ./models/best_model.zip
+
+# 多回合評估
+python Train/evaluate_sac.py --model ./models/best_model.zip --episodes 20
+
+# 安靜模式
+python Train/evaluate_sac.py --model ./models/best_model.zip --quiet
 ```
 
-### 继续训练已有模型
+## 📊 查看訓練進度
+
+### TensorBoard
 
 ```bash
-python Train/train.py --load_model ./models/checkpoint_ep100.pth --episodes 500
+tensorboard --logdir ./logs
 ```
 
-## 🎨 自定义配置
+然後在瀏覽器打開 http://localhost:6006
 
-### 1. 创建配置文件
+### 訓練輸出
 
-```python
-from Train.config import Config
+訓練過程中會實時顯示：
+- Episode 編號
+- 步數
+- 獎勵
+- 最終資金
+- 盈虧百分比
 
-config = Config()
+## ⚙️ 調整參數
 
-# 修改模型参数
-config.model.lstm_hidden_dim = 256
-config.model.lr = 1e-4
-
-# 修改训练参数
-config.training.total_episodes = 2000
-config.training.batch_size = 512
-
-# 保存配置
-config.save('my_config.json')
-```
-
-### 2. 使用自定义配置训练
+### 快速實驗（測試想法）
 
 ```bash
-python Train/train.py --config my_config.json
+python Train/train_sac.py --mode quick_test
 ```
 
-## 📊 监控训练过程
-
-训练期间，程序会输出：
-
-- **每回合**: 回合奖励、回合长度
-- **每10回合**: 平均奖励、平均长度、总步数
-- **评估结果**: 平均奖励、标准差、最高/最低奖励
-
-所有指标保存在 `./logs/` 目录。
-
-## 🎯 输出文件
-
-训练完成后，会生成以下文件：
-
-```
-models/
-├── best_model.pth          # 最佳模型（评估奖励最高）
-├── final_model.pth         # 最终模型
-├── checkpoint_ep50.pth     # 定期检查点
-├── checkpoint_ep100.pth
-└── config.json             # 训练配置
-
-logs/
-└── (训练日志)
-```
-
-## 💡 使用训练好的模型
-
-### 评估模型性能
+### 標準訓練（平衡）
 
 ```bash
-python Train/example_usage.py \
-  --model ./models/best_model.pth \
-  --data ./Data/BTCUSDT_futures_volume_5years_5min.csv \
-  --mode evaluate \
-  --episodes 20
+python Train/train_sac.py --timesteps 100000
 ```
 
-### 交互式演示
+### 高性能訓練（追求最佳）
 
 ```bash
-python Train/example_usage.py \
-  --model ./models/best_model.pth \
-  --data ./Data/BTCUSDT_futures_volume_5years_5min.csv \
-  --mode interactive
+python Train/train_sac.py --timesteps 500000 --batch_size 512 --buffer_size 500000
 ```
 
-## 🔧 性能调优
+## 🔧 常見問題
 
-### 如果训练太慢
+### Q: 訓練很慢怎麼辦？
 
-1. 减小批次大小: `--config` 文件中设置 `batch_size: 128`
-2. 减小 LSTM 维度: 设置 `lstm_hidden_dim: 64`
-3. 减小缓冲区: 设置 `buffer_size: 50000`
+A: 減小觀察窗口或使用 GPU：
+```bash
+python Train/train_sac.py --window_size 100 --device cuda
+```
 
-### 如果模型效果不好
+### Q: GPU 記憶體不足？
 
-1. 增加训练回合: `--episodes 5000`
-2. 增加网络容量: `lstm_hidden_dim: 256, hidden_dim: 512`
-3. 调整学习率: `lr: 1e-4` 或 `lr: 5e-4`
-4. 增加预热步数: `warmup_steps: 5000`
+A: 減小批次大小或使用 CPU：
+```bash
+python Train/train_sac.py --batch_size 128 --device cpu
+```
 
-### 如果训练不稳定
+### Q: 獎勵一直是負數？
 
-1. 降低学习率: `lr: 1e-4`
-2. 增加软更新系数: `tau: 0.01`
-3. 调整熵系数: `alpha: 0.1`
+A: 這是正常的，繼續訓練。SAC 需要時間學習：
+```bash
+python Train/train_sac.py --timesteps 200000
+```
 
-## 🐛 常见问题
+### Q: 如何知道模型訓練好了？
 
-### Q: CUDA out of memory
+A: 查看評估結果：
+```bash
+python Train/evaluate_sac.py --model ./models/best_model.zip --episodes 20
+```
 
-**A**: 减小 `batch_size` 或使用 CPU (`--device cpu`)
+觀察：
+- 平均盈虧是否為正
+- 勝率是否 > 50%
+- 最佳盈虧和最差盈虧的差距
 
-### Q: 奖励一直是负数
+## 📖 下一步
 
-**A**: 这是正常的初期行为。继续训练，通常在 100-200 回合后会改善。
+1. ✅ 運行快速測試確認系統正常
+2. 📊 查看 TensorBoard 了解訓練進度
+3. 🎯 調整參數優化性能
+4. 💰 評估模型並分析結果
+5. 🚀 部署到實盤交易（RealTrading）
 
-### Q: 训练中断怎么办
+## 💡 提示
 
-**A**: 按 Ctrl+C 会自动保存 `interrupted_model.pth`，可以用 `--load_model` 继续训练。
-
-### Q: 如何更换其他交易对数据
-
-**A**: 使用 `--data` 参数指定其他 CSV 文件，确保数据格式与现有数据一致。
-
-## 🎓 进阶使用
-
-### 添加自定义模型
-
-查看 `Train/models/base_model.py` 了解如何创建新的模型架构。
-
-### 修改奖励函数
-
-修改 `Env/trading_env.py` 中的 `step()` 方法。
-
-### 调整环境参数
-
-在配置文件中修改 `environment` 部分。
-
-## 📞 需要帮助？
-
-- 查看详细文档: `Train/README.md`
-- 查看代码示例: `Train/example_usage.py`
-- 查看配置选项: `Train/config.py`
+- **最佳模型**: 系統會自動保存評估性能最好的模型到 `models/best_model.zip`
+- **檢查點**: 每 10K 步保存一次檢查點，可用於繼續訓練
+- **日誌**: TensorBoard 日誌保存在 `logs/` 目錄，可視化訓練過程
+- **評估**: 定期評估模型，確保訓練方向正確
 
 ---
 
-**祝训练愉快！🎉**
+**開始您的第一次訓練！** 🚀
+
+```bash
+python Train/train_sac.py --mode quick_test
+```
 

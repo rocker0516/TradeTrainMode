@@ -1,7 +1,7 @@
 """
-工具函数模块
+工具模組
 
-包含训练相关的辅助工具。
+提供訓練過程中需要的各種工具函數和類別。
 """
 
 from .replay_buffer import ReplayBuffer

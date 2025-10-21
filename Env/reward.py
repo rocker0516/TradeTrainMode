@@ -22,9 +22,10 @@ class RewardCalculator:
     """
     mode: RewardMode = 'delta_equity'
     scale: float = 1.0
+    failure_penalty: float = 0.0
 
     
-    def compute(self, *, last_equity: float, new_equity: float) -> float:
+    def compute(self, *, last_equity: float, new_equity: float, done: bool = False, termination_reason: str | None = None) -> float:
         '''
             計算獎勵
             last_equity: 上一步的權益
@@ -44,6 +45,11 @@ class RewardCalculator:
         else:
             reward = float(new_equity - last_equity)
 
-        return float(reward * self.scale)
+        shaped = float(reward * self.scale)
+        # 失敗終止的額外懲罰（非資料用盡）
+        if done and termination_reason is not None and termination_reason != 'data_exhausted' and self.failure_penalty > 0:
+            shaped -= float(self.failure_penalty)
+
+        return shaped
 
 
