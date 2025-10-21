@@ -20,12 +20,14 @@ class RewardCalculator:
             - 'log': log(new_equity / last_equity)
         scale: 將獎勵乘以此比例以穩定訓練。
     """
-    mode: RewardMode = 'delta_equity'
+    mode: RewardMode = 'pct'
     scale: float = 1.0
     failure_penalty: float = 0.0
+    daily_bonus_scale: float = 0.0
 
     
-    def compute(self, *, last_equity: float, new_equity: float, done: bool = False, termination_reason: str | None = None) -> float:
+    def compute(self, *, last_equity: float, new_equity: float, done: bool = False, termination_reason: str | None = None,
+                day_return: float | None = None, is_day_end: bool = False) -> float:
         '''
             計算獎勵
             last_equity: 上一步的權益
@@ -49,6 +51,11 @@ class RewardCalculator:
         # 失敗終止的額外懲罰（非資料用盡）
         if done and termination_reason is not None and termination_reason != 'data_exhausted' and self.failure_penalty > 0:
             shaped -= float(self.failure_penalty)
+
+        # 每日績效塑形：在日結束時，依據日報酬加成/扣分
+        if is_day_end and day_return is not None and self.daily_bonus_scale != 0.0:
+            # 正報酬加分、負報酬扣分（線性），避免過大影響留給 scale 控制
+            shaped += float(self.daily_bonus_scale * day_return)
 
         return shaped
 

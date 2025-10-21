@@ -81,6 +81,9 @@ class TradingEnvironment(gym.Env):
 
         # 獎勵計算器
         self.reward_calculator = reward_calculator or RewardCalculator(mode='delta_equity', scale=1.0)
+        # 日績效追蹤
+        self._bars_per_day = 24 * 60 // 5
+        self._day_start_equity = None
 
         self.reset()
     
@@ -97,6 +100,7 @@ class TradingEnvironment(gym.Env):
         self.total_value = self.balance
         self.done = False
         self.position_holding_time = 0  # 記錄持倉時間
+        self._day_start_equity = self.executor.equity(float(self.df.iloc[self.current_step]['close']))
         self.last_total_value = self.initial_balance  # 記錄上一次的總資產
         
         # 交易追蹤
@@ -183,8 +187,19 @@ class TradingEnvironment(gym.Env):
         self.balance = self.executor.wallet_balance # 當前資金
         self.btc_held = self.executor.position.size # 當前持倉量
         self.total_value = new_equity # 當前總資產
-        # 回饋：使用獨立獎勵計算器（done/原因 於末尾填入）
-        reward = self.reward_calculator.compute(last_equity=last_equity, new_equity=new_equity)
+        # 回饋：使用獨立獎勵計算器（含每日結算）
+        steps_since_window = self.current_step - self.window_size
+        is_day_end = (steps_since_window > 0 and (steps_since_window % self._bars_per_day) == 0)
+        day_return = None
+        if is_day_end and self._day_start_equity and self._day_start_equity > 0:
+            day_return = float(new_equity / self._day_start_equity - 1.0)
+            self._day_start_equity = new_equity  # 下一日起點
+        reward = self.reward_calculator.compute(
+            last_equity=last_equity,
+            new_equity=new_equity,
+            is_day_end=is_day_end,
+            day_return=day_return,
+        )
 
         # 更新帳戶狀態時間序列
         if 0 <= self.current_step < len(self.df):
