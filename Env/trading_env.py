@@ -80,10 +80,12 @@ class TradingEnvironment(gym.Env):
         }
 
         # 獎勵計算器
-        self.reward_calculator = reward_calculator or RewardCalculator(mode='delta_equity', scale=1.0)
+        self.reward_calculator = reward_calculator or RewardCalculator(mode='log', scale=1.0)
         # 日績效追蹤
         self._bars_per_day = 24 * 60 // 5
         self._day_start_equity = None
+        # 倉位追蹤（用於計算換手）
+        self._last_position_size = 0.0
 
         self.reset()
     
@@ -101,6 +103,7 @@ class TradingEnvironment(gym.Env):
         self.done = False
         self.position_holding_time = 0  # 記錄持倉時間
         self._day_start_equity = self.executor.equity(float(self.df.iloc[self.current_step]['close']))
+        self._last_position_size = 0.0
         self.last_total_value = self.initial_balance  # 記錄上一次的總資產
         
         # 交易追蹤
@@ -187,7 +190,29 @@ class TradingEnvironment(gym.Env):
         self.balance = self.executor.wallet_balance # 當前資金
         self.btc_held = self.executor.position.size # 當前持倉量
         self.total_value = new_equity # 當前總資產
-        # 回饋：使用獨立獎勵計算器（含每日結算）
+        # 計算保證金緩衝（距離強平的安全空間）
+        margin_buffer = None
+        try:
+            # 使用淨槓桿 proxy：position_value / equity
+            position_value = abs(float(self.executor.position.size * current_price))
+            if new_equity > 0:
+                leverage_ratio = position_value / new_equity
+                # 將槓桿比轉為緩衝比：槓桿越高緩衝越低
+                # 假設安全槓桿上限為 self.leverage * 0.8，超過此值緩衝降為 0
+                safe_leverage = float(self.leverage) * 0.8
+                if leverage_ratio >= safe_leverage:
+                    margin_buffer = 0.0
+                else:
+                    margin_buffer = 1.0 - (leverage_ratio / safe_leverage)
+                margin_buffer = float(np.clip(margin_buffer, 0.0, 1.0))
+        except Exception:
+            margin_buffer = 1.0  # 異常時視為安全
+        
+        # 計算倉位變動（換手）
+        position_change = abs(float(self.executor.position.size - self._last_position_size))
+        self._last_position_size = float(self.executor.position.size)
+
+        # 回饋：使用獨立獎勵計算器（含每日結算、緩衝、換手）
         steps_since_window = self.current_step - self.window_size
         is_day_end = (steps_since_window > 0 and (steps_since_window % self._bars_per_day) == 0)
         day_return = None
@@ -199,6 +224,8 @@ class TradingEnvironment(gym.Env):
             new_equity=new_equity,
             is_day_end=is_day_end,
             day_return=day_return,
+            margin_buffer=margin_buffer,
+            position_change=position_change,
         )
 
         # 更新帳戶狀態時間序列
