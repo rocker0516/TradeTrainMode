@@ -50,14 +50,69 @@ class TradingEnvironment(gym.Env):
         # 目標持倉比例 (-1.0 ~ 1.0)
         self.action_space = spaces.Box(-1.0, 1.0, (1,), dtype=np.float32)
         
-        # 計算特徵數量（包含帳戶狀態 4 項：持倉、持倉價值、總資產、資金）
-        self.n_features = len(df.columns) + 4
-        
-        # 定義觀察空間
+        # 構建穩定的觀測特徵：報酬/比例/滾動z-score（只用過去資料）
+        self.feature_lookback = int(max(288, self.window_size))
+        df_num = self.df  # shorthand
+
+        close = df_num['close'].astype(np.float64)
+        high = df_num['high'].astype(np.float64)
+        low = df_num['low'].astype(np.float64)
+        volume = df_num['volume'].astype(np.float64)
+        buy_vol = df_num.get('buy_volume', pd.Series(0.0, index=df_num.index)).astype(np.float64)
+        sell_vol = df_num.get('sell_volume', pd.Series(0.0, index=df_num.index)).astype(np.float64)
+
+        # 價格動能（log returns）
+        log_close = np.log(np.clip(close, 1e-12, None))
+        log_ret_1 = log_close.diff().fillna(0.0)
+        log_ret_5 = (log_close.diff(5) / 5.0).fillna(0.0)
+
+        # 波動度（ATR 比例、當根高低幅度）
+        prev_close = close.shift(1)
+        true_range = np.maximum.reduce([
+            (high - low).values,
+            np.abs(high - prev_close).fillna(0.0).values,
+            np.abs(low - prev_close).fillna(0.0).values,
+        ])
+        atr = pd.Series(true_range, index=df_num.index).rolling(14, min_periods=5).mean().fillna(0.0)
+        atr_ratio = (atr / np.clip(close, 1e-12, None)).astype(np.float32)
+        hl_range = ((high - low) / np.clip(close, 1e-12, None)).fillna(0.0)
+
+        # 滾動 z-score（僅使用過去樣本）
+        def _rolling_z(series: pd.Series, w: int) -> pd.Series:
+            m = series.rolling(w, min_periods=20).mean()
+            s = series.rolling(w, min_periods=20).std()
+            return ((series - m) / s.replace(0.0, np.nan)).fillna(0.0)
+
+        log_vol = np.log1p(np.clip(volume, 0.0, None))
+        vol_z = _rolling_z(log_vol, self.feature_lookback)
+
+        flow_ratio = (buy_vol - sell_vol) / (buy_vol + sell_vol + 1e-12)
+        flow_z = _rolling_z(flow_ratio, self.feature_lookback)
+
+        lsr = df_num.get('long_short_ratio', pd.Series(0.0, index=df_num.index)).astype(np.float64)
+        lsr_log = np.log(np.clip(lsr, 1e-6, None))
+        lsr_z = _rolling_z(lsr_log, self.feature_lookback)
+
+        # 組裝最終觀測特徵
+        self.obs_features = pd.DataFrame({
+            'log_ret_1': log_ret_1.astype(np.float32),
+            'log_ret_5': log_ret_5.astype(np.float32),
+            'hl_range': hl_range.astype(np.float32),
+            'atr_ratio': atr_ratio.astype(np.float32),
+            'vol_z': vol_z.astype(np.float32),
+            'flow_z': flow_z.astype(np.float32),
+            'lsr_z': lsr_z.astype(np.float32),
+        }, index=df_num.index)
+
+        # 特徵數量：預計算特徵 + 帳戶 4 項
+        self.base_feature_count = int(self.obs_features.shape[1])
+        self.n_features = self.base_feature_count + 4
+
+        # 觀察空間
         self.observation_space = spaces.Box(
-            low=-np.inf, 
-            high=np.inf, 
-            shape=(self.n_features, window_size),  # 所有特徵
+            low=-np.inf,
+            high=np.inf,
+            shape=(self.n_features, self.window_size),
             dtype=np.float32
         )
         
@@ -146,20 +201,11 @@ class TradingEnvironment(gym.Env):
         # 計算特徵矩陣
         obs = np.zeros((self.n_features, self.window_size), dtype=np.float32)
         
-        # 1. 一次性獲取所有價格特徵（正規化）
-        price_features = window_data.values.T  # 轉置以匹配形狀
+        # 1. 使用預先計算的穩定特徵窗口
+        features_window = self.obs_features.iloc[self.current_step - self.window_size:self.current_step]
+        obs[:self.base_feature_count] = features_window.values.T.astype(np.float32)
         
-        # 正規化價格特徵（現在所有列都是數值列）
-        for i in range(len(self.df.columns)):
-            feature_data = price_features[i]
-            if len(feature_data) > 0 and feature_data.max() != feature_data.min():
-                price_features[i] = (feature_data - feature_data.min()) / (feature_data.max() - feature_data.min())
-            else:
-                price_features[i] = np.zeros_like(feature_data)
-        
-        obs[:len(self.df.columns)] = price_features
-        
-        feature_idx = len(self.df.columns)
+        feature_idx = self.base_feature_count
 
         # 2. 帳戶狀態（逐筆滾動歷史）
         start_idx = self.current_step - self.window_size
