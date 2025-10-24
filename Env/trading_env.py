@@ -105,12 +105,17 @@ class TradingEnvironment(gym.Env):
         self._day_start_equity = self.executor.equity(float(self.df.iloc[self.current_step]['close']))
         self._last_position_size = 0.0
         self.last_total_value = self.initial_balance  # 記錄上一次的總資產
+        self.episode_steps = 0  # 回合步數統計
         
         # 交易追蹤
         self.open_trades = []  # 記錄開倉信息
         self.closed_trades = []  # 記錄平倉信息
         self.last_position = 0  # 記錄上一次的持倉量
         self.avg_entry_price = 0  # 平均進場價格
+        
+        # 本回合最大步數（受資料長度限制）
+        self.episode_start_step = int(self.current_step)
+        self.episode_max_steps = max(0, (len(self.df) - 1) - self.episode_start_step)
         
         # 初始化帳戶狀態時間序列（用當前值填滿至 current_step 作為初始歷史）
         current_price = float(self.df.iloc[self.current_step]['close'])
@@ -242,6 +247,7 @@ class TradingEnvironment(gym.Env):
 
         # 更新步驟
         self.current_step += 1
+        self.episode_steps += 1
 
         # 檢查結束條件並記錄原因
         data_exhausted = self.current_step >= len(self.df) - 1
@@ -262,6 +268,21 @@ class TradingEnvironment(gym.Env):
             info['final_balance'] = float(new_equity)
             info['profit'] = float(new_equity - self.initial_balance)
             info['profit_rate'] = float((info['profit'] / self.initial_balance) * 100) if self.initial_balance > 0 else 0.0
+            # 交易統計：平倉次數與手續費
+            try:
+                info['long_close_count'] = int(self.executor.long_close_count)
+                info['short_close_count'] = int(self.executor.short_close_count)
+                info['total_fees'] = float(self.executor.total_fees)
+                info['episode_steps'] = int(self.episode_steps)
+                # 進場次數（多/空）
+                info['long_entry_count'] = int(self.executor.long_entry_count)
+                info['short_entry_count'] = int(self.executor.short_entry_count)
+                # 預計最大步數與資料長度
+                info['episode_max_steps'] = int(self.episode_max_steps)
+                info['data_len'] = int(len(self.df))
+                info['window_size'] = int(self.window_size)
+            except Exception:
+                pass
             # 以終止資訊補充最後一步的獎勵（失敗懲罰）
             reward = self.reward_calculator.compute(
                 last_equity=last_equity,

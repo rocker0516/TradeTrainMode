@@ -18,11 +18,64 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import SubprocVecEnv
 import torch
 from gymnasium.wrappers import TimeLimit
 
 from Env.trading_env import TradingEnvironment
 from Env.reward import RewardCalculator
+
+
+class TradingEnvFactory:
+    """
+    可序列化的環境工廠，用於多進程向量環境。
+
+    每個子進程都會持有各自獨立的 RewardCalculator 與環境狀態，
+    以確保「每回合獨立獎勵計算」。
+    """
+
+    def __init__(
+        self,
+        *,
+        data_path: str,
+        initial_balance: float,
+        transaction_fee: float,
+        window_size: int,
+        leverage: float,
+        min_balance: float,
+        min_trade_qty: float,
+        margin_mode: str,
+        reward_mode: str,
+        random_start: bool,
+    ) -> None:
+        self.data_path = data_path
+        self.initial_balance = initial_balance
+        self.transaction_fee = transaction_fee
+        self.window_size = window_size
+        self.leverage = leverage
+        self.min_balance = min_balance
+        self.min_trade_qty = min_trade_qty
+        self.margin_mode = margin_mode
+        self.reward_mode = reward_mode
+        self.random_start = random_start
+
+    def __call__(self):
+        df = pd.read_csv(self.data_path)
+        rc = RewardCalculator(mode=self.reward_mode, scale=1.0)
+        env = TradingEnvironment(
+            df=df,
+            initial_balance=self.initial_balance,
+            transaction_fee=self.transaction_fee,
+            window_size=self.window_size,
+            leverage=self.leverage,
+            min_balance=self.min_balance,
+            min_trade_qty=self.min_trade_qty,
+            margin_mode=self.margin_mode,
+            reward_calculator=rc,
+            random_start=self.random_start,
+        )
+        return Monitor(env)
 
 
 class TradingCallback(BaseCallback):
@@ -40,94 +93,125 @@ class TradingCallback(BaseCallback):
         self.episode_lengths = []
         self.episode_profit_rates = []
         self.episode_failures = []  # True 表示失敗（非 data_exhausted）
-        self.current_episode_reward = 0
-        self.current_episode_length = 0
-        self.current_episode_index = 1
-        self.last_episode_report = None  # 保存上一回合摘要（在下一回合開始時打印）
+        # 向量環境的逐環境狀態
+        self.current_episode_reward = None  # 將在 training start 時初始化為 (n_envs,) 向量
+        self.current_episode_length = None
+        self.env_episode_indices = None  # 每個環境的回合序號
     
-    def _on_step(self) -> bool:
-        """每步後調用"""
-        # 累積獎勵
-        self.current_episode_reward += self.locals['rewards'][0]
-        self.current_episode_length += 1
-
-        # 如遇到新回合開始（episode_starts=True），即時更新回合索引
+    def _on_training_start(self) -> None:
         try:
-            episode_starts = self.locals.get('episode_starts')
-            if episode_starts is not None and len(episode_starts) > 0 and bool(episode_starts[0]):
-                # 若有上一回合摘要，先打印
-                if self.last_episode_report is not None:
-                    rep = self.last_episode_report
-                    print(
-                        f"[prev-episode] ep={rep['ep']} reward={rep['reward']:.2f} profit_rate={rep['profit_rate']:+.2f}% result={rep['result']}"
-                    )
-                    self.last_episode_report = None
-                self.current_episode_index = len(self.episode_rewards) + 1
+            n_envs = getattr(self.training_env, 'num_envs', 1)
         except Exception:
-            pass
+            n_envs = 1
+        self.current_episode_reward = np.zeros(n_envs, dtype=float)
+        self.current_episode_length = np.zeros(n_envs, dtype=int)
+        self.env_episode_indices = np.ones(n_envs, dtype=int)
 
-        # 每步輸出當前回合數（可選）
+    def _on_step(self) -> bool:
+        """每步後調用（支援向量環境）"""
+        rewards = self.locals.get('rewards')
+        dones = self.locals.get('dones')
+        infos = self.locals.get('infos')
+        if rewards is None or dones is None:
+            return True
+
+        n_envs = len(rewards)
+        # 累積獎勵與步數
+        self.current_episode_reward[:n_envs] += rewards
+        self.current_episode_length[:n_envs] += 1
+
+        # 可選：每步輸出任一環境的回合數
         if self.print_step_episode:
             try:
-                print(f"[train] step={self.num_timesteps} episode={self.current_episode_index}", end='\r')
+                print(f"[train] step={self.num_timesteps}", end='\r')
             except Exception:
                 pass
-        
-        # 檢查是否結束
-        if self.locals['dones'][0]:
-            self.episode_rewards.append(self.current_episode_reward)
-            self.episode_lengths.append(self.current_episode_length)
-            
-            # 獲取環境信息（解除 Monitor 包裝），若 infos 提供結算則優先使用
-            wrapped_env = self.training_env.envs[0]
-            env = wrapped_env.unwrapped if hasattr(wrapped_env, 'unwrapped') else wrapped_env
-            final_balance = float(env.total_value)
-            profit = final_balance - env.initial_balance
-            profit_rate = (profit / env.initial_balance) * 100
-            self.episode_profit_rates.append(profit_rate)
 
-            # 讀取終止原因（來自 infos）以判斷是否失敗
-            failure_flag = False
-            term_result = 'unknown'
+        # 處理結束的環境們
+        for i in range(n_envs):
+            if not dones[i]:
+                continue
+
+            # 取得該環境的底層 env
             try:
-                infos = self.locals.get('infos')
-                if isinstance(infos, (list, tuple)) and len(infos) > 0 and isinstance(infos[0], dict):
-                    reason = infos[0].get('termination_reason')
+                wrapped_env = self.training_env.envs[i]
+                env = wrapped_env.unwrapped if hasattr(wrapped_env, 'unwrapped') else wrapped_env
+            except Exception:
+                env = None
+
+            final_balance = None
+            profit_rate = None
+            term_result = 'unknown'
+            failure_flag = False
+            long_close_count = None
+            short_close_count = None
+            total_fees = None
+            episode_steps = None
+            long_entry_count = None
+            short_entry_count = None
+            episode_max_steps = None
+
+            # 從 infos[i] 讀取結算資訊
+            try:
+                info_i = infos[i] if isinstance(infos, (list, tuple)) and i < len(infos) else {}
+                if isinstance(info_i, dict):
+                    reason = info_i.get('termination_reason')
                     failure_flag = (reason is not None and reason != 'data_exhausted')
-                    # 若有結算資訊，覆蓋計算
-                    if 'final_balance' in infos[0]:
-                        final_balance = float(infos[0]['final_balance'])
-                        profit = float(infos[0]['profit'])
-                        profit_rate = float(infos[0]['profit_rate'])
-                        self.episode_profit_rates[-1] = profit_rate
+                    if 'final_balance' in info_i:
+                        final_balance = float(info_i['final_balance'])
+                        profit_rate = float(info_i.get('profit_rate', 0.0))
+                    if 'long_close_count' in info_i:
+                        long_close_count = int(info_i['long_close_count'])
+                    if 'short_close_count' in info_i:
+                        short_close_count = int(info_i['short_close_count'])
+                    if 'total_fees' in info_i:
+                        total_fees = float(info_i['total_fees'])
+                    if 'episode_steps' in info_i:
+                        episode_steps = int(info_i['episode_steps'])
+                    if 'long_entry_count' in info_i:
+                        long_entry_count = int(info_i['long_entry_count'])
+                    if 'short_entry_count' in info_i:
+                        short_entry_count = int(info_i['short_entry_count'])
+                    if 'episode_max_steps' in info_i:
+                        episode_max_steps = int(info_i['episode_max_steps'])
                     if reason == 'data_exhausted':
                         term_result = 'success(data_exhausted)'
                     elif reason is not None:
                         term_result = f"fail({reason})"
             except Exception:
-                failure_flag = False
+                pass
+
+            # 若 info 未提供，則從 env 讀取
+            if (final_balance is None or profit_rate is None) and env is not None:
+                try:
+                    final_balance = float(env.total_value)
+                    profit = final_balance - env.initial_balance
+                    profit_rate = (profit / env.initial_balance) * 100
+                except Exception:
+                    final_balance = 0.0
+                    profit_rate = 0.0
+
+            # 記錄聚合回合資料
+            self.episode_rewards.append(self.current_episode_reward[i])
+            self.episode_lengths.append(int(self.current_episode_length[i]))
+            self.episode_profit_rates.append(float(profit_rate))
             self.episode_failures.append(bool(failure_flag))
 
-            # 保存上一回合摘要，將在下一回合開始時打印
-            self.last_episode_report = {
-                'ep': len(self.episode_rewards),
-                'reward': self.current_episode_reward,
-                'profit_rate': profit_rate,
-                'result': term_result,
-            }
-            
-            # 記錄信息
             episode_num = len(self.episode_rewards)
             if episode_num % self.log_interval == 0:
                 print(
                     f"Episode {episode_num:4d} | "
-                    f"Steps: {self.current_episode_length:4d} | "
-                    f"Reward: {self.current_episode_reward:8.2f} | "
-                    f"Balance: {final_balance:10.2f} | "
-                    f"Profit: {profit:8.2f} ({profit_rate:+.2f}%)"
+                    f"Env#{i} | "
+                    f"Steps: {episode_steps if episode_steps is not None else int(self.current_episode_length[i]):4d}/{episode_max_steps if episode_max_steps is not None else '?'} | "
+                    f"Reward: {self.current_episode_reward[i]:8.2f} | "
+                    f"Balance: {final_balance if final_balance is not None else 0.0:10.2f} | "
+                    f"ProfitRate: {profit_rate if profit_rate is not None else 0.0:+.2f}% | "
+                    f"Fees: {total_fees if total_fees is not None else 0.0:.4f} | "
+                    f"Entries L/S: {long_entry_count if long_entry_count is not None else 0}/{short_entry_count if short_entry_count is not None else 0} | "
+                    f"Result: {term_result}"
                 )
 
-            # 每 10 回合統計：平均收益率與總失敗次數
+            # 每 10 回合統計
             if episode_num % 10 == 0:
                 last10_rates = self.episode_profit_rates[-10:]
                 last10_fails = self.episode_failures[-10:]
@@ -136,11 +220,12 @@ class TradingCallback(BaseCallback):
                 print(
                     f"[10-episode stats] avg_profit_rate={avg_rate_10:+.2f}% | failures={total_fail_10}/10"
                 )
-            
-            # 重置計數器
-            self.current_episode_reward = 0
-            self.current_episode_length = 0
-        
+
+            # 重置該環境的回合累積器（獨立回合）
+            self.current_episode_reward[i] = 0.0
+            self.current_episode_length[i] = 0
+            self.env_episode_indices[i] += 1
+
         return True
     
     def _on_training_end(self) -> None:
@@ -254,6 +339,7 @@ class TerminationAwareEvalCallback(EvalCallback):
 def create_environment(
     data_path: str,
     initial_balance: float = 10000.0,
+    min_balance: float = 100.0,
     leverage: float = 10.0,
     transaction_fee: float = 0.001,
     window_size: int = 288,
@@ -319,7 +405,7 @@ def create_environment(
         transaction_fee=transaction_fee,
         window_size=window_size,
         leverage=leverage,
-        min_balance=100.0,
+        min_balance=min_balance,
         min_trade_qty=0.001,
         margin_mode=margin_mode,
         reward_calculator=reward_calculator,
@@ -328,6 +414,7 @@ def create_environment(
     
     print(f"環境創建成功:")
     print(f"  觀察空間: {env.observation_space.shape}")
+    print(f"  最小資金: {min_balance}")
     print(f"  動作空間: {env.action_space.shape}")
     print(f"  初始資金: {initial_balance}")
     print(f"  槓桿倍數: {leverage}")
@@ -344,7 +431,7 @@ def train_sac(
     learning_starts: int = 1000,
     batch_size: int = 256,
     tau: float = 0.005,
-    gamma: float = 0.99,
+    gamma: float = 0.995,
     model_dir: str = './models',
     log_dir: str = './logs',
     save_freq: int = 10000,
@@ -352,6 +439,8 @@ def train_sac(
     eval_episodes: int = 100,
     device: str = 'auto',
     load_model: str | None = None,
+    n_envs: int = 1,
+    train_data_path: str | None = None,
     eval_data_path: str | None = None,
     eval_start_date: str | None = None,
     eval_end_date: str | None = None,
@@ -391,19 +480,39 @@ def train_sac(
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"\n使用設備: {device}")
     
-    # 包裝環境（用於監控）
-    env = Monitor(env)
+    # 建立向量化或單環境
+    monitor_dir_path = log_dir / 'monitor'
+    monitor_dir_path.mkdir(parents=True, exist_ok=True)
+
+    if n_envs is not None and int(n_envs) > 1:
+        print(f"建立向量化環境: n_envs={int(n_envs)} (SubprocVecEnv)")
+        factory = TradingEnvFactory(
+            data_path=(train_data_path or eval_data_path or './Data/BTCUSDT_futures_volume_5years_5min.csv'),
+            initial_balance=env.initial_balance,
+            transaction_fee=env.transaction_fee,
+            window_size=env.window_size,
+            leverage=env.leverage,
+            min_balance=env.min_balance,
+            min_trade_qty=env.min_trade_qty,
+            margin_mode=env.margin_mode,
+            reward_mode=(getattr(env.reward_calculator, 'mode', 'delta_equity') if hasattr(env, 'reward_calculator') else 'delta_equity'),
+            random_start=True,
+        )
+        vec_env = make_vec_env(factory, n_envs=int(n_envs), vec_env_cls=SubprocVecEnv, monitor_dir=str(monitor_dir_path))
+        env_for_training = vec_env
+    else:
+        env_for_training = Monitor(env)
     
     # 創建或加載模型
     if load_model and Path(load_model).exists():
         print(f"加載模型: {load_model}")
-        model = SAC.load(load_model, env=env, device=device)
+        model = SAC.load(load_model, env=env_for_training, device=device)
         print("模型加載成功")
     else:
         print("創建新模型...")
         model = SAC(
             policy="MlpPolicy",
-            env=env,
+            env=env_for_training,
             learning_rate=learning_rate,
             buffer_size=buffer_size,
             learning_starts=learning_starts,
@@ -439,12 +548,12 @@ def train_sac(
         if eval_start_date is not None or eval_end_date is not None or eval_data_path is not None:
             eval_env = create_environment(
                 data_path=eval_data_path or './Data/BTCUSDT_futures_volume_5years_5min.csv',
-                initial_balance=env.unwrapped.initial_balance,
-                leverage=env.unwrapped.leverage,
-                transaction_fee=env.unwrapped.transaction_fee,
-                window_size=env.unwrapped.window_size,
-                reward_mode=env.unwrapped.reward_calculator.mode if hasattr(env.unwrapped, 'reward_calculator') else 'delta_equity',
-                margin_mode=env.unwrapped.margin_mode,
+                initial_balance=(env_for_training.get_attr('initial_balance')[0] if hasattr(env_for_training, 'get_attr') else env.unwrapped.initial_balance),
+                leverage=(env_for_training.get_attr('leverage')[0] if hasattr(env_for_training, 'get_attr') else env.unwrapped.leverage),
+                transaction_fee=(env_for_training.get_attr('transaction_fee')[0] if hasattr(env_for_training, 'get_attr') else env.unwrapped.transaction_fee),
+                window_size=(env_for_training.get_attr('window_size')[0] if hasattr(env_for_training, 'get_attr') else env.unwrapped.window_size),
+                reward_mode=(env_for_training.get_attr('reward_calculator')[0].mode if hasattr(env_for_training, 'get_attr') else (env.unwrapped.reward_calculator.mode if hasattr(env.unwrapped, 'reward_calculator') else 'delta_equity')),
+                margin_mode=(env_for_training.get_attr('margin_mode')[0] if hasattr(env_for_training, 'get_attr') else env.unwrapped.margin_mode),
                 start_date=eval_start_date,
                 end_date=eval_end_date,
                 random_start=False,
@@ -453,22 +562,42 @@ def train_sac(
                 eval_env = TimeLimit(eval_env, max_episode_steps=int(eval_max_steps))
             eval_env = Monitor(eval_env)
         else:
-            base_env = env.unwrapped
-            eval_env = TradingEnvironment(
-                df=base_env.df.copy(),
-                initial_balance=base_env.initial_balance,
-                transaction_fee=base_env.transaction_fee,
-                window_size=base_env.window_size,
-                leverage=base_env.leverage,
-                min_balance=base_env.min_balance,
-                min_trade_qty=base_env.min_trade_qty,
-                margin_mode=base_env.margin_mode,
-                reward_calculator=RewardCalculator(
-                    mode=getattr(base_env.reward_calculator, 'mode', 'delta_equity'),
-                    scale=1.0
-                ),
-                random_start=False,
-            )
+            if hasattr(env_for_training, 'get_attr'):
+                initial_balance = env_for_training.get_attr('initial_balance')[0]
+                transaction_fee = env_for_training.get_attr('transaction_fee')[0]
+                window_size = env_for_training.get_attr('window_size')[0]
+                leverage = env_for_training.get_attr('leverage')[0]
+                min_balance = env_for_training.get_attr('min_balance')[0]
+                min_trade_qty = env_for_training.get_attr('min_trade_qty')[0]
+                margin_mode = env_for_training.get_attr('margin_mode')[0]
+                reward_mode = env_for_training.get_attr('reward_calculator')[0].mode
+                eval_env = create_environment(
+                    data_path=eval_data_path or './Data/BTCUSDT_futures_volume_5years_5min.csv',
+                    initial_balance=initial_balance,
+                    leverage=leverage,
+                    transaction_fee=transaction_fee,
+                    window_size=window_size,
+                    reward_mode=reward_mode,
+                    margin_mode=margin_mode,
+                    random_start=False,
+                )
+            else:
+                base_env = env.unwrapped
+                eval_env = TradingEnvironment(
+                    df=base_env.df.copy(),
+                    initial_balance=base_env.initial_balance,
+                    transaction_fee=base_env.transaction_fee,
+                    window_size=base_env.window_size,
+                    leverage=base_env.leverage,
+                    min_balance=base_env.min_balance,
+                    min_trade_qty=base_env.min_trade_qty,
+                    margin_mode=base_env.margin_mode,
+                    reward_calculator=RewardCalculator(
+                        mode=getattr(base_env.reward_calculator, 'mode', 'delta_equity'),
+                        scale=1.0
+                    ),
+                    random_start=False,
+                )
             if eval_max_steps is not None and eval_max_steps > 0:
                 eval_env = TimeLimit(eval_env, max_episode_steps=int(eval_max_steps))
             eval_env = Monitor(eval_env)
@@ -521,23 +650,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='SAC 交易模型訓練（SB3）')
     
     # 訓練參數（支持回合或步數）
-    parser.add_argument('--timesteps', type=int, default=None,
+    parser.add_argument('--timesteps', type=int, default=2000000,
                        help='總訓練步數（若未提供，將使用回合模式）')
-    parser.add_argument('--episodes', type=int, default=50,
-                       help='總訓練回合數（當 --timesteps 未提供時生效）')
     parser.add_argument('--random_start', action='store_true',
                        help='啟用回合隨機起點（每回合從隨機時間開始）')
     parser.add_argument('--mode', type=str, default='train',
                        choices=['train', 'quick_test'],
                        help='運行模式')
+    parser.add_argument('--n_envs', type=int, default=16,
+                       help='並行環境數量（>1 啟用多進程）')
     
     # 數據和路徑
     parser.add_argument('--data', type=str, 
                        default='./Data/BTCUSDT_futures_volume_5years_5min.csv',
                        help='訓練數據路徑')
-    parser.add_argument('--start_date', type=str, default='2020-01-01',
+    parser.add_argument('--start_date', type=str, default='2025-01-01',
                        help='訓練資料開始日期（YYYY-MM-DD 或可解析字串）')
-    parser.add_argument('--end_date', type=str, default='2025-06-01',
+    parser.add_argument('--end_date', type=str, default='2025-06-30',
                        help='訓練資料結束日期（YYYY-MM-DD 或可解析字串）')
     parser.add_argument('--model_dir', type=str, default='./models',
                        help='模型保存目錄')
@@ -552,17 +681,22 @@ def main() -> None:
                        help='訓練設備')
     parser.add_argument('--lr', type=float, default=3e-4,
                        help='學習率')
-    parser.add_argument('--batch_size', type=int, default=256,
+    parser.add_argument('--batch_size', type=int, default=512,
                        help='批次大小')
-    parser.add_argument('--buffer_size', type=int, default=100000,
+    parser.add_argument('--buffer_size', type=int, default=10_0000,
                        help='經驗回放緩衝區大小')
     
     # 環境參數
+    parser.add_argument('--margin_mode', type=str, default='isolated',
+                       choices=['isolated', 'cross'],# isolated: 隔離保證金(逐倉), cross: 交叉保證金(全倉)
+                       help='保證金模式')
     parser.add_argument('--leverage', type=float, default=10.0,
                        help='槓桿倍數')
     parser.add_argument('--initial_balance', type=float, default=10000.0,
                        help='初始資金')
-    parser.add_argument('--window_size', type=int, default=288,
+    parser.add_argument('--min_balance', type=float, default=100.0,
+                       help='最小資金')
+    parser.add_argument('--window_size', type=int, default=288 * 7,#5min bars * 24 hours * 7 days = 288 bars * 7 days = 2016 bars
                        help='觀察窗口大小')
     parser.add_argument('--reward_mode', type=str, default='delta_equity',
                        choices=['delta_equity', 'pct', 'log'],
@@ -571,9 +705,9 @@ def main() -> None:
     # 評估資料設定
     parser.add_argument('--eval_use_last_month', action='store_true',
                        help='使用最新1個月作為評估資料集（自動計算日期範圍）')
-    parser.add_argument('--eval_start_date', type=str, default=None,
+    parser.add_argument('--eval_start_date', type=str, default='2025-07-01',
                        help='評估資料開始日期（YYYY-MM-DD）')
-    parser.add_argument('--eval_end_date', type=str, default=None,
+    parser.add_argument('--eval_end_date', type=str, default='2025-07-31',
                        help='評估資料結束日期（YYYY-MM-DD）')
     parser.add_argument('--eval_max_steps', type=int, default=1000,
                        help='每個評估回合的最大片長（步數），超過即截斷')
@@ -595,14 +729,13 @@ def main() -> None:
     
     try:
         # 創建環境
-        # 分兩種模式：
         # 1) timesteps 模式：一次性以總步數訓練
-        # 2) episodes + 日期範圍 模式：按回合重置環境，重複訓練較小步數
 
         if args.timesteps is not None:
             env = create_environment(
                 data_path=args.data,
                 initial_balance=args.initial_balance,
+                min_balance=args.min_balance,
                 leverage=args.leverage,
                 window_size=args.window_size,
                 reward_mode=args.reward_mode,
@@ -611,9 +744,6 @@ def main() -> None:
                 random_start=args.random_start,
             )
 
-            # 計算評估時間窗（若指定使用最新1個月）
-            eval_start_date = args.eval_start_date
-            eval_end_date = args.eval_end_date
             if args.eval_use_last_month:
                 # 從來源 CSV 推算最新日期
                 df_tmp = pd.read_csv(args.data)
@@ -630,94 +760,29 @@ def main() -> None:
                     print(f"使用最新1個月作評估: {eval_start_date} ~ {eval_end_date}")
                 else:
                     print("警告: 資料無日期欄位，無法自動計算最新1個月評估區間")
+            else:
+                eval_start_date = args.eval_start_date
+                eval_end_date = args.eval_end_date
 
             model = train_sac(
                 env=env,
-                total_timesteps=args.timesteps,
-                learning_rate=args.lr,
-                buffer_size=args.buffer_size,
-                batch_size=args.batch_size,
-                model_dir=args.model_dir,
-                log_dir=args.log_dir,
-                device=args.device,
-                load_model=args.load_model,
-                eval_data_path=args.data,
-                eval_start_date=eval_start_date,
-                eval_end_date=eval_end_date,
-                eval_max_steps=args.eval_max_steps,
-                eval_freq=args.eval_freq
+                total_timesteps=args.timesteps,#總訓練步數
+                learning_rate=args.lr,#學習率
+                buffer_size=args.buffer_size,#經驗回放緩衝區大小
+                batch_size=args.batch_size,#批次大小
+                model_dir=args.model_dir,#模型保存目錄
+                log_dir=args.log_dir,#日誌目錄
+                device=args.device,#訓練設備
+                load_model=args.load_model,#加載已有模型路徑
+                n_envs=args.n_envs,
+                train_data_path=args.data,
+                eval_data_path=args.data,#評估數據路徑
+                eval_start_date=eval_start_date,#評估資料開始日期
+                eval_end_date=eval_end_date,#評估資料結束日期
+                eval_max_steps=args.eval_max_steps,#每個評估回合的最大片長（步數），超過即截斷
+                eval_freq=args.eval_freq#評估頻率（步數）
             )
-        else:
-            # 回合模式：以 episodes 控制總回合數，每回合以固定步數訓練
-            # 策略：將總資料切片為連續日期區間（若提供了 start/end），否則整段資料反覆訓練
-            # 單回合步數：以一天的 bars 近似（window_size 作為觀察窗，避免冷啟動影響，額外 + 500 步）
-            # 回合模式：每回合隨機起點（若啟用），不限制步數，直接跑到資料終點
-            # 作法：每回合先 reset 環境（內部會選擇起點），然後以「剩餘資料長度」作為本回合 learn 的步數
-
-            # 設定評估日期區間（可選：最新一個月）
-            ep_eval_start_date = args.eval_start_date
-            ep_eval_end_date = args.eval_end_date
-            if args.eval_use_last_month:
-                df_tmp = pd.read_csv(args.data)
-                dt_col = None
-                for candidate in ('datetime', 'date', 'time', 'timestamp'):
-                    if candidate in df_tmp.columns:
-                        dt_col = candidate
-                        break
-                if dt_col is not None:
-                    df_tmp[dt_col] = pd.to_datetime(df_tmp[dt_col])
-                    max_dt = df_tmp[dt_col].max()
-                    ep_eval_end_date = max_dt.strftime('%Y-%m-%d')
-                    ep_eval_start_date = (max_dt - timedelta(days=30)).strftime('%Y-%m-%d')
-                    print(f"使用最新1個月作評估: {ep_eval_start_date} ~ {ep_eval_end_date}")
-                else:
-                    print("警告: 資料無日期欄位，無法自動計算最新1個月評估區間")
-
-            for ep in range(args.episodes):
-                print(f"\n{'-'*60}\n開始回合 {ep + 1}/{args.episodes}\n{'-'*60}")
-
-                episode_env = create_environment(
-                    data_path=args.data,
-                    initial_balance=args.initial_balance,
-                    leverage=args.leverage,
-                    window_size=args.window_size,
-                    reward_mode=args.reward_mode,
-                    start_date=args.start_date,
-                    end_date=args.end_date,
-                    random_start=args.random_start,
-                )
-
-                # 根據當前起點，計算可用步數（直到資料末尾）
-                steps_to_end = max(1, len(episode_env.df) - episode_env.current_step - 1)
-
-                # 若第一回合尚未建立模型，先建立
-                if ep == 0:
-                    model = train_sac(
-                        env=episode_env,
-                        total_timesteps=steps_to_end,
-                        learning_rate=args.lr,
-                        buffer_size=args.buffer_size,
-                        batch_size=args.batch_size,
-                        model_dir=args.model_dir,
-                        log_dir=args.log_dir,
-                        device=args.device,
-                        load_model=args.load_model,
-                        eval_data_path=args.data,
-                        eval_start_date=ep_eval_start_date,
-                        eval_end_date=ep_eval_end_date,
-                        eval_max_steps=args.eval_max_steps,
-                        eval_freq=args.eval_freq
-                    )
-                else:
-                    # 續訓：以當前回合的剩餘資料長度為步數（從當前起點到資料末端）
-                    remaining_steps = steps_to_end
-                    model.set_env(episode_env)
-                    model.learn(
-                        total_timesteps=remaining_steps,
-                        reset_num_timesteps=False,# 不重置步數
-                        progress_bar=True
-                    )
-        
+       
         print(f"\n{'='*60}")
         print("訓練完成！")
         print(f"{'='*60}\n")
