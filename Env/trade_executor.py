@@ -154,7 +154,7 @@ class TradeExecutor:
 
     # ---------- 內部操作 ----------
     def _fee(self, notional: float) -> float:
-        return abs(notional) * self.fee_rate
+        return abs(notional) * (self.fee_rate /100)# 手續費 = 名目金額 * 手續費率(%)
 
     def _required_margin(self, size: float, price: float) -> float:
         return abs(size) * price / self.leverage

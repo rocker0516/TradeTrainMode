@@ -5,6 +5,7 @@ from gymnasium import spaces
 import random
 from .trade_executor import TradeExecutor
 from .reward import RewardCalculator
+from .features import build_all_features
 
 '''
     交易環境
@@ -93,8 +94,8 @@ class TradingEnvironment(gym.Env):
         lsr_log = np.log(np.clip(lsr, 1e-6, None))
         lsr_z = _rolling_z(lsr_log, self.feature_lookback)
 
-        # 組裝最終觀測特徵
-        self.obs_features = pd.DataFrame({
+        # 組裝最終觀測特徵（基礎特徵）
+        base_features = pd.DataFrame({
             'log_ret_1': log_ret_1.astype(np.float32),
             'log_ret_5': log_ret_5.astype(np.float32),
             'hl_range': hl_range.astype(np.float32),
@@ -104,7 +105,11 @@ class TradingEnvironment(gym.Env):
             'lsr_z': lsr_z.astype(np.float32),
         }, index=df_num.index)
 
-        # 特徵數量：預計算特徵 + 帳戶 4 項
+        # 擴充：流動性、MACD、SMC 特徵（使用外部模組，僅用過去資訊）
+        extra_features = build_all_features(df_num, lookback=self.feature_lookback)
+        self.obs_features = pd.concat([base_features, extra_features], axis=1)
+
+        # 特徵數量：預計算特徵（含擴充）+ 帳戶 4 項
         self.base_feature_count = int(self.obs_features.shape[1])
         self.n_features = self.base_feature_count + 4
 
@@ -135,10 +140,7 @@ class TradingEnvironment(gym.Env):
         }
 
         # 獎勵計算器
-        self.reward_calculator = reward_calculator or RewardCalculator(mode='log', scale=1.0)
-        # 日績效追蹤
-        self._bars_per_day = 24 * 60 // 5
-        self._day_start_equity = None
+        self.reward_calculator = reward_calculator or RewardCalculator(mode='log', scale=1000.0)
         # 倉位追蹤（用於計算換手）
         self._last_position_size = 0.0
 
@@ -157,7 +159,6 @@ class TradingEnvironment(gym.Env):
         self.total_value = self.balance
         self.done = False
         self.position_holding_time = 0  # 記錄持倉時間
-        self._day_start_equity = self.executor.equity(float(self.df.iloc[self.current_step]['close']))
         self._last_position_size = 0.0
         self.last_total_value = self.initial_balance  # 記錄上一次的總資產
         self.episode_steps = 0  # 回合步數統計
@@ -261,22 +262,22 @@ class TradingEnvironment(gym.Env):
         
         # 計算倉位變動（換手）
         position_change = abs(float(self.executor.position.size - self._last_position_size))
+        traded = position_change > 1e-8  # 是否發生交易
         self._last_position_size = float(self.executor.position.size)
 
-        # 回饋：使用獨立獎勵計算器（含每日結算、緩衝、換手）
-        steps_since_window = self.current_step - self.window_size
-        is_day_end = (steps_since_window > 0 and (steps_since_window % self._bars_per_day) == 0)
-        day_return = None
-        if is_day_end and self._day_start_equity and self._day_start_equity > 0:
-            day_return = float(new_equity / self._day_start_equity - 1.0)
-            self._day_start_equity = new_equity  # 下一日起點
+        # 計算未實現損益（用於持倉獎勵）
+        unrealized_pnl = float(self.executor.unrealized_pnl(current_price))
+        has_position = abs(self.executor.position.size) > 1e-8  # 是否持有倉位
+
+        # 回饋：使用獨立獎勵計算器（簡化版）
         reward = self.reward_calculator.compute(
             last_equity=last_equity,
             new_equity=new_equity,
-            is_day_end=is_day_end,
-            day_return=day_return,
             margin_buffer=margin_buffer,
             position_change=position_change,
+            has_position=has_position,
+            unrealized_pnl=unrealized_pnl,
+            traded=traded,
         )
 
         # 更新帳戶狀態時間序列

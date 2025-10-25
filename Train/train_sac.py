@@ -25,6 +25,12 @@ from gymnasium.wrappers import TimeLimit
 
 from Env.trading_env import TradingEnvironment
 from Env.reward import RewardCalculator
+from Env.reward_weighted import (
+    WeightedRewardCalculator,
+    create_balanced_calculator,
+    create_conservative_calculator,
+    create_trend_following_calculator,
+)
 
 
 class TradingEnvFactory:
@@ -47,6 +53,7 @@ class TradingEnvFactory:
         min_trade_qty: float,
         margin_mode: str,
         reward_mode: str,
+        reward_system: str = 'weighted_balanced',
         random_start: bool,
     ) -> None:
         self.data_path = data_path
@@ -58,11 +65,22 @@ class TradingEnvFactory:
         self.min_trade_qty = min_trade_qty
         self.margin_mode = margin_mode
         self.reward_mode = reward_mode
+        self.reward_system = reward_system
         self.random_start = random_start
 
     def __call__(self):
         df = pd.read_csv(self.data_path)
-        rc = RewardCalculator(mode=self.reward_mode, scale=1.0)
+        # 創建獎勵計算器（根據系統類型選擇）
+        if self.reward_system == 'original':
+            rc = RewardCalculator(mode=self.reward_mode)
+        elif self.reward_system == 'weighted_balanced':
+            rc = create_balanced_calculator()
+        elif self.reward_system == 'weighted_conservative':
+            rc = create_conservative_calculator()
+        elif self.reward_system == 'weighted_trend':
+            rc = create_trend_following_calculator()
+        else:
+            rc = create_balanced_calculator()
         env = TradingEnvironment(
             df=df,
             initial_balance=self.initial_balance,
@@ -343,7 +361,8 @@ def create_environment(
     leverage: float = 10.0,
     transaction_fee: float = 0.001,
     window_size: int = 288,
-    reward_mode: str = 'delta_equity',
+    reward_mode: str = 'log',
+    reward_system: str = 'weighted_balanced',
     margin_mode: str = 'isolated',
     start_date: str | None = None,
     end_date: str | None = None,
@@ -392,11 +411,22 @@ def create_environment(
 
     print(f"數據形狀: {df.shape}")
     
-    # 創建獎勵計算器
-    reward_calculator = RewardCalculator(
-        mode=reward_mode,
-        scale=1.0
-    )
+    # 創建獎勵計算器（根據命令列參數選擇）
+    if reward_system == 'original':
+        print(f"使用原始獎勵系統")
+        reward_calculator = RewardCalculator(mode=reward_mode)
+    elif reward_system == 'weighted_balanced':
+        print(f"使用加權平衡獎勵系統")
+        reward_calculator = create_balanced_calculator()
+    elif reward_system == 'weighted_conservative':
+        print(f"使用加權保守獎勵系統")
+        reward_calculator = create_conservative_calculator()
+    elif reward_system == 'weighted_trend':
+        print(f"使用加權趨勢追蹤獎勵系統")
+        reward_calculator = create_trend_following_calculator()
+    else:
+        print(f"未知的獎勵系統: {reward_system}，使用加權平衡系統")
+        reward_calculator = create_balanced_calculator()
     
     # 創建環境
     env = TradingEnvironment(
@@ -486,6 +516,21 @@ def train_sac(
 
     if n_envs is not None and int(n_envs) > 1:
         print(f"建立向量化環境: n_envs={int(n_envs)} (SubprocVecEnv)")
+        # 獲取獎勵系統類型
+        reward_system = 'weighted_balanced'  # 預設
+        if hasattr(env, 'reward_calculator'):
+            calc = env.reward_calculator
+            if isinstance(calc, RewardCalculator):
+                reward_system = 'original'
+            elif isinstance(calc, WeightedRewardCalculator):
+                # 根據權重判斷類型
+                if calc.weight_trade_cost == 10.0 and calc.weight_holding == 3.0:
+                    reward_system = 'weighted_conservative'
+                elif calc.weight_trade_cost == 8.0 and calc.weight_holding == 5.0:
+                    reward_system = 'weighted_trend'
+                else:
+                    reward_system = 'weighted_balanced'
+        
         factory = TradingEnvFactory(
             data_path=(train_data_path or eval_data_path or './Data/BTCUSDT_futures_volume_5years_5min.csv'),
             initial_balance=env.initial_balance,
@@ -495,7 +540,8 @@ def train_sac(
             min_balance=env.min_balance,
             min_trade_qty=env.min_trade_qty,
             margin_mode=env.margin_mode,
-            reward_mode=(getattr(env.reward_calculator, 'mode', 'delta_equity') if hasattr(env, 'reward_calculator') else 'delta_equity'),
+            reward_mode=(getattr(env.reward_calculator, 'mode', 'log') if hasattr(env, 'reward_calculator') else 'log'),
+            reward_system=reward_system,
             random_start=True,
         )
         vec_env = make_vec_env(factory, n_envs=int(n_envs), vec_env_cls=SubprocVecEnv, monitor_dir=str(monitor_dir_path))
@@ -520,7 +566,7 @@ def train_sac(
             tau=tau,
             gamma=gamma,
             train_freq=1,
-            gradient_steps=1,
+            gradient_steps=4,
             ent_coef='auto',
             verbose=1,
             device=device,
@@ -592,10 +638,7 @@ def train_sac(
                     min_balance=base_env.min_balance,
                     min_trade_qty=base_env.min_trade_qty,
                     margin_mode=base_env.margin_mode,
-                    reward_calculator=RewardCalculator(
-                        mode=getattr(base_env.reward_calculator, 'mode', 'delta_equity'),
-                        scale=1.0
-                    ),
+                    reward_calculator=base_env.reward_calculator,  # 直接使用相同的獎勵計算器
                     random_start=False,
                 )
             if eval_max_steps is not None and eval_max_steps > 0:
@@ -650,14 +693,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='SAC 交易模型訓練（SB3）')
     
     # 訓練參數（支持回合或步數）
-    parser.add_argument('--timesteps', type=int, default=2000000,
+    parser.add_argument('--timesteps', type=int, default=1_500_000,
                        help='總訓練步數（若未提供，將使用回合模式）')
     parser.add_argument('--random_start', action='store_true',
                        help='啟用回合隨機起點（每回合從隨機時間開始）')
     parser.add_argument('--mode', type=str, default='train',
                        choices=['train', 'quick_test'],
                        help='運行模式')
-    parser.add_argument('--n_envs', type=int, default=16,
+    parser.add_argument('--n_envs', type=int, default=20,
                        help='並行環境數量（>1 啟用多進程）')
     
     # 數據和路徑
@@ -681,9 +724,9 @@ def main() -> None:
                        help='訓練設備')
     parser.add_argument('--lr', type=float, default=3e-4,
                        help='學習率')
-    parser.add_argument('--batch_size', type=int, default=512,
+    parser.add_argument('--batch_size', type=int, default=4096,
                        help='批次大小')
-    parser.add_argument('--buffer_size', type=int, default=10_0000,
+    parser.add_argument('--buffer_size', type=int, default=30000 ,
                        help='經驗回放緩衝區大小')
     
     # 環境參數
@@ -696,11 +739,16 @@ def main() -> None:
                        help='初始資金')
     parser.add_argument('--min_balance', type=float, default=100.0,
                        help='最小資金')
-    parser.add_argument('--window_size', type=int, default=288 * 7,#5min bars * 24 hours * 7 days = 288 bars * 7 days = 2016 bars
+    parser.add_argument('--fee_rate', type=float, default=0.001,
+                       help='交易手續費率')
+    parser.add_argument('--window_size', type=int, default=288 *2 ,#5min bars * 24 hours * 7 days = 288 bars * 7 days = 2016 bars
                        help='觀察窗口大小')
-    parser.add_argument('--reward_mode', type=str, default='delta_equity',
+    parser.add_argument('--reward_mode', type=str, default='log',
                        choices=['delta_equity', 'pct', 'log'],
                        help='獎勵模式')
+    parser.add_argument('--reward_system', type=str, default='weighted_balanced',
+                       choices=['original', 'weighted_balanced', 'weighted_conservative', 'weighted_trend'],
+                       help='獎勵系統類型：original=原始系統, weighted_*=加權正則化系統')
     
     # 評估資料設定
     parser.add_argument('--eval_use_last_month', action='store_true',
@@ -711,7 +759,7 @@ def main() -> None:
                        help='評估資料結束日期（YYYY-MM-DD）')
     parser.add_argument('--eval_max_steps', type=int, default=1000,
                        help='每個評估回合的最大片長（步數），超過即截斷')
-    parser.add_argument('--eval_freq', type=int, default=100000,
+    parser.add_argument('--eval_freq', type=int, default=1_000_000,
                        help='評估頻率（步數）')
     args = parser.parse_args()
     
@@ -737,8 +785,10 @@ def main() -> None:
                 initial_balance=args.initial_balance,
                 min_balance=args.min_balance,
                 leverage=args.leverage,
+                transaction_fee=args.fee_rate,
                 window_size=args.window_size,
                 reward_mode=args.reward_mode,
+                reward_system=args.reward_system,
                 start_date=args.start_date,
                 end_date=args.end_date,
                 random_start=args.random_start,
@@ -768,6 +818,7 @@ def main() -> None:
                 env=env,
                 total_timesteps=args.timesteps,#總訓練步數
                 learning_rate=args.lr,#學習率
+                learning_starts=args.batch_size * 5,#開始學習前的隨機步數(batch_size * 5 = 250000)
                 buffer_size=args.buffer_size,#經驗回放緩衝區大小
                 batch_size=args.batch_size,#批次大小
                 model_dir=args.model_dir,#模型保存目錄
