@@ -19,9 +19,12 @@ from .features import build_all_features
         min_balance: 最小資金(資金不足時強制結束)
         min_trade_qty: 最低交易數量(BTC)
         margin_mode: 保證金模式 (cross: 全倉, isolated: 逐倉)
+        reward_weights: 獎勵權重
+        reward_calculator: 獎勵計算器
+        random_start: 是否隨機起點
 '''
 class TradingEnvironment(gym.Env):
-    def __init__(self, df, initial_balance=10000, transaction_fee=0.001, window_size= 24 * 60 //5, leverage = 10, min_balance=100, min_trade_qty=0.001,
+    def __init__(self, df, initial_balance=10_000, transaction_fee=0.001, window_size= 24 * 60 //5, leverage = 10, min_balance=100, min_trade_qty=0.001,
                  reward_weights=None, margin_mode: str = 'isolated', reward_calculator: RewardCalculator | None = None, random_start: bool = False):
         super(TradingEnvironment, self).__init__()
         
@@ -37,7 +40,6 @@ class TradingEnvironment(gym.Env):
         numeric_columns = df.select_dtypes(include=[np.number]).columns
         self.df = df[numeric_columns].copy()  # 只保留數值列
         
-        print(f"使用的數據列: {list(self.df.columns)}")
         self.initial_balance = initial_balance  # 初始資金
         self.transaction_fee = transaction_fee  # 交易手續費
         self.window_size = window_size # 窗口大小(K線數量)
@@ -48,8 +50,15 @@ class TradingEnvironment(gym.Env):
         self.random_start = bool(random_start)
         
         # 定義動作空間
-        # 目標持倉比例 (-1.0 ~ 1.0)
-        self.action_space = spaces.Box(-1.0, 1.0, (1,), dtype=np.float32)
+        # 目標持倉比例 (-1.0 ~ 1.0)，限制小數位為1位
+        # ex: -1.0, -0.7, -0.5, -0.2, 0.0, 0.2, 0.5, 0.7, 1.0 
+        self.action_space = spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(1,),
+            dtype=np.float32,
+            rounding_decimals=1
+        )
         
         # 構建穩定的觀測特徵：報酬/比例/滾動z-score（只用過去資料）
         self.feature_lookback = int(max(288, self.window_size))
@@ -144,6 +153,9 @@ class TradingEnvironment(gym.Env):
         # 倉位追蹤（用於計算換手）
         self._last_position_size = 0.0
 
+        # 延後打印使用的數據列，待環境完成初始化後輸出
+        print(f"使用的數據列: {list(self.df.columns)}")
+
         self.reset()
     
     def reset(self, seed=None, options=None):
@@ -220,6 +232,21 @@ class TradingEnvironment(gym.Env):
         return np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
     
     def step(self, action):
+        '''
+        執行交易步驟
+        執行交易後，更新帳戶狀態，計算保證金緩衝，計算倉位變動，計算未實現損益，計算獎勵
+        最後更新帳戶狀態時間序列，更新步驟，檢查結束條件並記錄原因，構造 info，提供結束原因
+
+        Args:
+            action: 目標持倉比例 (-1.0 ~ 1.0)
+
+        Returns:
+            observation: 觀測
+            reward: 獎勵
+            done: 是否結束
+            truncated: 是否截斷
+            info: 信息
+        '''
         # 取得當前K線
         candle = self.df.iloc[self.current_step]# 當前K線
         current_price = float(candle['close']) # 當前價格
@@ -242,7 +269,8 @@ class TradingEnvironment(gym.Env):
         self.balance = self.executor.wallet_balance # 當前資金
         self.btc_held = self.executor.position.size # 當前持倉量
         self.total_value = new_equity # 當前總資產
-        # 計算保證金緩衝（距離強平的安全空間）
+
+        # 計算保證金緩衝（距離強平的安全空間）= 1 - (槓桿比 / 安全槓桿比) <= reward 使用
         margin_buffer = None
         try:
             # 使用淨槓桿 proxy：position_value / equity
@@ -260,9 +288,9 @@ class TradingEnvironment(gym.Env):
         except Exception:
             margin_buffer = 1.0  # 異常時視為安全
         
-        # 計算倉位變動（換手）
-        position_change = abs(float(self.executor.position.size - self._last_position_size))
-        traded = position_change > 1e-8  # 是否發生交易
+        # 計算倉位變動（換手） 
+        position_change = abs(float(self.executor.position.size - self._last_position_size))# 倉位變動 = 當前持倉量 - 上一次持倉量
+        traded = position_change > 1e-8  # 是否發生交易 pos
         self._last_position_size = float(self.executor.position.size)
 
         # 計算未實現損益（用於持倉獎勵）
@@ -298,17 +326,23 @@ class TradingEnvironment(gym.Env):
 
         # 檢查結束條件並記錄原因
         data_exhausted = self.current_step >= len(self.df) - 1
-        balance_insufficient = new_equity <= self.min_balance
-        
-        self.done = data_exhausted or balance_insufficient
+        balance_insufficient = new_equity <= self.min_balance# 資金不足
+        liq_triggered = self.executor.liq_triggered# 強平觸發
+
+        self.done = data_exhausted or balance_insufficient or liq_triggered
         
         # 構造 info，提供結束原因
         info = {}
         if self.done:
             if data_exhausted:
                 info['termination_reason'] = 'data_exhausted'
+                print(f"Episode結束：數據用完 (step={self.current_step}, data_len={len(self.df)})")
             elif balance_insufficient:
                 info['termination_reason'] = 'balance_insufficient'
+                print(f"Episode結束：資金不足 (balance={self.balance:.2f}, min={self.min_balance})")
+            elif liq_triggered:
+                info['termination_reason'] = 'liq_triggered'
+                print(f"Episode結束：強平 (balance={self.balance:.2f})")
             else:
                 info['termination_reason'] = 'other'
             # 附加結算資訊供回調使用
@@ -337,14 +371,5 @@ class TradingEnvironment(gym.Env):
                 done=True,
                 termination_reason=info['termination_reason']
             )
-
-        # 調試：記錄結束原因
-        if self.done:
-            if data_exhausted:
-                print(f"Episode結束：數據用完 (step={self.current_step}, data_len={len(self.df)})")
-            if balance_insufficient:
-                print(f"Episode結束：資金不足 (balance={self.balance:.2f}, min={self.min_balance})")
-            else:
-                print(f"Episode結束：強平 (balance={self.balance:.2f})")
         
         return self._get_observation(), reward, self.done, False, info

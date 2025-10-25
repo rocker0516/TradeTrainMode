@@ -42,6 +42,7 @@ class TradeExecutor:
         self.fee_rate = float(fee_rate)# 交易手續費
         self.leverage = float(leverage)# 槓桿倍數
         self.min_trade_qty = float(min_trade_qty)# 最低交易數量(BTC)
+        self.liq_triggered = False# 強平觸發
         self.maintenance_margin_rate = float(maintenance_margin_rate)# 維持保證金率
         self.initial_balance = float(initial_balance)# 初始資金
         mode = str(margin_mode).lower()
@@ -63,6 +64,7 @@ class TradeExecutor:
     def reset(self, initial_balance: float) -> None:
         self.wallet_balance = float(initial_balance)# 錢包餘額
         self.position = PositionState()# 持倉狀態
+        self.liq_triggered = False# 強平觸發
         self.used_margin = 0.0# 已使用保證金
         self.closed_trades = []# 已平倉交易
         self.total_fees = 0.0
@@ -110,6 +112,7 @@ class TradeExecutor:
         if liq_price is not None and liq_price > 0.0:# 強平價格存在且大於0
             if (self.position.size > 0 and low <= liq_price) or (self.position.size < 0 and high >= liq_price):# 持倉方向與強平價格關係符合
                 self._close_position(liq_price)
+                self.liq_triggered = True
                 self.done = True
                 return
 
