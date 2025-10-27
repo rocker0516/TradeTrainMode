@@ -6,10 +6,17 @@ from typing import List, Dict
 
 @dataclass
 class PositionState:
+    '''
+        持倉狀態
+        
+        Args:
+            size: 持倉數量
+            entry_price: 進場價格
+            stop_loss_price: 止損價格（固定規則計算）
+    '''
     size: float = 0.0  # 正數為多單，負數為空單（合約大小，資產單位）
     entry_price: float = 0.0
-    take_profit_price: float = 0.0
-    stop_loss_price: float = 0.0
+    stop_loss_price: float = 0.0  # 止損價格
 
 
 class TradeExecutor:
@@ -18,46 +25,72 @@ class TradeExecutor:
     權益（Equity）= 錢包餘額（wallet_balance）+ 未實現損益（unrealized_pnl）
     手續費：開倉/平倉依名目金額（notional）計收
     初始保證金：abs(持倉數量) * 進場價 / 槓桿
+
+    margin_mode:
+        - 'cross' 全倉：以整體錢包餘額作為保護抵押，強平使用 wallet_balance
+        - 'isolated' 逐倉：以倉位初始保證金作為抵押，強平使用 used_margin
     """
 
     def __init__(
         self,
         *,
-        initial_balance: float,
-        fee_rate: float,
-        leverage: float,
-        min_trade_qty: float,
-        max_stop_loss_percent: float,
-        max_take_profit_percent: float,
-        maintenance_margin_rate: float = 0.005,
+        initial_balance: float, # 初始資金
+        fee_rate: float, # 交易手續費
+        leverage: float, # 槓桿倍數
+        min_trade_qty: float, # 最低交易數量(BTC)
+        maintenance_margin_rate: float = 0.005, # 維持保證金率
+        margin_mode: str = 'cross', # 保證金模式：'cross' 或 'isolated'
+        stop_loss_atr: float = 2.5, # 止損距離（ATR 倍數）
     ) -> None:
-        self.fee_rate = float(fee_rate)
-        self.leverage = float(leverage)
-        self.min_trade_qty = float(min_trade_qty)
-        self.max_stop_loss_percent = float(max_stop_loss_percent)
-        self.max_take_profit_percent = float(max_take_profit_percent)
-        self.maintenance_margin_rate = float(maintenance_margin_rate)
+        self.fee_rate = float(fee_rate)# 交易手續費
+        self.leverage = float(leverage)# 槓桿倍數
+        self.min_trade_qty = float(min_trade_qty)# 最低交易數量(BTC)
+        self.liq_triggered = False# 強平觸發
+        self.stop_loss_triggered = False# 止損觸發
+        self.stop_loss_atr = float(stop_loss_atr)# 止損距離（ATR 倍數）
+        self.maintenance_margin_rate = float(maintenance_margin_rate)# 維持保證金率
+        self.initial_balance = float(initial_balance)# 初始資金
+        mode = str(margin_mode).lower()
+        if mode not in ("cross", "isolated"):
+            raise ValueError("margin_mode must be 'cross' or 'isolated'")
+        self.margin_mode = mode
 
-        self.wallet_balance: float = float(initial_balance)
-        self.position = PositionState()
-        self.used_margin: float = 0.0
-        self.closed_trades: List[Dict[str, float]] = []
+        self.wallet_balance: float = float(initial_balance)# 錢包餘額
+        self.position = PositionState()# 持倉狀態
+        self.used_margin: float = 0.0# 已使用保證金
+        self.closed_trades: List[Dict[str, float]] = []# 已平倉交易
+        # 逐回合統計
+        self.total_fees: float = 0.0
+        self.long_close_count: int = 0
+        self.short_close_count: int = 0
+        self.long_entry_count: int = 0
+        self.short_entry_count: int = 0
 
     def reset(self, initial_balance: float) -> None:
-        self.wallet_balance = float(initial_balance)
-        self.position = PositionState()
-        self.used_margin = 0.0
-        self.closed_trades = []
+        self.wallet_balance = float(initial_balance)# 錢包餘額
+        self.position = PositionState()# 持倉狀態
+        self.liq_triggered = False# 強平觸發
+        self.stop_loss_triggered = False# 止損觸發
+        self.used_margin = 0.0# 已使用保證金
+        self.closed_trades = []# 已平倉交易
+        self.total_fees = 0.0
+        self.long_close_count = 0
+        self.short_close_count = 0
+        self.long_entry_count = 0
+        self.short_entry_count = 0
 
     # ---------- 查詢輔助方法 ----------
+    # 未實現損益
     def unrealized_pnl(self, current_price: float) -> float:
         if self.position.size == 0.0 or self.position.entry_price == 0.0:
             return 0.0
         return (current_price - self.position.entry_price) * self.position.size
 
+    # 權益
     def equity(self, current_price: float) -> float:
         return self.wallet_balance + self.unrealized_pnl(current_price)
 
+    # 可用資金
     def available_balance(self) -> float:
         return self.wallet_balance - self.used_margin
 
@@ -65,61 +98,51 @@ class TradeExecutor:
     def execute(
         self,
         *,
-        position_percent: float,
-        take_profit_percent: float,
-        stop_loss_percent: float,
-        current_price: float,
-        high: float,
-        low: float,
-        equity: float,
+        position_percent: float, # 目標持倉比例 (-1.0 ~ 1.0)
+        current_price: float, # 當前價格
+        high: float, # 當前最高價
+        low: float, # 當前最低價
+        equity: float, # 當前權益
+        atr: float = 0.0, # ATR（用於計算止損距離）
     ) -> None:
-        # 先檢查上一根K線設定的止盈/止損是否被觸發
-        stop_triggered = False
-        if self.position.size != 0.0:
-            if self.position.size > 0:
-                if low <= self.position.stop_loss_price:
-                    self._close_position(self.position.stop_loss_price)
-                    stop_triggered = True
-                elif high >= self.position.take_profit_price:
-                    self._close_position(self.position.take_profit_price)
-                    stop_triggered = True
-            else:
-                if high >= self.position.stop_loss_price:
-                    self._close_position(self.position.stop_loss_price)
-                    stop_triggered = True
-                elif low <= self.position.take_profit_price:
-                    self._close_position(self.position.take_profit_price)
-                    stop_triggered = True
+        # 重置本步觸發標記
+        self.stop_loss_triggered = False
+        
+        # 1. 優先檢查止損（先於清算，保護倉位）
+        if self.position.size != 0.0 and self.position.stop_loss_price > 0.0:
+            if (self.position.size > 0 and low <= self.position.stop_loss_price) or \
+               (self.position.size < 0 and high >= self.position.stop_loss_price):
+                # 觸發止損，強制平倉
+                self._close_position(self.position.stop_loss_price)
+                self.stop_loss_triggered = True
+                return  # 止損後不再執行其他邏輯
+        
+        # 2. 檢查清算（極端情況兜底）
+        liq_price = self._calc_liquidation_price()
+        if liq_price is not None and liq_price > 0.0:
+            if (self.position.size > 0 and low <= liq_price) or (self.position.size < 0 and high >= liq_price):
+                self._close_position(liq_price)
+                self.liq_triggered = True
+                return
 
-        # 若本步因止盈/止損而平倉，當前K線不再重新開倉
-        if stop_triggered:
-            return
+        # 以錢包餘額為風險基準計算目標倉位數量（避免未實現損益造成漂移）
+        risk_base = self.wallet_balance
+        target_size = (risk_base * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
 
-        # 止盈/止損未觸發時，再檢查是否觸發強平（以當根K線極值模擬盤中觸發）
-        if self.position.size != 0.0:
-            liq_price = self._calc_liquidation_price()
-            if liq_price is not None and liq_price > 0.0:
-                if (self.position.size > 0 and low <= liq_price) or (self.position.size < 0 and high >= liq_price):
-                    self._close_position(liq_price)
-                    return
-
-        # 依最新權益與槓桿計算目標倉位數量
-        current_equity = self.equity(current_price)
-        target_size = (current_equity * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
-
+        # 3. 若無持倉，則依目標倉位數量開倉
         if self.position.size == 0.0:
             if abs(target_size) >= self.min_trade_qty:
-                self._increase_position(delta_size=target_size, price=current_price)
+                self._increase_position(delta_size=target_size, price=current_price, atr=atr)
         else:
             # 若方向反轉，先平舊倉再依新方向開倉
             if self.position.size * target_size < 0:
                 self._close_position(price=current_price)
-                # 平倉後重算權益與目標數量（已實現手續費/損益）
-                current_equity = self.equity(current_price)
-                target_size = (current_equity * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
+                # 平倉後依錢包餘額重算目標數量（已實現手續費/損益已反映在餘額）
+                risk_base = self.wallet_balance
+                target_size = (risk_base * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
                 # 新方向倉位若達最小交易量，才開倉
                 if abs(target_size) >= self.min_trade_qty:
-                    self._increase_position(delta_size=target_size, price=current_price)
+                    self._increase_position(delta_size=target_size, price=current_price, atr=atr)
             else:
                 delta = target_size - self.position.size
                 if abs(delta) >= self.min_trade_qty:
@@ -128,29 +151,30 @@ class TradeExecutor:
                         self._reduce_position(delta_size=delta, price=current_price)
                     else:
                         # 加倉
-                        self._increase_position(delta_size=delta, price=current_price)
+                        self._increase_position(delta_size=delta, price=current_price, atr=atr)
 
-        # 根據最終倉位方向，從當前價格更新止盈/止損價格
-        if self.position.size > 0:
-            self.position.take_profit_price = current_price * (1 + max(0.0, min(take_profit_percent, self.max_take_profit_percent)) * 0.01)
-            self.position.stop_loss_price = current_price * (1 - max(0.0, min(stop_loss_percent, self.max_stop_loss_percent)) * 0.01)
-        elif self.position.size < 0:
-            self.position.take_profit_price = current_price * (1 - max(0.0, min(take_profit_percent, self.max_take_profit_percent)) * 0.01)
-            self.position.stop_loss_price = current_price * (1 + max(0.0, min(stop_loss_percent, self.max_stop_loss_percent)) * 0.01)
-        else:
-            self.position.take_profit_price = 0.0
-            self.position.stop_loss_price = 0.0
+       # # 根據最終倉位方向，從當前價格更新止盈/止損價格
+        # if self.position.size > 0:
+        #     self.position.take_profit_price = current_price * (1 + max(0.0, min(take_profit_percent, self.max_take_profit_percent)) * 0.01)
+        #     self.position.stop_loss_price = current_price * (1 - max(0.0, min(stop_loss_percent, self.max_stop_loss_percent)) * 0.01)
+        # elif self.position.size < 0:
+        #     self.position.take_profit_price = current_price * (1 - max(0.0, min(take_profit_percent, self.max_take_profit_percent)) * 0.01)
+        #     self.position.stop_loss_price = current_price * (1 + max(0.0, min(stop_loss_percent, self.max_stop_loss_percent)) * 0.01)
+        # else:
+        #     self.position.take_profit_price = 0.0
+       #     self.position.stop_loss_price = 0.0
 
     # ---------- 內部操作 ----------
     def _fee(self, notional: float) -> float:
-        return abs(notional) * self.fee_rate
+        return abs(notional) * (self.fee_rate /100)# 手續費 = 名目金額 * 手續費率(%)
 
     def _required_margin(self, size: float, price: float) -> float:
         return abs(size) * price / self.leverage
 
     # 加倉
-    def _increase_position(self, *, delta_size: float, price: float) -> None:
+    def _increase_position(self, *, delta_size: float, price: float, atr: float = 0.0) -> None:
         # 確保可用資金足以覆蓋新增保證金與手續費
+        was_flat = (self.position.size == 0.0)
         desired_size = self.position.size + delta_size
         additional_margin = max(0.0, self._required_margin(desired_size, price) - self.used_margin)
         trade_notional = abs(delta_size) * price
@@ -184,12 +208,31 @@ class TradeExecutor:
         self.position.size += delta_size
         self.used_margin += additional_margin
         self.wallet_balance -= fee
+        self.total_fees += fee
+
+        # 若原先為空倉，視為進場（記一次）並設定止損價
+        if was_flat and abs(delta_size) > 0.0:
+            if delta_size > 0:
+                self.long_entry_count += 1
+            else:
+                self.short_entry_count += 1
+            
+            # 設定固定止損價（以 ATR 倍數計算）
+            if atr > 0 and self.stop_loss_atr > 0:
+                stop_distance = atr * self.stop_loss_atr
+                if self.position.size > 0:
+                    self.position.stop_loss_price = self.position.entry_price - stop_distance
+                else:
+                    self.position.stop_loss_price = self.position.entry_price + stop_distance
+            else:
+                self.position.stop_loss_price = 0.0
 
     # 減倉
     def _reduce_position(self, *, delta_size: float, price: float) -> None:
         # delta_size 與當前持倉方向相反；以下計算實際平倉數量
         close_size = -delta_size  # 平倉數量（與現有持倉同號）
-        if self.position.size > 0:
+        was_long = self.position.size > 0
+        if was_long:
             close_size = min(abs(close_size), abs(self.position.size))
             realized_pnl = (price - self.position.entry_price) * close_size
             new_size = self.position.size - close_size
@@ -206,13 +249,30 @@ class TradeExecutor:
         self.position.size = new_size
         if self.position.size == 0.0:
             self.position.entry_price = 0.0
+        # 統計
+        self.total_fees += fee
+        if close_size > 0:
+            if was_long:
+                self.long_close_count += 1
+            else:
+                self.short_close_count += 1
+        # 記錄交易
+        self.closed_trades.append({
+            'side': 'long' if was_long else 'short',
+            'size': float(close_size),
+            'price': float(price),
+            'fee': float(fee),
+            'realized_pnl': float(realized_pnl),
+            'type': 'reduce'
+        })
 
     # 平倉
     def _close_position(self, price: float) -> None:
         if self.position.size == 0.0:
             return
         size_to_close = abs(self.position.size)
-        if self.position.size > 0:
+        was_long = self.position.size > 0
+        if was_long:
             realized_pnl = (price - self.position.entry_price) * size_to_close
         else:
             realized_pnl = (self.position.entry_price - price) * size_to_close
@@ -220,7 +280,22 @@ class TradeExecutor:
         fee = self._fee(size_to_close * price)
         self.wallet_balance += realized_pnl - fee
         self.used_margin = 0.0
-        self.position = PositionState()
+        self.position = PositionState()  # 重置（包含 stop_loss_price）
+        # 統計
+        self.total_fees += fee
+        if was_long:
+            self.long_close_count += 1
+        else:
+            self.short_close_count += 1
+        # 記錄交易
+        self.closed_trades.append({
+            'side': 'long' if was_long else 'short',
+            'size': float(size_to_close),
+            'price': float(price),
+            'fee': float(fee),
+            'realized_pnl': float(realized_pnl),
+            'type': 'close'
+        })
 
     # ---------- 風險控制與強平 ----------
     def _calc_liquidation_price(self) -> float | None:
@@ -229,21 +304,23 @@ class TradeExecutor:
         # 觸發強平條件：equity(p) <= maintenance_margin(p)
         if self.position.size == 0.0 or self.position.entry_price == 0.0:
             return None
-        m = self.maintenance_margin_rate
-        s = self.position.size
-        e = self.position.entry_price
-        w = self.wallet_balance
+        m = self.maintenance_margin_rate# 維持保證金率
+        s = self.position.size# 持倉數量
+        e = self.position.entry_price# 進場價格
+
+        # 全倉使用錢包餘額作為抵押；逐倉使用倉位佔用保證金作為抵押
+        collateral = self.wallet_balance if self.margin_mode == "cross" else self.used_margin
         if s > 0:
             denom = s * (1.0 - m)
             if denom <= 0:
                 return None
-            price = (s * e - w) / denom
+            price = (s * e - collateral) / denom
             return max(0.0, price)
         else:
             u = abs(s)
             denom = u * (1.0 + m)
             if denom <= 0:
                 return None
-            price = (w + u * e) / denom
+            price = (collateral + u * e) / denom
             return max(0.0, price)
 
