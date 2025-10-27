@@ -120,8 +120,8 @@ def compute_smc_features(df: pd.DataFrame, lookback: int = 288) -> pd.DataFrame:
     swing_high = (high.shift(1).rolling(window=left, min_periods=1).max() < high) & (high > high.shift(-1).rolling(window=right, min_periods=1).max())
     swing_low = (low.shift(1).rolling(window=left, min_periods=1).min() > low) & (low < low.shift(-1).rolling(window=right, min_periods=1).min())
 
-    recent_high = high.where(swing_high).ffill().fillna(method='bfill')
-    recent_low = low.where(swing_low).ffill().fillna(method='bfill')
+    recent_high = high.where(swing_high).ffill().bfill()
+    recent_low = low.where(swing_low).ffill().bfill()
 
     dist_to_swing_high = (close - recent_high) / np.clip(close, 1e-12, None)
     dist_to_swing_low = (close - recent_low) / np.clip(close, 1e-12, None)

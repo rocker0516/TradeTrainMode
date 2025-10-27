@@ -24,13 +24,11 @@ import torch
 from gymnasium.wrappers import TimeLimit
 
 from Env.trading_env import TradingEnvironment
-from Env.reward import RewardCalculator
-from Env.reward_weighted import (
-    WeightedRewardCalculator,
-    create_balanced_calculator,
-    create_conservative_calculator,
-    create_trend_following_calculator,
+from Env.reward import (
+    RewardCalculator,
+    create_default_calculator,
 )
+from Train.models.sac_lstm_policy import RecurrentSACPolicy
 
 
 class TradingEnvFactory:
@@ -52,8 +50,6 @@ class TradingEnvFactory:
         min_balance: float,
         min_trade_qty: float,
         margin_mode: str,
-        reward_mode: str,
-        reward_system: str = 'weighted_balanced',
         random_start: bool,
     ) -> None:
         self.data_path = data_path
@@ -64,23 +60,12 @@ class TradingEnvFactory:
         self.min_balance = min_balance
         self.min_trade_qty = min_trade_qty
         self.margin_mode = margin_mode
-        self.reward_mode = reward_mode
-        self.reward_system = reward_system
         self.random_start = random_start
 
     def __call__(self):
         df = pd.read_csv(self.data_path)
-        # 創建獎勵計算器（根據系統類型選擇）
-        if self.reward_system == 'original':
-            rc = RewardCalculator(mode=self.reward_mode)
-        elif self.reward_system == 'weighted_balanced':
-            rc = create_balanced_calculator()
-        elif self.reward_system == 'weighted_conservative':
-            rc = create_conservative_calculator()
-        elif self.reward_system == 'weighted_trend':
-            rc = create_trend_following_calculator()
-        else:
-            rc = create_balanced_calculator()
+        # 使用多子項正規化獎勵（terminal、return、risk、struct）
+        rc = create_default_calculator()
         env = TradingEnvironment(
             df=df,
             initial_balance=self.initial_balance,
@@ -111,6 +96,8 @@ class TradingCallback(BaseCallback):
         self.episode_lengths = []
         self.episode_profit_rates = []
         self.episode_failures = []  # True 表示失敗（非 data_exhausted）
+        self.episode_stop_losses = []  # 止損觸發次數
+        self.episode_liquidations = []  # 清算觸發次數
         # 向量環境的逐環境狀態
         self.current_episode_reward = None  # 將在 training start 時初始化為 (n_envs,) 向量
         self.current_episode_length = None
@@ -161,6 +148,10 @@ class TradingCallback(BaseCallback):
             profit_rate = None
             term_result = 'unknown'
             failure_flag = False
+            stop_loss_flag = False
+            liq_flag = False
+            episode_stop_loss_count = 0
+            episode_liq_count = 0
             long_close_count = None
             short_close_count = None
             total_fees = None
@@ -175,6 +166,9 @@ class TradingCallback(BaseCallback):
                 if isinstance(info_i, dict):
                     reason = info_i.get('termination_reason')
                     failure_flag = (reason is not None and reason != 'data_exhausted')
+                    # 止損不終止 episode，從 info 中的標記讀取（非 termination_reason）
+                    stop_loss_flag = bool(info_i.get('stop_loss_triggered', False))
+                    liq_flag = (reason == 'liq_triggered')
                     if 'final_balance' in info_i:
                         final_balance = float(info_i['final_balance'])
                         profit_rate = float(info_i.get('profit_rate', 0.0))
@@ -192,6 +186,11 @@ class TradingCallback(BaseCallback):
                         short_entry_count = int(info_i['short_entry_count'])
                     if 'episode_max_steps' in info_i:
                         episode_max_steps = int(info_i['episode_max_steps'])
+                    # 本 episode 止損與清算次數
+                    if 'episode_stop_loss_count' in info_i:
+                        episode_stop_loss_count = int(info_i['episode_stop_loss_count'])
+                    if 'episode_liq_count' in info_i:
+                        episode_liq_count = int(info_i['episode_liq_count'])
                     if reason == 'data_exhausted':
                         term_result = 'success(data_exhausted)'
                     elif reason is not None:
@@ -214,6 +213,8 @@ class TradingCallback(BaseCallback):
             self.episode_lengths.append(int(self.current_episode_length[i]))
             self.episode_profit_rates.append(float(profit_rate))
             self.episode_failures.append(bool(failure_flag))
+            self.episode_stop_losses.append(bool(stop_loss_flag))
+            self.episode_liquidations.append(bool(liq_flag))
 
             episode_num = len(self.episode_rewards)
             if episode_num % self.log_interval == 0:
@@ -226,6 +227,7 @@ class TradingCallback(BaseCallback):
                     f"ProfitRate: {profit_rate if profit_rate is not None else 0.0:+.2f}% | "
                     f"Fees: {total_fees if total_fees is not None else 0.0:.4f} | "
                     f"Entries L/S: {long_entry_count if long_entry_count is not None else 0}/{short_entry_count if short_entry_count is not None else 0} | "
+                    f"Stops: {episode_stop_loss_count} | Liqs: {episode_liq_count} | "
                     f"Result: {term_result}"
                 )
 
@@ -233,10 +235,15 @@ class TradingCallback(BaseCallback):
             if episode_num % 10 == 0:
                 last10_rates = self.episode_profit_rates[-10:]
                 last10_fails = self.episode_failures[-10:]
+                last10_stops = self.episode_stop_losses[-10:]
+                last10_liqs = self.episode_liquidations[-10:]
                 avg_rate_10 = float(np.mean(last10_rates)) if len(last10_rates) > 0 else 0.0
                 total_fail_10 = int(np.sum(last10_fails)) if len(last10_fails) > 0 else 0
+                total_stops_10 = int(np.sum(last10_stops)) if len(last10_stops) > 0 else 0
+                total_liqs_10 = int(np.sum(last10_liqs)) if len(last10_liqs) > 0 else 0
                 print(
-                    f"[10-episode stats] avg_profit_rate={avg_rate_10:+.2f}% | failures={total_fail_10}/10"
+                    f"[10-episode stats] avg_profit_rate={avg_rate_10:+.2f}% | "
+                    f"failures={total_fail_10}/10 (stop_loss={total_stops_10}, liq={total_liqs_10})"
                 )
 
             # 重置該環境的回合累積器（獨立回合）
@@ -361,8 +368,6 @@ def create_environment(
     leverage: float = 10.0,
     transaction_fee: float = 0.001,
     window_size: int = 288,
-    reward_mode: str = 'log',
-    reward_system: str = 'weighted_balanced',
     margin_mode: str = 'isolated',
     start_date: str | None = None,
     end_date: str | None = None,
@@ -411,22 +416,12 @@ def create_environment(
 
     print(f"數據形狀: {df.shape}")
     
-    # 創建獎勵計算器（根據命令列參數選擇）
-    if reward_system == 'original':
-        print(f"使用原始獎勵系統")
-        reward_calculator = RewardCalculator(mode=reward_mode)
-    elif reward_system == 'weighted_balanced':
-        print(f"使用加權平衡獎勵系統")
-        reward_calculator = create_balanced_calculator()
-    elif reward_system == 'weighted_conservative':
-        print(f"使用加權保守獎勵系統")
-        reward_calculator = create_conservative_calculator()
-    elif reward_system == 'weighted_trend':
-        print(f"使用加權趨勢追蹤獎勵系統")
-        reward_calculator = create_trend_following_calculator()
-    else:
-        print(f"未知的獎勵系統: {reward_system}，使用加權平衡系統")
-        reward_calculator = create_balanced_calculator()
+    # 使用止損優先獎勵系統
+    reward_calculator = create_default_calculator()
+    info = reward_calculator.get_info()
+    print(f"獎勵配置: {info['type']}")
+    print(f"  權重 - stop_loss:{info['weights']['stop_loss']}, terminal:{info['weights']['terminal']}, return:{info['weights']['return']}, risk:{info['weights']['risk']}, struct:{info['weights']['struct']}")
+    print(f"  止損規則: 2.5 ATR | 尺度 - return_clip:{info['scales']['return_clip']}, risk_threshold:{info['scales']['risk_threshold']}")
     
     # 創建環境
     env = TradingEnvironment(
@@ -516,20 +511,6 @@ def train_sac(
 
     if n_envs is not None and int(n_envs) > 1:
         print(f"建立向量化環境: n_envs={int(n_envs)} (SubprocVecEnv)")
-        # 獲取獎勵系統類型
-        reward_system = 'weighted_balanced'  # 預設
-        if hasattr(env, 'reward_calculator'):
-            calc = env.reward_calculator
-            if isinstance(calc, RewardCalculator):
-                reward_system = 'original'
-            elif isinstance(calc, WeightedRewardCalculator):
-                # 根據權重判斷類型
-                if calc.weight_trade_cost == 10.0 and calc.weight_holding == 3.0:
-                    reward_system = 'weighted_conservative'
-                elif calc.weight_trade_cost == 8.0 and calc.weight_holding == 5.0:
-                    reward_system = 'weighted_trend'
-                else:
-                    reward_system = 'weighted_balanced'
         
         factory = TradingEnvFactory(
             data_path=(train_data_path or eval_data_path or './Data/BTCUSDT_futures_volume_5years_5min.csv'),
@@ -540,8 +521,6 @@ def train_sac(
             min_balance=env.min_balance,
             min_trade_qty=env.min_trade_qty,
             margin_mode=env.margin_mode,
-            reward_mode=(getattr(env.reward_calculator, 'mode', 'log') if hasattr(env, 'reward_calculator') else 'log'),
-            reward_system=reward_system,
             random_start=True,
         )
         vec_env = make_vec_env(factory, n_envs=int(n_envs), vec_env_cls=SubprocVecEnv, monitor_dir=str(monitor_dir_path))
@@ -555,9 +534,9 @@ def train_sac(
         model = SAC.load(load_model, env=env_for_training, device=device)
         print("模型加載成功")
     else:
-        print("創建新模型...")
+        print("創建新模型（SAC + LSTM）...")
         model = SAC(
-            policy="MlpPolicy",
+            policy=RecurrentSACPolicy,
             env=env_for_training,
             learning_rate=learning_rate,
             buffer_size=buffer_size,
@@ -566,13 +545,19 @@ def train_sac(
             tau=tau,
             gamma=gamma,
             train_freq=1,
-            gradient_steps=4,
+            gradient_steps=1,  # 降低梯度步數，提升穩定性
             ent_coef='auto',
+            target_entropy=-0.5,  # action_dim=1 的適當 target entropy
             verbose=1,
             device=device,
-            tensorboard_log=str(log_dir)
+            tensorboard_log=str(log_dir),
+            policy_kwargs={
+                'lstm_hidden_size': 64,   # 降低以節省記憶體
+                'lstm_layers': 1,         # 單層 LSTM
+                'net_arch': [128, 128],   # 較小的 MLP
+            },
         )
-        print("模型創建成功")
+        print("模型創建成功（SAC + LSTM, hidden=64, layers=1）")
     
     # 創建回調
     callbacks = []
@@ -598,7 +583,6 @@ def train_sac(
                 leverage=(env_for_training.get_attr('leverage')[0] if hasattr(env_for_training, 'get_attr') else env.unwrapped.leverage),
                 transaction_fee=(env_for_training.get_attr('transaction_fee')[0] if hasattr(env_for_training, 'get_attr') else env.unwrapped.transaction_fee),
                 window_size=(env_for_training.get_attr('window_size')[0] if hasattr(env_for_training, 'get_attr') else env.unwrapped.window_size),
-                reward_mode=(env_for_training.get_attr('reward_calculator')[0].mode if hasattr(env_for_training, 'get_attr') else (env.unwrapped.reward_calculator.mode if hasattr(env.unwrapped, 'reward_calculator') else 'delta_equity')),
                 margin_mode=(env_for_training.get_attr('margin_mode')[0] if hasattr(env_for_training, 'get_attr') else env.unwrapped.margin_mode),
                 start_date=eval_start_date,
                 end_date=eval_end_date,
@@ -616,14 +600,12 @@ def train_sac(
                 min_balance = env_for_training.get_attr('min_balance')[0]
                 min_trade_qty = env_for_training.get_attr('min_trade_qty')[0]
                 margin_mode = env_for_training.get_attr('margin_mode')[0]
-                reward_mode = env_for_training.get_attr('reward_calculator')[0].mode
                 eval_env = create_environment(
                     data_path=eval_data_path or './Data/BTCUSDT_futures_volume_5years_5min.csv',
                     initial_balance=initial_balance,
                     leverage=leverage,
                     transaction_fee=transaction_fee,
                     window_size=window_size,
-                    reward_mode=reward_mode,
                     margin_mode=margin_mode,
                     random_start=False,
                 )
@@ -693,23 +675,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='SAC 交易模型訓練（SB3）')
     
     # 訓練參數（支持回合或步數）
-    parser.add_argument('--timesteps', type=int, default=1_500_000,
+    parser.add_argument('--timesteps', type=int, default=5_000_000,
                        help='總訓練步數（若未提供，將使用回合模式）')
     parser.add_argument('--random_start', action='store_true',
                        help='啟用回合隨機起點（每回合從隨機時間開始）')
     parser.add_argument('--mode', type=str, default='train',
                        choices=['train', 'quick_test'],
                        help='運行模式')
-    parser.add_argument('--n_envs', type=int, default=20,
+    parser.add_argument('--n_envs', type=int, default=32,
                        help='並行環境數量（>1 啟用多進程）')
     
     # 數據和路徑
     parser.add_argument('--data', type=str, 
                        default='./Data/BTCUSDT_futures_volume_5years_5min.csv',
                        help='訓練數據路徑')
-    parser.add_argument('--start_date', type=str, default='2025-01-01',
+    parser.add_argument('--start_date', type=str, default='2024-01-01',
                        help='訓練資料開始日期（YYYY-MM-DD 或可解析字串）')
-    parser.add_argument('--end_date', type=str, default='2025-06-30',
+    parser.add_argument('--end_date', type=str, default='2024-03-31',
                        help='訓練資料結束日期（YYYY-MM-DD 或可解析字串）')
     parser.add_argument('--model_dir', type=str, default='./models',
                        help='模型保存目錄')
@@ -724,9 +706,9 @@ def main() -> None:
                        help='訓練設備')
     parser.add_argument('--lr', type=float, default=3e-4,
                        help='學習率')
-    parser.add_argument('--batch_size', type=int, default=4096,
+    parser.add_argument('--batch_size', type=int, default=256,
                        help='批次大小')
-    parser.add_argument('--buffer_size', type=int, default=30000 ,
+    parser.add_argument('--buffer_size', type=int, default=800_000 ,
                        help='經驗回放緩衝區大小')
     
     # 環境參數
@@ -743,19 +725,13 @@ def main() -> None:
                        help='交易手續費率')
     parser.add_argument('--window_size', type=int, default=288 *2 ,#5min bars * 24 hours * 7 days = 288 bars * 7 days = 2016 bars
                        help='觀察窗口大小')
-    parser.add_argument('--reward_mode', type=str, default='log',
-                       choices=['delta_equity', 'pct', 'log'],
-                       help='獎勵模式')
-    parser.add_argument('--reward_system', type=str, default='weighted_balanced',
-                       choices=['original', 'weighted_balanced', 'weighted_conservative', 'weighted_trend'],
-                       help='獎勵系統類型：original=原始系統, weighted_*=加權正則化系統')
     
     # 評估資料設定
     parser.add_argument('--eval_use_last_month', action='store_true',
                        help='使用最新1個月作為評估資料集（自動計算日期範圍）')
-    parser.add_argument('--eval_start_date', type=str, default='2025-07-01',
+    parser.add_argument('--eval_start_date', type=str, default='2024-04-01',
                        help='評估資料開始日期（YYYY-MM-DD）')
-    parser.add_argument('--eval_end_date', type=str, default='2025-07-31',
+    parser.add_argument('--eval_end_date', type=str, default='2024-04-30',
                        help='評估資料結束日期（YYYY-MM-DD）')
     parser.add_argument('--eval_max_steps', type=int, default=1000,
                        help='每個評估回合的最大片長（步數），超過即截斷')
@@ -787,8 +763,6 @@ def main() -> None:
                 leverage=args.leverage,
                 transaction_fee=args.fee_rate,
                 window_size=args.window_size,
-                reward_mode=args.reward_mode,
-                reward_system=args.reward_system,
                 start_date=args.start_date,
                 end_date=args.end_date,
                 random_start=args.random_start,

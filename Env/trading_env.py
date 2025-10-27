@@ -4,7 +4,7 @@ import pandas as pd
 from gymnasium import spaces
 import random
 from .trade_executor import TradeExecutor
-from .reward import RewardCalculator
+from .reward import create_default_calculator
 from .features import build_all_features
 
 '''
@@ -25,7 +25,7 @@ from .features import build_all_features
 '''
 class TradingEnvironment(gym.Env):
     def __init__(self, df, initial_balance=10_000, transaction_fee=0.001, window_size= 24 * 60 //5, leverage = 10, min_balance=100, min_trade_qty=0.001,
-                 reward_weights=None, margin_mode: str = 'isolated', reward_calculator: RewardCalculator | None = None, random_start: bool = False):
+                 reward_weights=None, margin_mode: str = 'isolated', reward_calculator=None, random_start: bool = False):
         super(TradingEnvironment, self).__init__()
         
         # 只保留數值列，並確保包含必要的OHLCV列
@@ -56,8 +56,7 @@ class TradingEnvironment(gym.Env):
             low=-1.0,
             high=1.0,
             shape=(1,),
-            dtype=np.float32,
-            rounding_decimals=1
+            dtype=np.float32
         )
         
         # 構建穩定的觀測特徵：報酬/比例/滾動z-score（只用過去資料）
@@ -130,13 +129,14 @@ class TradingEnvironment(gym.Env):
             dtype=np.float32
         )
         
-        # 建立交易執行器（槓桿、手續費、最小交易量）
+        # 建立交易執行器（槓桿、手續費、最小交易量、止損規則）
         self.executor = TradeExecutor(
             initial_balance=self.initial_balance,
             fee_rate=self.transaction_fee,
             leverage=self.leverage,
             min_trade_qty=self.min_trade_qty,
             margin_mode=self.margin_mode,
+            stop_loss_atr=2.5,  # 固定止損：進場後 ±2.5 ATR
         )
 
         # 帳戶狀態時間序列（逐筆滾動保存）
@@ -148,13 +148,22 @@ class TradingEnvironment(gym.Env):
             'wallet': np.zeros(series_len, dtype=np.float32),
         }
 
-        # 獎勵計算器
-        self.reward_calculator = reward_calculator or RewardCalculator(mode='log', scale=1000.0)
+        # 獎勵計算器（統一正則化版本）
+        self.reward_calculator = reward_calculator or create_default_calculator()
         # 倉位追蹤（用於計算換手）
         self._last_position_size = 0.0
 
-        # 延後打印使用的數據列，待環境完成初始化後輸出
-        print(f"使用的數據列: {list(self.df.columns)}")
+        # 延後打印：原始數據列、特徵列與最終觀察欄位（包含帳戶4欄）
+        try:
+            account_feature_names = ['position', 'position_value', 'equity', 'wallet']
+            #print(f"使用的原始數據列: {list(self.df.columns)}")
+            #print(f"基礎特徵列: {list(self.obs_features.columns[:self.base_feature_count]) if hasattr(self, 'base_feature_count') else 'N/A'}")
+            # 依據組裝順序，extra_features 已併入 obs_features，這裡直接打印全部觀察特徵名稱
+            #print(f"觀察特徵列（不含帳戶4欄）: {list(self.obs_features.columns)}")
+            #print(f"帳戶狀態欄位: {account_feature_names}")
+            #print(f"最終觀察欄位（總數={self.n_features}）：{list(self.obs_features.columns) + account_feature_names}")
+        except Exception:
+            pass
 
         self.reset()
     
@@ -180,6 +189,10 @@ class TradingEnvironment(gym.Env):
         self.closed_trades = []  # 記錄平倉信息
         self.last_position = 0  # 記錄上一次的持倉量
         self.avg_entry_price = 0  # 平均進場價格
+        
+        # 統計追蹤（本 episode）
+        self.episode_stop_loss_count = 0  # 本集止損次數
+        self.episode_liq_count = 0  # 本集清算次數
         
         # 本回合最大步數（受資料長度限制）
         self.episode_start_step = int(self.current_step)
@@ -255,13 +268,19 @@ class TradingEnvironment(gym.Env):
         last_equity = self.executor.equity(current_price) # 上一步的權益
         position_percent = float(action) # 目標持倉比例 (-1.0 ~ 1.0)
 
-        # 執行交易
+        # 估算當前 ATR（用於止損計算）
+        atr_ratio = float(self.obs_features['atr_ratio'].iloc[self.current_step - 1]) if self.current_step > 0 else 0.02
+        atr_est = atr_ratio * current_price
+
+        # 執行交易（傳入 ATR 以計算止損距離）
+        prev_wallet_balance = float(self.executor.wallet_balance)
         self.executor.execute(
             position_percent=position_percent, # 目標持倉比例 (-1.0 ~ 1.0)
             current_price=current_price, # 當前價格
             high=current_high, # 當前最高價
             low=current_low, # 當前最低價
             equity=last_equity, # 上一步的權益
+            atr=atr_est, # ATR（用於計算止損距離）
         )
 
         # 同步帳戶狀態
@@ -269,6 +288,8 @@ class TradingEnvironment(gym.Env):
         self.balance = self.executor.wallet_balance # 當前資金
         self.btc_held = self.executor.position.size # 當前持倉量
         self.total_value = new_equity # 當前總資產
+        # 本步已實現損益（以錢包餘額變化衡量）
+        realized_pnl_step = float(self.executor.wallet_balance - prev_wallet_balance)
 
         # 計算保證金緩衝（距離強平的安全空間）= 1 - (槓桿比 / 安全槓桿比) <= reward 使用
         margin_buffer = None
@@ -291,21 +312,65 @@ class TradingEnvironment(gym.Env):
         # 計算倉位變動（換手） 
         position_change = abs(float(self.executor.position.size - self._last_position_size))# 倉位變動 = 當前持倉量 - 上一次持倉量
         traded = position_change > 1e-8  # 是否發生交易 pos
+        # 名目換手比例：本步名目變動金額 / 當前權益（避免資產常數）
+        turnover_ratio = None
+        try:
+            notional_change = position_change * current_price
+            if new_equity > 0:
+                turnover_ratio = float(abs(notional_change) / new_equity)
+        except Exception:
+            turnover_ratio = None
         self._last_position_size = float(self.executor.position.size)
 
         # 計算未實現損益（用於持倉獎勵）
         unrealized_pnl = float(self.executor.unrealized_pnl(current_price))
         has_position = abs(self.executor.position.size) > 1e-8  # 是否持有倉位
+        
+        # 取得止損觸發狀態，並累計本 episode 次數
+        stop_loss_triggered = self.executor.stop_loss_triggered
+        if stop_loss_triggered:
+            self.episode_stop_loss_count += 1
 
-        # 回饋：使用獨立獎勵計算器（簡化版）
+        # 計算結構性指標：極值距離與 MAE（ATR 單位），供獎勵使用
+        dist_to_extreme_atr = None
+        mae_atr = None
+        leverage_ratio = None
+        try:
+            start_idx = max(0, self.current_step - self.window_size)
+            window_high = float(np.max(self.df['high'].iloc[start_idx:self.current_step]))
+            window_low = float(np.min(self.df['low'].iloc[start_idx:self.current_step]))
+            atr_ratio = float(self.obs_features['atr_ratio'].iloc[self.current_step - 1]) if self.current_step > 0 else 0.0
+            atr_est = max(1e-8, atr_ratio * current_price)
+            if has_position:
+                if self.executor.position.size > 0:
+                    dist = max(0.0, window_high - current_price)
+                    adverse_move = max(0.0, float(self.executor.position.entry_price) - current_low)
+                else:
+                    dist = max(0.0, current_price - window_low)
+                    adverse_move = max(0.0, current_high - float(self.executor.position.entry_price))
+                dist_to_extreme_atr = float(dist / atr_est) if atr_est > 0 else None
+                mae_atr = float(adverse_move / atr_est) if atr_est > 0 else None
+                position_value = abs(float(self.executor.position.size * current_price))
+                leverage_ratio = float(position_value / new_equity) if new_equity > 0 else None
+        except Exception:
+            pass
+
+        # 回饋：使用獨立獎勵計算器
         reward = self.reward_calculator.compute(
             last_equity=last_equity,
             new_equity=new_equity,
             margin_buffer=margin_buffer,
             position_change=position_change,
+            turnover_ratio=turnover_ratio,
+            dist_to_extreme_atr=dist_to_extreme_atr,
+            mae_atr=mae_atr,
+            leverage_ratio=leverage_ratio,
             has_position=has_position,
             unrealized_pnl=unrealized_pnl,
             traded=traded,
+            realized_pnl_step=realized_pnl_step,
+            episode_steps=self.episode_steps,  # 傳入當前步數供終局歸一化
+            stop_loss_triggered=stop_loss_triggered,  # 止損觸發狀態
         )
 
         # 更新帳戶狀態時間序列
@@ -324,25 +389,34 @@ class TradingEnvironment(gym.Env):
         self.current_step += 1
         self.episode_steps += 1
 
-        # 檢查結束條件並記錄原因
+        # 檢查結束條件：只有清算/資金不足/數據用完才終止（止損不終止，允許恢復）
         data_exhausted = self.current_step >= len(self.df) - 1
         balance_insufficient = new_equity <= self.min_balance# 資金不足
         liq_triggered = self.executor.liq_triggered# 強平觸發
+        stop_loss_hit = stop_loss_triggered  # 止損觸發（不終止 episode）
+        
+        # 累計清算次數
+        if liq_triggered:
+            self.episode_liq_count += 1
 
-        self.done = data_exhausted or balance_insufficient or liq_triggered
+        self.done = data_exhausted or balance_insufficient or liq_triggered  # 止損不終止
         
         # 構造 info，提供結束原因
         info = {}
+        # 止損僅記錄但不終止（用於統計與 reward 懲罰）
+        if stop_loss_hit:
+            info['stop_loss_triggered'] = True
+        
         if self.done:
             if data_exhausted:
                 info['termination_reason'] = 'data_exhausted'
                 print(f"Episode結束：數據用完 (step={self.current_step}, data_len={len(self.df)})")
-            elif balance_insufficient:
-                info['termination_reason'] = 'balance_insufficient'
-                print(f"Episode結束：資金不足 (balance={self.balance:.2f}, min={self.min_balance})")
             elif liq_triggered:
                 info['termination_reason'] = 'liq_triggered'
                 print(f"Episode結束：強平 (balance={self.balance:.2f})")
+            elif balance_insufficient:
+                info['termination_reason'] = 'balance_insufficient'
+                print(f"Episode結束：資金不足 (balance={self.balance:.2f}, min={self.min_balance})")
             else:
                 info['termination_reason'] = 'other'
             # 附加結算資訊供回調使用
@@ -362,14 +436,23 @@ class TradingEnvironment(gym.Env):
                 info['episode_max_steps'] = int(self.episode_max_steps)
                 info['data_len'] = int(len(self.df))
                 info['window_size'] = int(self.window_size)
+                # 本 episode 止損與清算次數
+                info['episode_stop_loss_count'] = int(self.episode_stop_loss_count)
+                info['episode_liq_count'] = int(self.episode_liq_count)
             except Exception:
                 pass
-            # 以終止資訊補充最後一步的獎勵（失敗懲罰）
+            # 以終止資訊補充最後一步的獎勵（步數歸一化終局懲罰）
             reward = self.reward_calculator.compute(
                 last_equity=last_equity,
                 new_equity=new_equity,
                 done=True,
-                termination_reason=info['termination_reason']
+                termination_reason=info['termination_reason'],
+                realized_pnl_step=realized_pnl_step,
+                episode_steps=self.episode_steps,
+                margin_buffer=margin_buffer,
+                dist_to_extreme_atr=dist_to_extreme_atr,
+                mae_atr=mae_atr,
+                stop_loss_triggered=stop_loss_triggered,
             )
         
         return self._get_observation(), reward, self.done, False, info
