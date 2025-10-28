@@ -13,11 +13,12 @@ class PositionState:
             size: 持倉數量
             entry_price: 進場價格
             stop_loss_price: 止損價格（固定規則計算）
+            trade_id: 交易 ID（用於 RUDDER 回填）
     '''
     size: float = 0.0  # 正數為多單，負數為空單（合約大小，資產單位）
     entry_price: float = 0.0
     stop_loss_price: float = 0.0  # 止損價格
-
+    trade_id: int = -1  # 交易 ID（-1 表示無倉位）
 
 class TradeExecutor:
     """執行槓桿合約交易的執行器，負責保證金與手續費計算。
@@ -65,6 +66,20 @@ class TradeExecutor:
         self.short_close_count: int = 0
         self.long_entry_count: int = 0
         self.short_entry_count: int = 0
+        # 進場統計（本集）：同向連續進場追蹤
+        self.entry_happened: bool = False
+        self.entry_streak_side: int = 0  # -1 空 / 0 無 / +1 多
+        self.entry_streak_count: int = 0
+        # 交易 ID 追蹤（用於 RUDDER 回填）
+        self._next_trade_id: int = 0
+        self.last_exit_info: Dict = {}  # 記錄最後一次出場信息（供環境讀取）
+        # 停損冷靜期狀態（由環境配置默認值）
+        self.cooldown_until_step: int = -1
+        self.stop_loss_steps: List[int] = []
+        self.stop_loss_cooldown_window: int = 6
+        self.stop_loss_cooldown_length: int = 12
+        self.stop_loss_cooldown_limit: int = 2
+        self.cooldown_hold_ratio: float = 0.0
 
     def reset(self, initial_balance: float) -> None:
         self.wallet_balance = float(initial_balance)# 錢包餘額
@@ -78,6 +93,13 @@ class TradeExecutor:
         self.short_close_count = 0
         self.long_entry_count = 0
         self.short_entry_count = 0
+        self.entry_happened = False
+        self.entry_streak_side = 0
+        self.entry_streak_count = 0
+        self._next_trade_id = 0
+        self.last_exit_info = {}
+        self.cooldown_until_step = -1
+        self.stop_loss_steps = []
 
     # ---------- 查詢輔助方法 ----------
     # 未實現損益
@@ -105,15 +127,17 @@ class TradeExecutor:
         equity: float, # 當前權益
         atr: float = 0.0, # ATR（用於計算止損距離）
     ) -> None:
-        # 重置本步觸發標記
+        # 重置本步觸發標記與出場信息
         self.stop_loss_triggered = False
+        self.entry_happened = False
+        self.last_exit_info = {}  # 清空上一步的出場信息
         
         # 1. 優先檢查止損（先於清算，保護倉位）
         if self.position.size != 0.0 and self.position.stop_loss_price > 0.0:
             if (self.position.size > 0 and low <= self.position.stop_loss_price) or \
                (self.position.size < 0 and high >= self.position.stop_loss_price):
                 # 觸發止損，強制平倉
-                self._close_position(self.position.stop_loss_price)
+                self._close_position(self.position.stop_loss_price, exit_reason='stop_loss')
                 self.stop_loss_triggered = True
                 return  # 止損後不再執行其他邏輯
         
@@ -121,7 +145,7 @@ class TradeExecutor:
         liq_price = self._calc_liquidation_price()
         if liq_price is not None and liq_price > 0.0:
             if (self.position.size > 0 and low <= liq_price) or (self.position.size < 0 and high >= liq_price):
-                self._close_position(liq_price)
+                self._close_position(liq_price, exit_reason='liq')
                 self.liq_triggered = True
                 return
 
@@ -134,9 +158,9 @@ class TradeExecutor:
             if abs(target_size) >= self.min_trade_qty:
                 self._increase_position(delta_size=target_size, price=current_price, atr=atr)
         else:
-            # 若方向反轉，先平舊倉再依新方向開倉
+            # 若方向反轉，先平舊倉再依新方向開倉（反手）
             if self.position.size * target_size < 0:
-                self._close_position(price=current_price)
+                self._close_position(price=current_price, exit_reason='close')
                 # 平倉後依錢包餘額重算目標數量（已實現手續費/損益已反映在餘額）
                 risk_base = self.wallet_balance
                 target_size = (risk_base * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
@@ -148,21 +172,16 @@ class TradeExecutor:
                 if abs(delta) >= self.min_trade_qty:
                     if (self.position.size > 0 and delta < 0) or (self.position.size < 0 and delta > 0):
                         # 減倉
-                        self._reduce_position(delta_size=delta, price=current_price)
+                        self._reduce_position(delta_size=delta, price=current_price, exit_reason='reduce')
                     else:
                         # 加倉
                         self._increase_position(delta_size=delta, price=current_price, atr=atr)
 
-       # # 根據最終倉位方向，從當前價格更新止盈/止損價格
-        # if self.position.size > 0:
-        #     self.position.take_profit_price = current_price * (1 + max(0.0, min(take_profit_percent, self.max_take_profit_percent)) * 0.01)
-        #     self.position.stop_loss_price = current_price * (1 - max(0.0, min(stop_loss_percent, self.max_stop_loss_percent)) * 0.01)
-        # elif self.position.size < 0:
-        #     self.position.take_profit_price = current_price * (1 - max(0.0, min(take_profit_percent, self.max_take_profit_percent)) * 0.01)
-        #     self.position.stop_loss_price = current_price * (1 + max(0.0, min(stop_loss_percent, self.max_stop_loss_percent)) * 0.01)
-        # else:
-        #     self.position.take_profit_price = 0.0
-       #     self.position.stop_loss_price = 0.0
+    
+    def forced_close_position(self, price: float) -> None:
+        """強制平倉（回合結束時，用於 RUDDER 收斂）"""
+        if self.position.size != 0.0:
+            self._close_position(price, exit_reason='forced_close_on_done')
 
     # ---------- 內部操作 ----------
     def _fee(self, notional: float) -> float:
@@ -171,7 +190,7 @@ class TradeExecutor:
     def _required_margin(self, size: float, price: float) -> float:
         return abs(size) * price / self.leverage
 
-    # 加倉
+    # 加倉（進場事件）
     def _increase_position(self, *, delta_size: float, price: float, atr: float = 0.0) -> None:
         # 確保可用資金足以覆蓋新增保證金與手續費
         was_flat = (self.position.size == 0.0)
@@ -210,12 +229,26 @@ class TradeExecutor:
         self.wallet_balance -= fee
         self.total_fees += fee
 
-        # 若原先為空倉，視為進場（記一次）並設定止損價
+        # 本步進場事件與同向連續進場追蹤（任何加倉皆視為一次進場事件）
+        if abs(delta_size) > 0.0:
+            side = 1 if delta_size > 0 else -1
+            if self.entry_streak_side == side:
+                self.entry_streak_count += 1
+            else:
+                self.entry_streak_side = side
+                self.entry_streak_count = 1
+            self.entry_happened = True
+
+        # 若原先為空倉，視為首次進場（僅統計長短方向次數）並設定止損價與交易 ID
         if was_flat and abs(delta_size) > 0.0:
             if delta_size > 0:
                 self.long_entry_count += 1
             else:
                 self.short_entry_count += 1
+            
+            # 分配新的交易 ID（用於 RUDDER 回填）
+            self.position.trade_id = self._next_trade_id
+            self._next_trade_id += 1
             
             # 設定固定止損價（以 ATR 倍數計算）
             if atr > 0 and self.stop_loss_atr > 0:
@@ -227,8 +260,8 @@ class TradeExecutor:
             else:
                 self.position.stop_loss_price = 0.0
 
-    # 減倉
-    def _reduce_position(self, *, delta_size: float, price: float) -> None:
+    # 減倉（出場事件：部分平倉）
+    def _reduce_position(self, *, delta_size: float, price: float, exit_reason: str = 'reduce') -> None:
         # delta_size 與當前持倉方向相反；以下計算實際平倉數量
         close_size = -delta_size  # 平倉數量（與現有持倉同號）
         was_long = self.position.size > 0
@@ -256,18 +289,22 @@ class TradeExecutor:
                 self.long_close_count += 1
             else:
                 self.short_close_count += 1
-        # 記錄交易
-        self.closed_trades.append({
+        # 記錄交易與出場信息（供環境讀取）
+        trade_info = {
             'side': 'long' if was_long else 'short',
             'size': float(close_size),
             'price': float(price),
             'fee': float(fee),
             'realized_pnl': float(realized_pnl),
-            'type': 'reduce'
-        })
+            'type': exit_reason,
+            'trade_id': self.position.trade_id,  # 當前倉位的交易 ID
+            'exit_reason': exit_reason,
+        }
+        self.closed_trades.append(trade_info)
+        self.last_exit_info = trade_info  # 保存最後一次出場信息供環境讀取
 
-    # 平倉
-    def _close_position(self, price: float) -> None:
+    # 平倉（出場事件：完全平倉）
+    def _close_position(self, price: float, exit_reason: str = 'close') -> None:
         if self.position.size == 0.0:
             return
         size_to_close = abs(self.position.size)
@@ -280,22 +317,39 @@ class TradeExecutor:
         fee = self._fee(size_to_close * price)
         self.wallet_balance += realized_pnl - fee
         self.used_margin = 0.0
-        self.position = PositionState()  # 重置（包含 stop_loss_price）
+        
+        # 記錄出場信息（在重置倉位前保存交易 ID）
+        exited_trade_id = self.position.trade_id
+        trade_info = {
+            'side': 'long' if was_long else 'short',
+            'size': float(size_to_close),
+            'price': float(price),
+            'fee': float(fee),
+            'realized_pnl': float(realized_pnl),
+            'type': exit_reason,
+            'trade_id': exited_trade_id,
+            'exit_reason': exit_reason,
+        }
+        self.closed_trades.append(trade_info)
+        self.last_exit_info = trade_info  # 保存最後一次出場信息供環境讀取
+        
+        self.position = PositionState()  # 重置（包含 stop_loss_price 與 trade_id）
+        # 重置同向連續進場追蹤
+        if exit_reason == 'stop_loss':
+            # 若為止損出場，保留方向與累積次數，下一次同向再進視為連續行為
+            was_long_side = 1 if was_long else -1
+            self.entry_streak_side = was_long_side
+            # 維持現有 entry_streak_count（若為 0，下一次仍從 1 開始）
+        else:
+            self.entry_streak_side = 0
+            self.entry_streak_count = 0
+        self.entry_happened = False
         # 統計
         self.total_fees += fee
         if was_long:
             self.long_close_count += 1
         else:
             self.short_close_count += 1
-        # 記錄交易
-        self.closed_trades.append({
-            'side': 'long' if was_long else 'short',
-            'size': float(size_to_close),
-            'price': float(price),
-            'fee': float(fee),
-            'realized_pnl': float(realized_pnl),
-            'type': 'close'
-        })
 
     # ---------- 風險控制與強平 ----------
     def _calc_liquidation_price(self) -> float | None:
