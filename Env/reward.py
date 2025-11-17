@@ -1,17 +1,154 @@
 """
-統一正規化獎勵（依優先序）：
-1) 終局（terminal）  2) 收益（return）  3) 風險（risk）  4) 結構性風險（struct）
+獎勵計算器模組
 
-原則：
-- 各子項先正規化到固定尺度（[-1, 1] 或 [-1, 0]），再乘權重線性組合。
-- 終局以 -1 表示失敗（非 data_exhausted），權重最大。
-- 收益使用對數報酬縮放。
-- 風險用 margin_buffer 的凸性懲罰（越接近強平懲罰越大）。
-- 結構性風險含 MAE/ATR 與極值鄰近（dist_to_extreme/ATR），權重最小。
+提供多種獎勵計算策略：
+1. RewardCalculatorBalanced（方案 B）：平衡版獎勵（推薦）
+   - 存活獎勵 + 收益獎勵 + 風險懲罰 + 止損/強平懲罰 + 終局獎勵
+   - 適合生產環境，平衡風險與收益
+
+2. RewardCalculator（原方案）：複雜版獎勵
+   - 保留原有的多層次獎勵結構
+   - 適合進階優化
+
+使用方式：
+```python
+# 方案 B（推薦）
+calculator = RewardCalculatorBalanced()
+
+# 原方案
+calculator = RewardCalculator()
+```
 """
 from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
+
+
+@dataclass
+class RewardCalculatorBalanced:
+    """
+    平衡版獎勵計算器（方案 B）
+    
+    設計原則：
+    - 鼓勵長期存活（每步小額正獎勵）
+    - 獎勵收益，使用對數報酬標準化
+    - 懲罰接近危險區域（margin buffer）
+    - 懲罰止損/強平（但不終止）
+    - 終局獎勵與整體表現掛鉤
+    """
+    # 權重配置
+    w_survival: float = 0.1           # 存活獎勵（每步基礎分）
+    w_return: float = 10.0            # 收益獎勵
+    w_risk: float = 10.0              # 風險懲罰
+    w_stop_loss: float = 20.0         # 止損懲罰
+    w_liquidation: float = 30.0       # 強平懲罰
+    w_terminal_success: float = 50.0  # 終局成功基礎分
+    w_terminal_fail: float = 100.0    # 終局失敗懲罰
+    w_terminal_return_bonus: float = 200.0  # 終局報酬率加成
+    
+    # 尺度參數
+    return_clip: float = 0.02         # ±2% log return → ±1
+    risk_threshold: float = 0.5       # 風險區域閾值（margin buffer < 0.5 觸發懲罰）
+    
+    def compute(
+        self,
+        *,
+        last_equity: float,
+        new_equity: float,
+        done: bool = False,
+        termination_reason: str | None = None,
+        margin_buffer: float | None = None,
+        realized_pnl_step: float | None = None,
+        episode_steps: int | None = None,
+        stop_loss_triggered: bool = False,
+        initial_balance: float | None = None,
+        **kwargs  # 忽略其他舊參數以保持兼容
+    ) -> float:
+        """
+        計算平衡版獎勵
+        
+        Args:
+            last_equity: 上一步權益
+            new_equity: 當前步權益
+            done: 是否終止
+            termination_reason: 終止原因
+            margin_buffer: 保證金緩衝比例 [0, 1]
+            realized_pnl_step: 當前步已實現損益
+            episode_steps: 回合步數
+            stop_loss_triggered: 是否觸發止損
+            initial_balance: 初始資金（用於計算終局報酬率）
+            **kwargs: 其他參數
+            
+        Returns:
+            float: 獎勵值
+        """
+        total = 0.0
+        
+        # 1. 存活獎勵（每步基礎分，鼓勵長期存活）
+        if not done:
+            total += self.w_survival
+        
+        # 2. 收益獎勵（log return 標準化）
+        if last_equity > 1e-8 and new_equity > 1e-8 and self.return_clip > 0:
+            log_ret = float(np.log(new_equity / last_equity))
+            ret_norm = float(np.clip(log_ret / self.return_clip, -1.0, 1.0))
+            total += ret_norm * self.w_return
+        
+        # 3. 風險懲罰（margin buffer 低於閾值時二次懲罰）
+        if margin_buffer is not None and self.w_risk > 0:
+            if margin_buffer < self.risk_threshold:
+                # 二次懲罰：越接近 0 懲罰越大
+                risk_penalty = ((self.risk_threshold - margin_buffer) / self.risk_threshold) ** 2
+                total -= risk_penalty * self.w_risk
+        
+        # 4. 止損懲罰（觸發時扣分，但不終止）
+        if stop_loss_triggered:
+            total -= self.w_stop_loss
+        
+        # 5. 強平懲罰（觸發時扣分，但不終止）
+        # 注意：liq_triggered 需要從 kwargs 傳入
+        if kwargs.get('liq_triggered', False):
+            total -= self.w_liquidation
+        
+        # 6. 終局獎勵
+        if done:
+            if termination_reason == 'data_exhausted':
+                # 成功：基礎分 + 報酬率加成
+                total += self.w_terminal_success
+                
+                # 報酬率加成（盈利越多獎勵越高）
+                if initial_balance is not None and initial_balance > 1e-8:
+                    profit_rate = (new_equity / initial_balance) - 1.0
+                    total += profit_rate * self.w_terminal_return_bonus
+            
+            elif termination_reason == 'balance_insufficient':
+                # 失敗：資金不足
+                total -= self.w_terminal_fail
+        
+        return float(total)
+    
+    def get_info(self) -> dict:
+        """返回獎勵配置資訊"""
+        return {
+            'type': 'balanced_reward',
+            'weights': {
+                'survival': self.w_survival,
+                'return': self.w_return,
+                'risk': self.w_risk,
+                'stop_loss': self.w_stop_loss,
+                'liquidation': self.w_liquidation,
+                'terminal_success': self.w_terminal_success,
+                'terminal_fail': self.w_terminal_fail,
+                'terminal_return_bonus': self.w_terminal_return_bonus,
+            },
+            'scales': {
+                'return_clip': self.return_clip,
+                'risk_threshold': self.risk_threshold,
+            }
+        }
+
+
+# ========== 原方案（保留向後兼容） ==========
 
 
 @dataclass
@@ -46,7 +183,6 @@ class RewardCalculator:
         turnover_ratio: float | None = None,
         dist_to_extreme_atr: float | None = None,
         mae_atr: float | None = None,
-        leverage_ratio: float | None = None,
         realized_pnl_step: float | None = None,
         has_position: bool = False,
         unrealized_pnl: float | None = None,
@@ -124,6 +260,12 @@ class RewardCalculator:
             }
         }
 
-# 工廠函數保留以便外部一致使用名稱
-def create_default_calculator() -> RewardCalculator:
+# 工廠函數：默認使用平衡版（方案 B）
+def create_default_calculator() -> RewardCalculatorBalanced:
+    """創建默認獎勵計算器（方案 B：平衡版）"""
+    return RewardCalculatorBalanced()
+
+
+def create_advanced_calculator() -> RewardCalculator:
+    """創建進階獎勵計算器（原方案：複雜版）"""
     return RewardCalculator()
