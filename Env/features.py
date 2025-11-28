@@ -20,6 +20,16 @@ def _rolling_z(series: pd.Series, window: int, min_periods: int = 20) -> pd.Seri
     return z.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
+def _rolling_mean(series: pd.Series, window: int, min_periods: int = 20) -> pd.Series:
+    """Return rolling mean."""
+    return series.rolling(window, min_periods=min_periods).mean()
+
+
+def _rolling_std(series: pd.Series, window: int, min_periods: int = 20) -> pd.Series:
+    """Return rolling std."""
+    return series.rolling(window, min_periods=min_periods).std()
+
+
 def _ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False, min_periods=1).mean()
 
@@ -151,6 +161,95 @@ def compute_smc_features(df: pd.DataFrame, lookback: int = 288) -> pd.DataFrame:
     return feats
 
 
+def compute_market_shape_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute shape features for CNN input (price_seq), fully normalized.
+    
+    Included Features (F=6):
+    1. ret_t: log(close_t / close_{t-1}) / rolling_std
+       - Standardized log returns (Z-score-like).
+       
+    2. range_t: ((high_t - low_t) / close_{t-1}) / rolling_mean_range
+       - Relative range: >1 means higher than average volatility.
+       
+    3. body_t: ((close_t - open_t) / close_{t-1}) / rolling_mean_range
+       - Relative body: Signed body length relative to average range.
+       
+    4. vol_t: log(volume_t / vol_mean_recent)
+       - Already relative.
+       
+    5. vol_regime_t: Percentile rank of current range.
+       - [0, 1] bounded.
+       
+    6. spread_t: (ask-bid)/mid / mean_spread
+       - Relative spread.
+    """
+    close = df['close'].astype(float)
+    open_ = df.get('open', close).astype(float)
+    high = df['high'].astype(float)
+    low = df['low'].astype(float)
+    volume = df.get('volume', pd.Series(0.0, index=df.index)).astype(float)
+    
+    prev_close = close.shift(1).bfill().fillna(0.0)
+    
+    # 0. Base Components
+    log_close = np.log(np.clip(close, 1e-12, None))
+    raw_ret = log_close.diff().fillna(0.0)
+    
+    raw_range_pct = (high - low) / np.clip(prev_close, 1e-12, None)
+    raw_body_pct = (close - open_) / np.clip(prev_close, 1e-12, None)
+    
+    # Rolling Stats (Lookback 288 for robust normalization)
+    norm_window = 288
+    ret_std = _rolling_std(raw_ret, norm_window).replace(0.0, 1.0)
+    range_mean = _rolling_mean(raw_range_pct, norm_window).replace(0.0, 1e-4) # avoid div 0
+    
+    # 1. Normalized Log Return (Z-score)
+    ret_norm = raw_ret / ret_std
+    # Clip extreme outliers (e.g., > 5 std dev)
+    ret_norm = ret_norm.clip(-5, 5)
+    
+    # 2. Relative Range
+    range_norm = raw_range_pct / range_mean
+    range_norm = range_norm.clip(0, 10) # Cap at 10x average
+    
+    # 3. Relative Body
+    # Normalize body by the same range mean to keep relative scale between body and range
+    body_norm = raw_body_pct / range_mean
+    body_norm = body_norm.clip(-10, 10)
+    
+    # 4. Volume (already relative log-ratio)
+    vol_mean = volume.rolling(20, min_periods=1).mean().replace(0.0, 1.0)
+    vol_val = np.log(np.clip(volume / vol_mean, 1e-8, None))
+    vol_val = vol_val.clip(-5, 5)
+    
+    # 5. Volatility Regime (0-1)
+    vol_regime = raw_range_pct.rolling(window=288, min_periods=1).rank(pct=True).fillna(0.5)
+
+    # 6. Spread (Relative)
+    if 'ask1' in df.columns and 'bid1' in df.columns:
+         mid = (df['ask1'] + df['bid1']) / 2
+         spread_raw = (df['ask1'] - df['bid1']) / np.clip(mid, 1e-12, None)
+         spread_mean = spread_raw.rolling(288, min_periods=1).mean().replace(0.0, 1e-6)
+         spread_val = spread_raw / spread_mean
+         spread_val = spread_val.clip(0, 10)
+    else:
+         spread_val = pd.Series(0.0, index=df.index)
+    
+    features_dict = {
+        'ret': ret_norm,
+        'range': range_norm,
+        'body': body_norm,
+        'vol': vol_val,
+        'vol_regime': vol_regime,
+        'spread': spread_val
+    }
+    
+    features = pd.DataFrame(features_dict, index=df.index)
+    
+    return features.fillna(0.0).astype(np.float32)
+
+
 def build_all_features(df: pd.DataFrame, lookback: int = 288) -> pd.DataFrame:
     """Build and return all additional feature columns aligned to df index.
 
@@ -161,10 +260,8 @@ def build_all_features(df: pd.DataFrame, lookback: int = 288) -> pd.DataFrame:
     Returns:
         DataFrame of engineered features (float32), NaN-safe.
     """
-    macd_df = compute_macd_features(df['close'], lookback=lookback)#MACD指標
-    liq_df = compute_liquidity_features(df, lookback=lookback)#流動性指標
-    smc_df = compute_smc_features(df, lookback=lookback)#SMC指標
+    macd_df = compute_macd_features(df['close'], lookback=lookback)
+    liq_df = compute_liquidity_features(df, lookback=lookback)
+    smc_df = compute_smc_features(df, lookback=lookback)
     extra = pd.concat([macd_df, liq_df, smc_df], axis=1)
     return extra.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(np.float32)
-
-
