@@ -481,13 +481,13 @@ class TradingEnvironment(gym.Env):
         if self.done:
             if data_exhausted:
                 info['termination_reason'] = 'data_exhausted'
-                print(f"Episode結束：數據用完 (step={self.current_step}, data_len={len(self.df)})")
+                #print(f"Episode結束：數據用完 (step={self.current_step}, data_len={len(self.df)})")
             elif liq_triggered:
                 info['termination_reason'] = 'liq_triggered'
-                print(f"Episode結束：強平 (balance={self.balance:.2f})")
+                #print(f"Episode結束：強平 (balance={self.balance:.2f})")
             elif balance_insufficient:
                 info['termination_reason'] = 'balance_insufficient'
-                print(f"Episode結束：資金不足 (balance={self.balance:.2f}, min={self.min_balance})")
+                #print(f"Episode結束：資金不足 (balance={self.balance:.2f}, min={self.min_balance})")
             else:
                 info['termination_reason'] = 'other'
             

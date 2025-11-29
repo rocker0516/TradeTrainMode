@@ -1,0 +1,256 @@
+import torch
+import torch.nn.functional as F
+import torch.optim as optim
+import numpy as np
+from typing import Dict, Tuple, Optional, List
+from .architectures import Actor, Critic
+from .buffer import ReplayBuffer
+
+class SACLagrangianAgent:
+    """
+    SAC Agent with Lagrangian Constraint Handling (SAC-Lagrangian).
+    Multi-Constraint Support.
+    """
+    def __init__(
+        self,
+        price_input_channels: int,
+        price_window_size: int,
+        state_dim: int,
+        action_dim: int,
+        cost_limits: List[float], 
+        device: torch.device = torch.device("cpu"),
+        gamma: float = 0.99,
+        tau: float = 0.005,
+        lr: float = 3e-4,
+        alpha: float = 0.2,
+        automatic_entropy_tuning: bool = True,
+        use_lagrangian: bool = True,
+        lagrangian_lr: float = 0.05
+    ):
+        self.device = device
+        self.gamma = gamma
+        self.tau = tau
+        self.action_dim = action_dim
+        self.cost_limits = torch.tensor(cost_limits, device=device, dtype=torch.float32)
+        self.num_constraints = len(cost_limits)
+        
+        # --- Actor & Critic ---
+        self.actor = Actor(price_input_channels, price_window_size, state_dim, action_dim).to(device)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
+        
+        # Critic (Double Q) for Reward
+        self.critic_1 = Critic(price_input_channels, price_window_size, state_dim, action_dim, output_dim=1).to(device)
+        self.critic_2 = Critic(price_input_channels, price_window_size, state_dim, action_dim, output_dim=1).to(device)
+        self.critic_1_target = Critic(price_input_channels, price_window_size, state_dim, action_dim, output_dim=1).to(device)
+        self.critic_2_target = Critic(price_input_channels, price_window_size, state_dim, action_dim, output_dim=1).to(device)
+        
+        self.critic_1_target.load_state_dict(self.critic_1.state_dict())
+        self.critic_2_target.load_state_dict(self.critic_2.state_dict())
+        
+        self.critic_optimizer = optim.Adam(list(self.critic_1.parameters()) + list(self.critic_2.parameters()), lr=lr)
+        
+        # --- Entropy / Alpha ---
+        self.automatic_entropy_tuning = automatic_entropy_tuning
+        if self.automatic_entropy_tuning:
+            self.target_entropy = -torch.prod(torch.Tensor((action_dim,)).to(device)).item()
+            self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
+            self.alpha_optimizer = optim.Adam([self.log_alpha], lr=lr)
+            self.alpha = self.log_alpha.exp()
+        else:
+            self.alpha = torch.tensor(alpha, device=device)
+
+        # --- Lagrangian (Safety) ---
+        # Minimizing Cost Constraint: J_Ci(pi) <= di
+        self.use_lagrangian = use_lagrangian
+        
+        if self.use_lagrangian:
+            # Cost Critic - Outputs a vector of size num_constraints
+            self.cost_critic_1 = Critic(price_input_channels, price_window_size, state_dim, action_dim, output_dim=self.num_constraints).to(device)
+            self.cost_critic_1_target = Critic(price_input_channels, price_window_size, state_dim, action_dim, output_dim=self.num_constraints).to(device)
+            self.cost_critic_1_target.load_state_dict(self.cost_critic_1.state_dict())
+            self.cost_critic_optimizer = optim.Adam(self.cost_critic_1.parameters(), lr=lr)
+            
+            # Lagrangian Multipliers (Lambdas)
+            # One lambda per constraint
+            self.log_lambda = torch.zeros(self.num_constraints, requires_grad=True, device=device)
+            self.lambda_optimizer = optim.Adam([self.log_lambda], lr=lagrangian_lr)
+            self.lagrangian_lambda = self.log_lambda.exp()
+        else:
+            self.lagrangian_lambda = torch.zeros(self.num_constraints, device=device)
+
+    def select_action(self, obs: Dict[str, np.ndarray], evaluate: bool = False) -> np.ndarray:
+        price_seq = torch.FloatTensor(obs['price_seq']).unsqueeze(0).to(self.device)
+        state_vec = torch.FloatTensor(obs['state_vector']).unsqueeze(0).to(self.device)
+        
+        # NaN Check on Input
+        if torch.isnan(price_seq).any() or torch.isnan(state_vec).any():
+             print("CRITICAL: NaN detected in select_action input!")
+        
+        self.actor.eval()
+        with torch.no_grad():
+            mean, log_std = self.actor(price_seq, state_vec)
+            
+            # NaN Check on Output
+            if torch.isnan(mean).any():
+                print("CRITICAL: NaN detected in Actor Output (Mean)!")
+                print(f"Price Seq Range: {price_seq.min()} - {price_seq.max()}")
+                print(f"State Vec Range: {state_vec.min()} - {state_vec.max()}")
+            
+            std = log_std.exp()
+            
+            if evaluate:
+                action = torch.tanh(mean)
+            else:
+                normal = torch.distributions.Normal(mean, std)
+                z = normal.sample()
+                action = torch.tanh(z)
+                
+        self.actor.train()
+        return action.cpu().numpy()[0]
+
+    def update(self, replay_buffer: ReplayBuffer, batch_size: int) -> Dict[str, float]:
+        batch = replay_buffer.sample(batch_size)
+        
+        price_seq = batch['price_seq']
+        state_vec = batch['state_vec']
+        action = batch['action']
+        reward = batch['reward']
+        cost = batch['cost'] # (B, num_constraints)
+        next_price_seq = batch['next_price_seq']
+        next_state_vec = batch['next_state_vec']
+        done = batch['done']
+        
+        # 1. Update Critic (Reward Q-Functions)
+        with torch.no_grad():
+            next_mean, next_log_std = self.actor(next_price_seq, next_state_vec)
+            next_std = next_log_std.exp()
+            next_dist = torch.distributions.Normal(next_mean, next_std)
+            next_action_sample = next_dist.rsample()
+            next_action = torch.tanh(next_action_sample)
+            
+            next_log_prob = next_dist.log_prob(next_action_sample) - torch.log(1 - next_action.pow(2) + 1e-6)
+            next_log_prob = next_log_prob.sum(dim=1, keepdim=True)
+            
+            target_q1 = self.critic_1_target(next_price_seq, next_state_vec, next_action)
+            target_q2 = self.critic_2_target(next_price_seq, next_state_vec, next_action)
+            min_target_q = torch.min(target_q1, target_q2) - self.alpha * next_log_prob
+            
+            target_q_value = reward + (1 - done) * self.gamma * min_target_q
+
+        current_q1 = self.critic_1(price_seq, state_vec, action)
+        current_q2 = self.critic_2(price_seq, state_vec, action)
+        
+        critic_loss = F.mse_loss(current_q1, target_q_value) + F.mse_loss(current_q2, target_q_value)
+        
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_optimizer.step()
+        
+        # 2. Update Cost Critic (if using Lagrangian)
+        if self.use_lagrangian:
+            with torch.no_grad():
+                target_qc1 = self.cost_critic_1_target(next_price_seq, next_state_vec, next_action)
+                target_qc_value = cost + (1 - done) * self.gamma * target_qc1
+            
+            current_qc1 = self.cost_critic_1(price_seq, state_vec, action)
+            cost_critic_loss = F.mse_loss(current_qc1, target_qc_value)
+            
+            self.cost_critic_optimizer.zero_grad()
+            cost_critic_loss.backward()
+            self.cost_critic_optimizer.step()
+
+        # 3. Update Actor
+        mean, log_std = self.actor(price_seq, state_vec)
+        std = log_std.exp()
+        dist = torch.distributions.Normal(mean, std)
+        action_sample = dist.rsample()
+        current_action = torch.tanh(action_sample)
+        
+        log_prob = dist.log_prob(action_sample) - torch.log(1 - current_action.pow(2) + 1e-6)
+        log_prob = log_prob.sum(dim=1, keepdim=True)
+        
+        q1_pi = self.critic_1(price_seq, state_vec, current_action)
+        q2_pi = self.critic_2(price_seq, state_vec, current_action)
+        min_q_pi = torch.min(q1_pi, q2_pi)
+        
+        actor_loss = (self.alpha * log_prob) - min_q_pi
+        
+        if self.use_lagrangian:
+            qc_pi = self.cost_critic_1(price_seq, state_vec, current_action)
+            
+            lam = self.lagrangian_lambda.detach() # (num_constraints,)
+            # Sum over constraints: sum(lambda_i * Q_Ci)
+            # qc_pi is (Batch, num_constraints)
+            # lam is (num_constraints) -> broadcast
+            lagrangian_penalty = (qc_pi * lam).sum(dim=1, keepdim=True)
+            
+            actor_loss = actor_loss + lagrangian_penalty
+            
+            current_cost_estimate = qc_pi.mean(dim=0) # (num_constraints,)
+
+        actor_loss = actor_loss.mean()
+        
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+        
+        # 4. Update Alpha
+        if self.automatic_entropy_tuning:
+            alpha_loss = -(self.log_alpha * (log_prob + self.target_entropy).detach()).mean()
+            self.alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            self.alpha_optimizer.step()
+            self.alpha = self.log_alpha.exp()
+            
+        # 5. Update Lambda
+        if self.use_lagrangian:
+            qc_pi_detached = qc_pi.detach()
+            # Violation: (QC - limit)
+            # We want lambda to increase if QC > limit
+            violation = qc_pi_detached - self.cost_limits
+            
+            # We want to maximize: lambda * (QC - limit) -> Gradient Ascent
+            # Loss to minimize: - lambda * (QC - limit)
+            lambda_loss = - (self.log_lambda * violation).mean()
+            
+            self.lambda_optimizer.zero_grad()
+            lambda_loss.backward()
+            # Gradient Clipping for Lambda
+            torch.nn.utils.clip_grad_norm_([self.log_lambda], 1.0)
+            self.lambda_optimizer.step()
+            
+            # Clamp Lambda to prevent explosion/NaN
+            with torch.no_grad():
+                self.log_lambda.data.clamp_(max=5.0)
+            
+            self.lagrangian_lambda = self.log_lambda.exp()
+
+        # 6. Soft Updates
+        self._soft_update(self.critic_1, self.critic_1_target)
+        self._soft_update(self.critic_2, self.critic_2_target)
+        if self.use_lagrangian:
+            self._soft_update(self.cost_critic_1, self.cost_critic_1_target)
+
+        # Metrics
+        metrics = {
+            "loss/actor": actor_loss.item(),
+            "loss/critic": critic_loss.item(),
+            "val/alpha": self.alpha.item(),
+            "val/avg_q": min_q_pi.mean().item(),
+        }
+        
+        if self.use_lagrangian:
+            metrics["loss/cost_critic"] = cost_critic_loss.item()
+            metrics["loss/lambda"] = lambda_loss.item()
+            for i in range(self.num_constraints):
+                metrics[f"val/lambda_{i+1}"] = self.lagrangian_lambda[i].item()
+                metrics[f"val/avg_cost_q_{i+1}"] = current_cost_estimate[i].item()
+                metrics[f"val/cost_violation_{i+1}"] = violation[:, i].mean().item()
+            
+        return metrics
+
+    def _soft_update(self, local_model, target_model):
+        for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
+            target_param.data.copy_(
+                self.tau * local_param.data + (1.0 - self.tau) * target_param.data
+            )
