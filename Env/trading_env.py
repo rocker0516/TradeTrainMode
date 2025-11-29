@@ -25,7 +25,7 @@ from .features import build_all_features, compute_market_shape_features
 '''
 class TradingEnvironment(gym.Env):
     def __init__(self, df, initial_balance=10_000, transaction_fee=0.001, window_size=288, leverage=10, min_balance=100, min_trade_qty=0.001,
-                 reward_weights=None, margin_mode: str = 'isolated', reward_calculator=None, random_start: bool = False):
+                 reward_weights=None, margin_mode: str = 'isolated', reward_calculator=None, random_start: bool = False, min_episode_steps: int = 1000):
         super(TradingEnvironment, self).__init__()
         
         # 只保留數值列，並確保包含必要的OHLCV列
@@ -51,6 +51,7 @@ class TradingEnvironment(gym.Env):
         self.min_trade_qty = min_trade_qty  # 最低交易數量(BTC)
         self.margin_mode = str(margin_mode).lower()  # 保證金模式
         self.random_start = bool(random_start)
+        self.min_episode_steps = int(min_episode_steps)
         
         # 定義動作空間
         # 目標持倉比例 (-1.0 ~ 1.0)，限制小數位為1位
@@ -140,8 +141,9 @@ class TradingEnvironment(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         
-        if self.random_start and len(self.df) > (self.window_size + 2):
-            self.current_step = int(random.randint(self.window_size, len(self.df) - 2))
+        if self.random_start and len(self.df) > (self.window_size + self.min_episode_steps + 2):
+            max_start_index = len(self.df) - self.min_episode_steps - 2
+            self.current_step = int(random.randint(self.window_size, max_start_index))
         else:
             self.current_step = self.window_size 
 
@@ -464,6 +466,17 @@ class TradingEnvironment(gym.Env):
         info = {}
         if stop_loss_hit:
             info['stop_loss_triggered'] = True
+
+        # Cost Calculation Helper Info
+        # Margin Ratio: Equity / Maintenance Margin
+        # Maintenance Margin = |size| * price * mmr
+        info['equity'] = float(new_equity)
+        info['maintenance_margin'] = 0.0
+        if abs(self.executor.position.size) > 0:
+             mmr = self.executor.maintenance_margin_rate
+             pos_val = abs(self.executor.position.size * current_price)
+             info['maintenance_margin'] = pos_val * mmr
+        info['liq_triggered'] = liq_triggered
         
         if self.done:
             if data_exhausted:
