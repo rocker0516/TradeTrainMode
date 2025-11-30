@@ -22,10 +22,13 @@ from .features import build_all_features, compute_market_shape_features
         reward_weights: 獎勵權重
         reward_calculator: 獎勵計算器
         random_start: 是否隨機起點
+        max_step_pos_change_pct: 單步最大倉位變化限制 (0.0 ~ 1.0, 相對 Max Capacity)
+        turnover_penalty: 換手獎勵懲罰係數
 '''
 class TradingEnvironment(gym.Env):
     def __init__(self, df, initial_balance=10_000, transaction_fee=0.001, window_size=288, leverage=10, min_balance=100, min_trade_qty=0.001,
-                 reward_weights=None, margin_mode: str = 'isolated', reward_calculator=None, random_start: bool = False, min_episode_steps: int = 1000):
+                 reward_weights=None, margin_mode: str = 'isolated', reward_calculator=None, random_start: bool = False, min_episode_steps: int = 1000,
+                 min_position_change: float = 0.0, max_step_pos_change_pct: float = 1.0, turnover_penalty: float = 0.0):
         super(TradingEnvironment, self).__init__()
         
         # 只保留數值列，並確保包含必要的OHLCV列
@@ -52,6 +55,9 @@ class TradingEnvironment(gym.Env):
         self.margin_mode = str(margin_mode).lower()  # 保證金模式
         self.random_start = bool(random_start)
         self.min_episode_steps = int(min_episode_steps)
+        self.min_position_change = float(min_position_change)
+        self.max_step_pos_change_pct = float(max_step_pos_change_pct)
+        self.turnover_penalty = float(turnover_penalty)
         
         # 定義動作空間
         # 目標持倉比例 (-1.0 ~ 1.0)，限制小數位為1位
@@ -84,6 +90,12 @@ class TradingEnvironment(gym.Env):
         self.internal_features = pd.DataFrame({
             'atr_ratio': atr_ratio
         }, index=df_num.index)
+        
+        # 1.5 Pre-calculate Profile Features for State Vector to avoid slow lookup
+        from .features import compute_rolling_profile_features
+        # Use longer window for State Vector context (e.g. 1440)
+        prof_levels = compute_rolling_profile_features(self.df, window=1440)
+        self.internal_features = pd.concat([self.internal_features, prof_levels], axis=1)
 
         # 2. 準備觀測特徵 (price_seq)
         self.market_shape_df = compute_market_shape_features(self.df)
@@ -92,7 +104,13 @@ class TradingEnvironment(gym.Env):
         # 3. 定義觀察空間
         # price_seq: [window_size, F]
         # state_vector: [D]
-        self.state_dim = 20  # 固定長度
+        # Original dim was 20. 
+        # New features (Previous): 4 profile metrics = 24.
+        # New features (Now): 
+        #   + accumulated_fee_ratio (1)
+        #   + step_fee_ratio (1)
+        # Total = 26
+        self.state_dim = 26 
         
         self.observation_space = spaces.Dict({
             "price_seq": spaces.Box(
@@ -117,6 +135,7 @@ class TradingEnvironment(gym.Env):
             min_trade_qty=self.min_trade_qty,
             margin_mode=self.margin_mode,
             stop_loss_atr=2.5,
+            min_position_change=self.min_position_change
         )
 
         # 帳戶狀態時間序列（逐筆滾動保存，保留用於後續分析或 debug）
@@ -128,7 +147,7 @@ class TradingEnvironment(gym.Env):
             'wallet': np.zeros(series_len, dtype=np.float32),
         }
 
-        self.reward_calculator = reward_calculator or create_default_calculator()
+        self.reward_calculator = reward_calculator or create_default_calculator(turnover_penalty=self.turnover_penalty)
         self._last_position_size = 0.0
         
         # State tracking variables
@@ -170,9 +189,16 @@ class TradingEnvironment(gym.Env):
         self.episode_stop_loss_count = 0
         self.episode_liq_count = 0
         
+        self.prev_total_fees = 0.0
+        self.last_step_fee = 0.0
+        
         self.episode_start_step = int(self.current_step)
         self.episode_max_steps = max(0, (len(self.df) - 1) - self.episode_start_step)
         
+        # 初始化 risk_base (每日更新一次的基準資金)
+        self.daily_risk_base = self.initial_balance
+        self.last_risk_base_update_step = self.current_step
+
         # 初始化帳戶序列 (填入初始值)
         current_price = float(self.df.iloc[self.current_step]['close'])
         self._update_account_series(current_price)
@@ -213,9 +239,6 @@ class TradingEnvironment(gym.Env):
         else: pos_side_oh[2] = 1.0
         
         # Pos Size Norm (1) - Normalized by Max Leverage
-        # size / (equity / current_price * leverage) approximately
-        # Simply: current leverage usage / max leverage
-        # 1.0 means full leverage used
         pos_notional = abs(size) * current_price
         max_notional = equity * self.leverage
         pos_size_norm = pos_notional / max_notional if max_notional > 0 else 0.0
@@ -224,7 +247,6 @@ class TradingEnvironment(gym.Env):
         # Unreal PnL Ratio (1)
         upnl = self.executor.unrealized_pnl(current_price)
         unreal_pnl_ratio = upnl / self.initial_balance if self.initial_balance > 0 else 0.0
-        # Clip to reasonable range [-1, 1] or larger? Let's do [-2, 2]
         unreal_pnl_ratio = np.clip(unreal_pnl_ratio, -2.0, 2.0)
         
         # Equity Ratio (1)
@@ -239,13 +261,7 @@ class TradingEnvironment(gym.Env):
         dd = (self.max_equity_so_far - equity) / self.max_equity_so_far if self.max_equity_so_far > 0 else 0.0
         dd = np.clip(dd, 0.0, 1.0)
         
-        # Margin Ratio (1) - Normalized by Max Leverage
-        # effective_leverage = pos_notional / equity
-        # margin_ratio = effective_leverage / self.leverage
-        # This is actually same as pos_size_norm mathematically if we use equity as base
-        # But let's keep it distinct if the previous logic was different.
-        # Previous: position_value / equity. This is effective leverage (e.g., 5.0)
-        # Normalized: 5.0 / 10.0 = 0.5
+        # Margin Ratio (1)
         if equity > 0:
             effective_leverage = pos_notional / equity
             margin_ratio = effective_leverage / self.leverage
@@ -259,14 +275,12 @@ class TradingEnvironment(gym.Env):
         steps_since_norm = np.clip(steps_since_norm, 0.0, 1.0) # Clip to 1 window length
         
         # Trade Count Recent Norm (1)
-        # Count trades in last window_size steps
         recent_threshold = self.current_step - self.window_size
         recent_trades = [t for t in self.trade_steps_buffer if t > recent_threshold]
         trade_count_norm = len(recent_trades) / 20.0 # Assume 20 is high activity
         trade_count_norm = np.clip(trade_count_norm, 0.0, 1.0)
         
         # Est Cost Per Unit (1) - Log deviation
-        # log(current / entry)
         entry_price = self.executor.position.entry_price
         if size != 0 and entry_price > 0:
             est_cost_norm = np.log(current_price / entry_price)
@@ -275,7 +289,6 @@ class TradingEnvironment(gym.Env):
             est_cost_norm = 0.0
         
         # Time of Day (1)
-        # Assuming 5m candles -> 288 per day
         time_of_day = (self.current_step % 288) / 288.0
         
         # Day of Week One-Hot (7)
@@ -284,10 +297,37 @@ class TradingEnvironment(gym.Env):
             day_idx = self.df.index[self.current_step].dayofweek
             day_of_week_oh[day_idx] = 1.0
         else:
-            # Fallback: approximate if not datetime index
             approx_day = (self.current_step // 288) % 7
             day_of_week_oh[approx_day] = 1.0
             
+        # --- Profile Features (State Vector) ---
+        poc = float(self.internal_features['profile_poc'].iloc[self.current_step])
+        vah = float(self.internal_features['profile_vah'].iloc[self.current_step])
+        val = float(self.internal_features['profile_val'].iloc[self.current_step])
+        
+        atr_val = float(self.internal_features['atr_ratio'].iloc[self.current_step]) * current_price
+        atr_val = max(1e-8, atr_val)
+        
+        dist_poc = (current_price - poc) / atr_val
+        dist_vah = (current_price - vah) / atr_val
+        dist_val = (current_price - val) / atr_val
+        
+        va_width = (vah - val) / current_price if current_price > 0 else 0.0
+        
+        dist_poc = np.clip(dist_poc, -10, 10)
+        dist_vah = np.clip(dist_vah, -10, 10)
+        dist_val = np.clip(dist_val, -10, 10)
+        va_width = np.clip(va_width, 0, 1.0)
+        
+        # --- Fee Features ---
+        total_fees = float(self.executor.total_fees)
+        acc_fee_ratio = total_fees / self.initial_balance if self.initial_balance > 0 else 0.0
+        acc_fee_ratio = np.clip(acc_fee_ratio, 0.0, 2.0)
+        
+        # Step Fee Ratio (Immediate Cost) - Use stored last_step_fee
+        step_fee_ratio_stable = self.last_step_fee / self.initial_balance if self.initial_balance > 0 else 0.0
+        step_fee_ratio_stable = np.clip(step_fee_ratio_stable, 0.0, 0.1)
+
         # Concatenate all
         state_vector = np.concatenate([
             pos_side_oh,                    # 3
@@ -301,12 +341,17 @@ class TradingEnvironment(gym.Env):
             [trade_count_norm],             # 1
             [est_cost_norm],                # 1
             [time_of_day],                  # 1
-            day_of_week_oh                  # 7
+            day_of_week_oh,                 # 7
+            [dist_poc],                     # 1
+            [dist_vah],                     # 1
+            [dist_val],                     # 1
+            [va_width],                     # 1
+            [acc_fee_ratio],                # 1
+            [step_fee_ratio_stable]         # 1
         ]).astype(np.float32)
         
-        # Ensure size matches self.state_dim (20)
+        # Ensure size matches self.state_dim (26)
         if len(state_vector) != self.state_dim:
-             # Padding or Truncating if logic changes, but currently it sums to 20.
              pass
 
         obs = {
@@ -326,14 +371,42 @@ class TradingEnvironment(gym.Env):
         current_high = float(candle['high'])
         current_low = float(candle['low'])
         last_equity = self.executor.equity(current_price)
-        position_percent = float(action)
+        
+        # --- Clip Action (Limit single step change) ---
+        # Calculate current position percent (approx)
+        risk_base = self.daily_risk_base
+        max_notional = (risk_base * self.leverage)
+        # Note: executor usually bases size on price at entry or current price?
+        # Here we approximate current % usage
+        current_pos_notional = self.executor.position.size * current_price
+        current_pos_pct = current_pos_notional / max_notional if max_notional > 0 else 0.0
+        current_pos_pct = np.clip(current_pos_pct, -1.0, 1.0)
+        
+        target_percent = float(action)
+        delta = target_percent - current_pos_pct
+        
+        # Clip delta
+        clipped_delta = np.clip(delta, -self.max_step_pos_change_pct, self.max_step_pos_change_pct)
+        
+        # Apply clipped action
+        final_action = current_pos_pct + clipped_delta
+        final_action = np.clip(final_action, -1.0, 1.0)
+        position_percent = float(final_action)
+        # ----------------------------------------------
 
-        # 估算當前 ATR（用於止損計算） - 使用 internal_features
+        # 估算當前 ATR（用於止損計算）
         atr_ratio = float(self.internal_features['atr_ratio'].iloc[self.current_step - 1]) if self.current_step > 0 else 0.02
         atr_est = atr_ratio * current_price
 
+        # 檢查是否需要更新 daily_risk_base
+        if (self.current_step - self.last_risk_base_update_step) >= self.window_size:
+            self.daily_risk_base = float(self.executor.wallet_balance)
+            self.last_risk_base_update_step = self.current_step
+
         # 執行交易
         prev_wallet_balance = float(self.executor.wallet_balance)
+        prev_fees = float(self.executor.total_fees)
+        
         self.executor.execute(
             position_percent=position_percent,
             current_price=current_price,
@@ -341,7 +414,14 @@ class TradingEnvironment(gym.Env):
             low=current_low,
             equity=last_equity,
             atr=atr_est,
+            risk_base=self.daily_risk_base
         )
+
+        # Update fee tracking
+        current_fees = float(self.executor.total_fees)
+        step_fee = current_fees - prev_fees
+        self.last_step_fee = step_fee
+        self.prev_total_fees = current_fees
 
         # 同步帳戶狀態
         new_equity = self.executor.equity(current_price)
@@ -374,15 +454,14 @@ class TradingEnvironment(gym.Env):
         position_change = abs(float(self.executor.position.size - self._last_position_size))
         traded = position_change > 1e-8
         
-        # Update Trade History
+        is_risk_reducing = False
+        if abs(self.executor.position.size) < abs(self._last_position_size) - 1e-8:
+            is_risk_reducing = True
+        
         if traded:
             self.last_trade_step = self.current_step
             self.trade_steps_buffer.append(self.current_step)
-        
-        # Clean buffer (keep only recent for observation calculation efficiency, though obs re-filters)
-        # To be safe, we can clean up very old ones occasionally or just keep them if episode is not infinite.
-        # Given episode length max is data length, list append is fine.
-        
+            
         turnover_ratio = 0.0
         try:
             notional_change = position_change * current_price
@@ -397,7 +476,6 @@ class TradingEnvironment(gym.Env):
         unrealized_pnl = float(self.executor.unrealized_pnl(current_price))
         has_position = abs(self.executor.position.size) > 1e-8
         
-        # 取得止損觸發狀態
         stop_loss_triggered = self.executor.stop_loss_triggered
         if stop_loss_triggered:
             self.episode_stop_loss_count += 1
@@ -425,6 +503,10 @@ class TradingEnvironment(gym.Env):
                 leverage_ratio = float(position_value / new_equity) if new_equity > 0 else 0.0
         except Exception:
             pass
+        
+        # Calculate Position Change Norm for Reward/Cost
+        max_capacity_qty = (risk_base * self.leverage) / current_price if current_price > 0 else 1.0
+        position_change_norm = abs(position_change) / max_capacity_qty if max_capacity_qty > 0 else 0.0
 
         # 回饋
         reward = self.reward_calculator.compute(
@@ -432,6 +514,7 @@ class TradingEnvironment(gym.Env):
             new_equity=new_equity,
             margin_buffer=margin_buffer,
             position_change=position_change,
+            position_change_norm=position_change_norm,
             turnover_ratio=turnover_ratio,
             dist_to_extreme_atr=dist_to_extreme_atr,
             mae_atr=mae_atr,
@@ -468,8 +551,6 @@ class TradingEnvironment(gym.Env):
             info['stop_loss_triggered'] = True
 
         # Cost Calculation Helper Info
-        # Margin Ratio: Equity / Maintenance Margin
-        # Maintenance Margin = |size| * price * mmr
         info['equity'] = float(new_equity)
         info['maintenance_margin'] = 0.0
         if abs(self.executor.position.size) > 0:
@@ -478,16 +559,21 @@ class TradingEnvironment(gym.Env):
              info['maintenance_margin'] = pos_val * mmr
         info['liq_triggered'] = liq_triggered
         
+        # Cost 3 Info: Fee Risk
+        step_fee_ratio = step_fee / self.initial_balance if self.initial_balance > 0 else 0.0
+        info['step_fee_ratio'] = step_fee_ratio
+        
+        # Other info for debug/analysis
+        info['position_change_norm'] = position_change_norm
+        info['is_risk_reducing'] = is_risk_reducing
+
         if self.done:
             if data_exhausted:
                 info['termination_reason'] = 'data_exhausted'
-                #print(f"Episode結束：數據用完 (step={self.current_step}, data_len={len(self.df)})")
             elif liq_triggered:
                 info['termination_reason'] = 'liq_triggered'
-                #print(f"Episode結束：強平 (balance={self.balance:.2f})")
             elif balance_insufficient:
                 info['termination_reason'] = 'balance_insufficient'
-                #print(f"Episode結束：資金不足 (balance={self.balance:.2f}, min={self.min_balance})")
             else:
                 info['termination_reason'] = 'other'
             

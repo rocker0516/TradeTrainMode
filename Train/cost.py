@@ -50,20 +50,16 @@ class MarginRiskCost(BaseCostCalculator):
 
 class DrawdownCost(BaseCostCalculator):
     """
-    Cost 2: Drawdown Risk
+    Cost 2: Drawdown Risk (Segmented)
     
-    Formula:
-        DD = 1 - E_t / E_max_t
-        If DD < DD_soft: cost = 0
-        Else: cost = (DD - DD_soft) / (1 - DD_soft)
-        
-        Terminal Penalty (if defined): alpha * (E_max - E_t) / E_0
-        (We handle terminal penalty in the loop or here if 'done' flag provided, 
-         but calculating cost usually happens step-wise. The prompt implies 
-         c_T += penalty. We need 'done' and 'initial_balance' context.)
+    Segments:
+    1. DD <= Warn: Cost = 0
+    2. Warn < DD <= Crit: Linear increase from 0 to 0.5
+    3. DD > Crit: Linear increase from 0.5 to 1.0
     """
-    def __init__(self, dd_soft: float = 0.2, terminal_penalty: float = 5.0):
-        self.dd_soft = dd_soft
+    def __init__(self, warn: float = 0.1, crit: float = 0.2, terminal_penalty: float = 5.0):
+        self.warn = warn
+        self.crit = crit
         self.terminal_penalty = terminal_penalty
         self.max_equity = 0.0
         self.initial_balance = 1.0 # Placeholder, updated on reset
@@ -85,28 +81,44 @@ class DrawdownCost(BaseCostCalculator):
         dd = 1.0 - (equity / self.max_equity)
         
         cost = 0.0
-        if dd > self.dd_soft:
-            cost = (dd - self.dd_soft) / (1.0 - self.dd_soft)
+        if dd <= self.warn:
+            cost = 0.0
+        elif dd <= self.crit:
+            # Segment 1: Warn to Crit -> Cost 0.0 to 0.5
+            # (DD - Warn) / (Crit - Warn) * 0.5
+            if self.crit > self.warn:
+                cost = ((dd - self.warn) / (self.crit - self.warn)) * 0.5
+            else:
+                cost = 0.5 # Edge case
+        else:
+            # Segment 2: > Crit -> Cost 0.5 to 1.0
+            # 0.5 + (DD - Crit) / (1 - Crit) * 0.5
+            cost = 0.5 + ((dd - self.crit) / (1.0 - self.crit)) * 0.5
             
         # Terminal penalty check
-        # Info usually doesn't contain 'done' unless we pass it or infer from termination_reason
-        # But the environment returns 'done'. The calculator is called after step.
-        # Let's check if we can access termination reason.
         if info.get('termination_reason') == 'liq_triggered':
              # Extra penalty
-             # c_T += alpha * (E_max - E_T) / E_0
-             # Note: if liq, E_T might be small.
              if self.initial_balance > 0:
                  penalty = self.terminal_penalty * (self.max_equity - equity) / self.initial_balance
                  cost += penalty
                  
         return max(0.0, cost)
 
+class FeeRiskCost(BaseCostCalculator):
+    """
+    Cost 3: Fee Risk (Step Fee / Initial Balance)
+    Directly penalizes incurring fees (trading volume).
+    """
+    def calculate_cost(self, info: Dict) -> float:
+        # Env calculates step_fee_ratio = step_fee / initial_balance
+        return info.get('step_fee_ratio', 0.0)
+
 class CombinedCostCalculator:
     def __init__(self, num_envs: int = 1):
         self.margin_cost = MarginRiskCost(m_safe=Config.MARGIN_SAFE, c_liq=Config.COST_LIQ_PENALTY)
         # Drawdown cost needs state (max_equity) per environment
-        self.dd_costs = [DrawdownCost(dd_soft=Config.DD_SOFT, terminal_penalty=Config.DD_MAX_PENALTY) for _ in range(num_envs)]
+        self.dd_costs = [DrawdownCost(warn=Config.DD_WARN, crit=Config.DD_CRIT, terminal_penalty=Config.DD_MAX_PENALTY) for _ in range(num_envs)]
+        self.fee_cost = FeeRiskCost()
         self.num_envs = num_envs
 
     def reset(self, env_indices: List[int], initial_balances: List[float]):
@@ -121,5 +133,6 @@ class CombinedCostCalculator:
         for i, info in enumerate(infos):
             c1 = self.margin_cost.calculate_cost(info)
             c2 = self.dd_costs[i].calculate_cost(info)
-            costs.append([c1, c2])
+            c3 = self.fee_cost.calculate_cost(info)
+            costs.append([c1, c2, c3])
         return np.array(costs, dtype=np.float32)

@@ -5,7 +5,8 @@ Concepts:
 - Reward = Log Return of Equity: ln(E_t / E_{t-1})
 - Terminal Penalty (Liquidation/Bankruptcy): Extra penalty based on remaining time.
   r_T -= C_liq * (1 + (T_max - T) / T_max)
-- No extra penalties for stop loss, risk, or structure (managed by constraint critic in SAC-Lagrangian ideally, or just ignored as requested).
+- Turnover Penalty (Action Cost): Explicit penalty for position changes to encourage sparsity.
+  r_t -= alpha_turn * |Delta_Pos_Norm|
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -15,13 +16,12 @@ import numpy as np
 @dataclass
 class RewardCalculator:
     """
-    主線獎勵計算器：純 Log Return
+    主線獎勵計算器：Log Return + Turnover Penalty
     """
     # 強平懲罰係數 C_liq
-    # 假設 log return 每步約 ±0.001 ~ ±0.01
-    # 強平是毀滅性事件，給予較大負值。例如 -10.0 相當於財富縮水 e^10 倍(極端)，
-    # 但在 RL 裡是作為 value function 的 target，需要足夠大的負值梯度。
     c_liq: float = 10.0
+    # 換手懲罰係數 alpha_turn
+    turnover_penalty: float = 0.0
     
     def compute(
         self,
@@ -32,12 +32,14 @@ class RewardCalculator:
         termination_reason: str | None = None,
         episode_steps: int | None = None,
         episode_max_steps: int | None = None,
-        **kwargs  # 忽略其他參數 (margin_buffer, stop_loss, etc.)
+        position_change_norm: float = 0.0, # Normalize position change (0~1 usually)
+        **kwargs
     ) -> float:
         """
         計算 Log Return 獎勵
         
         r = ln(new_equity / last_equity)
+        r -= turnover_penalty * position_change_norm
         if liquidation: r -= C_liq * (1 + (T_max - T)/T_max)
         """
         # 1. 計算基礎 Log Return
@@ -50,8 +52,12 @@ class RewardCalculator:
         log_ret = np.log(safe_new / safe_last)
         
         reward = float(log_ret)
+
+        # 2. 加上換手懲罰 (Turnover Penalty)
+        if self.turnover_penalty > 0 and position_change_norm > 0:
+            reward -= self.turnover_penalty * position_change_norm
         
-        # 2. 處理終局 (Liquidation / Balance Insufficient)
+        # 3. 處理終局 (Liquidation / Balance Insufficient)
         if done and termination_reason in ('liq_triggered', 'balance_insufficient'):
             # 應用強平懲罰公式
             # r_T -= C_liq * (1 + (T_max - T) / T_max)
@@ -75,10 +81,11 @@ class RewardCalculator:
     
     def get_info(self) -> dict:
         return {
-            'type': 'log_return_only',
-            'c_liq': self.c_liq
+            'type': 'log_return_plus_turnover',
+            'c_liq': self.c_liq,
+            'turnover_penalty': self.turnover_penalty
         }
 
 # 工廠函數
-def create_default_calculator() -> RewardCalculator:
-    return RewardCalculator()
+def create_default_calculator(turnover_penalty: float = 0.0) -> RewardCalculator:
+    return RewardCalculator(turnover_penalty=turnover_penalty)

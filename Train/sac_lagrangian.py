@@ -35,14 +35,18 @@ class SACLagrangianAgent:
         self.num_constraints = len(cost_limits)
         
         # --- Actor & Critic ---
-        self.actor = Actor(price_input_channels, price_window_size, state_dim, action_dim).to(device)
+        # State Dim + Num Constraints (for lambda injection)
+        self.actor_input_dim = state_dim + self.num_constraints
+        self.critic_input_dim = state_dim + self.num_constraints
+        
+        self.actor = Actor(price_input_channels, price_window_size, self.actor_input_dim, action_dim).to(device)
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr)
         
         # Critic (Double Q) for Reward
-        self.critic_1 = Critic(price_input_channels, price_window_size, state_dim, action_dim, output_dim=1).to(device)
-        self.critic_2 = Critic(price_input_channels, price_window_size, state_dim, action_dim, output_dim=1).to(device)
-        self.critic_1_target = Critic(price_input_channels, price_window_size, state_dim, action_dim, output_dim=1).to(device)
-        self.critic_2_target = Critic(price_input_channels, price_window_size, state_dim, action_dim, output_dim=1).to(device)
+        self.critic_1 = Critic(price_input_channels, price_window_size, self.critic_input_dim, action_dim, output_dim=1).to(device)
+        self.critic_2 = Critic(price_input_channels, price_window_size, self.critic_input_dim, action_dim, output_dim=1).to(device)
+        self.critic_1_target = Critic(price_input_channels, price_window_size, self.critic_input_dim, action_dim, output_dim=1).to(device)
+        self.critic_2_target = Critic(price_input_channels, price_window_size, self.critic_input_dim, action_dim, output_dim=1).to(device)
         
         self.critic_1_target.load_state_dict(self.critic_1.state_dict())
         self.critic_2_target.load_state_dict(self.critic_2.state_dict())
@@ -65,8 +69,8 @@ class SACLagrangianAgent:
         
         if self.use_lagrangian:
             # Cost Critic - Outputs a vector of size num_constraints
-            self.cost_critic_1 = Critic(price_input_channels, price_window_size, state_dim, action_dim, output_dim=self.num_constraints).to(device)
-            self.cost_critic_1_target = Critic(price_input_channels, price_window_size, state_dim, action_dim, output_dim=self.num_constraints).to(device)
+            self.cost_critic_1 = Critic(price_input_channels, price_window_size, self.critic_input_dim, action_dim, output_dim=self.num_constraints).to(device)
+            self.cost_critic_1_target = Critic(price_input_channels, price_window_size, self.critic_input_dim, action_dim, output_dim=self.num_constraints).to(device)
             self.cost_critic_1_target.load_state_dict(self.cost_critic_1.state_dict())
             self.cost_critic_optimizer = optim.Adam(self.cost_critic_1.parameters(), lr=lr)
             
@@ -78,9 +82,35 @@ class SACLagrangianAgent:
         else:
             self.lagrangian_lambda = torch.zeros(self.num_constraints, device=device)
 
+    def _augment_state(self, state_vec: torch.Tensor, lam: torch.Tensor) -> torch.Tensor:
+        """
+        Augments the state vector with current lagrangian multipliers.
+        lam: (num_constraints, )
+        state_vec: (Batch, state_dim)
+        Output: (Batch, state_dim + num_constraints)
+        """
+        batch_size = state_vec.shape[0]
+        # Detach lambda to prevent gradient flow from actor/critic back to lambda optimizer through state
+        # However, in select_action it's no_grad anyway.
+        # During update, we use the lambda value at that time (or from buffer? No, we should use CURRENT lambda state)
+        # Standard practice: Use current lambda for policy conditioning
+        
+        # Repeat lambda for batch
+        lam_batch = lam.detach().unsqueeze(0).repeat(batch_size, 1) # (Batch, num_constraints)
+        
+        # Normalize lambda for network stability (optional but recommended)
+        # Assuming lambda can be large (e.g. 100), log1p or simple scaling might help.
+        # Here we pass raw or log1p. Let's use log1p to compress range.
+        lam_batch = torch.log1p(lam_batch)
+        
+        return torch.cat([state_vec, lam_batch], dim=1)
+
     def select_action(self, obs: Dict[str, np.ndarray], evaluate: bool = False) -> np.ndarray:
         price_seq = torch.FloatTensor(obs['price_seq']).unsqueeze(0).to(self.device)
         state_vec = torch.FloatTensor(obs['state_vector']).unsqueeze(0).to(self.device)
+        
+        # Augment State with Lambda
+        state_vec = self._augment_state(state_vec, self.lagrangian_lambda)
         
         # NaN Check on Input
         if torch.isnan(price_seq).any() or torch.isnan(state_vec).any():
@@ -120,9 +150,16 @@ class SACLagrangianAgent:
         next_state_vec = batch['next_state_vec']
         done = batch['done']
         
+        # Augment States with CURRENT Lambda
+        # We use current lambda for both current and next state evaluation
+        # This makes the policy conditioned on "current safety urgency"
+        curr_lam = self.lagrangian_lambda.detach() # (num_constraints, )
+        state_vec_aug = self._augment_state(state_vec, curr_lam)
+        next_state_vec_aug = self._augment_state(next_state_vec, curr_lam)
+
         # 1. Update Critic (Reward Q-Functions)
         with torch.no_grad():
-            next_mean, next_log_std = self.actor(next_price_seq, next_state_vec)
+            next_mean, next_log_std = self.actor(next_price_seq, next_state_vec_aug)
             next_std = next_log_std.exp()
             next_dist = torch.distributions.Normal(next_mean, next_std)
             next_action_sample = next_dist.rsample()
@@ -131,14 +168,14 @@ class SACLagrangianAgent:
             next_log_prob = next_dist.log_prob(next_action_sample) - torch.log(1 - next_action.pow(2) + 1e-6)
             next_log_prob = next_log_prob.sum(dim=1, keepdim=True)
             
-            target_q1 = self.critic_1_target(next_price_seq, next_state_vec, next_action)
-            target_q2 = self.critic_2_target(next_price_seq, next_state_vec, next_action)
+            target_q1 = self.critic_1_target(next_price_seq, next_state_vec_aug, next_action)
+            target_q2 = self.critic_2_target(next_price_seq, next_state_vec_aug, next_action)
             min_target_q = torch.min(target_q1, target_q2) - self.alpha * next_log_prob
             
             target_q_value = reward + (1 - done) * self.gamma * min_target_q
 
-        current_q1 = self.critic_1(price_seq, state_vec, action)
-        current_q2 = self.critic_2(price_seq, state_vec, action)
+        current_q1 = self.critic_1(price_seq, state_vec_aug, action)
+        current_q2 = self.critic_2(price_seq, state_vec_aug, action)
         
         critic_loss = F.mse_loss(current_q1, target_q_value) + F.mse_loss(current_q2, target_q_value)
         
@@ -149,10 +186,10 @@ class SACLagrangianAgent:
         # 2. Update Cost Critic (if using Lagrangian)
         if self.use_lagrangian:
             with torch.no_grad():
-                target_qc1 = self.cost_critic_1_target(next_price_seq, next_state_vec, next_action)
+                target_qc1 = self.cost_critic_1_target(next_price_seq, next_state_vec_aug, next_action)
                 target_qc_value = cost + (1 - done) * self.gamma * target_qc1
             
-            current_qc1 = self.cost_critic_1(price_seq, state_vec, action)
+            current_qc1 = self.cost_critic_1(price_seq, state_vec_aug, action)
             cost_critic_loss = F.mse_loss(current_qc1, target_qc_value)
             
             self.cost_critic_optimizer.zero_grad()
@@ -160,7 +197,7 @@ class SACLagrangianAgent:
             self.cost_critic_optimizer.step()
 
         # 3. Update Actor
-        mean, log_std = self.actor(price_seq, state_vec)
+        mean, log_std = self.actor(price_seq, state_vec_aug)
         std = log_std.exp()
         dist = torch.distributions.Normal(mean, std)
         action_sample = dist.rsample()
@@ -169,14 +206,14 @@ class SACLagrangianAgent:
         log_prob = dist.log_prob(action_sample) - torch.log(1 - current_action.pow(2) + 1e-6)
         log_prob = log_prob.sum(dim=1, keepdim=True)
         
-        q1_pi = self.critic_1(price_seq, state_vec, current_action)
-        q2_pi = self.critic_2(price_seq, state_vec, current_action)
+        q1_pi = self.critic_1(price_seq, state_vec_aug, current_action)
+        q2_pi = self.critic_2(price_seq, state_vec_aug, current_action)
         min_q_pi = torch.min(q1_pi, q2_pi)
         
         actor_loss = (self.alpha * log_prob) - min_q_pi
         
         if self.use_lagrangian:
-            qc_pi = self.cost_critic_1(price_seq, state_vec, current_action)
+            qc_pi = self.cost_critic_1(price_seq, state_vec_aug, current_action)
             
             lam = self.lagrangian_lambda.detach() # (num_constraints,)
             # Sum over constraints: sum(lambda_i * Q_Ci)
@@ -220,8 +257,10 @@ class SACLagrangianAgent:
             self.lambda_optimizer.step()
             
             # Clamp Lambda to prevent explosion/NaN
+            # Max lambda ~ exp(3.5) = 33.1, exp(3.4) = 29.9
+            # We want max lambda approx 30.0
             with torch.no_grad():
-                self.log_lambda.data.clamp_(max=5.0)
+                self.log_lambda.data.clamp_(max=3.4)
             
             self.lagrangian_lambda = self.log_lambda.exp()
 

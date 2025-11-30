@@ -161,6 +161,88 @@ def compute_smc_features(df: pd.DataFrame, lookback: int = 288) -> pd.DataFrame:
     return feats
 
 
+def compute_rolling_profile_features(df: pd.DataFrame, window: int = 288) -> pd.DataFrame:
+    """Compute Rolling Volume Profile (Market Profile Proxy) Features.
+    
+    Calculates:
+        - poc: Point of Control (Price with max volume in window)
+        - vah: Value Area High (70% volume area)
+        - val: Value Area Low
+        - density: Current price's relative volume density in the profile
+    
+    This is computationally expensive if done naively.
+    We use a simplified approach:
+    1. Use discretized price buckets (e.g., ATR-based or log-bins).
+    2. Rolling sum of volume per bucket.
+    
+    Simplified Efficient Implementation for Rolling Window:
+    Instead of full histogram, we use:
+    - VWAP as anchor.
+    - Volume-weighted StdDev as width.
+    - POC approximated by VWAP (or close to it in normal distribution).
+    
+    Actually, let's do a robust approximation:
+    - POC ~ VWAP of window
+    - VAH ~ VWAP + 1.0 * VWSD (Volume Weighted Std Dev)
+    - VAL ~ VWAP - 1.0 * VWSD
+    
+    This assumes normal distribution of volume, which is "good enough" for a bias feature.
+    Real TPO is too slow for rolling 1M rows.
+    """
+    close = df['close']
+    volume = df['volume']
+    typical_price = (df['high'] + df['low'] + df['close']) / 3.0
+    
+    # 1. Rolling VWAP
+    # VWAP_t = Sum(P*V)_window / Sum(V)_window
+    pv = typical_price * volume
+    roll_pv = pv.rolling(window=window, min_periods=1).sum()
+    roll_vol = volume.rolling(window=window, min_periods=1).sum()
+    vwap = roll_pv / roll_vol.replace(0.0, np.nan)
+    
+    # 2. Rolling VWSD (Volume Weighted Standard Deviation)
+    # Variance = Sum(V * (P - VWAP)^2) / Sum(V)
+    # Efficient: E[X^2] - (E[X])^2
+    # E[X] = VWAP
+    # E[X^2] = Sum(V * P^2) / Sum(V)
+    p2v = (typical_price ** 2) * volume
+    roll_p2v = p2v.rolling(window=window, min_periods=1).sum()
+    mean_p2 = roll_p2v / roll_vol.replace(0.0, np.nan)
+    
+    variance = mean_p2 - vwap ** 2
+    # Fix negative variance due to float precision
+    variance = variance.clip(lower=0.0)
+    vwsd = np.sqrt(variance)
+    
+    poc = vwap
+    vah = vwap + vwsd # Approx 68% coverage
+    val = vwap - vwsd
+    
+    # 3. Profile Density (Relative)
+    # How much volume has traded near current price recently?
+    # High density = high friction/support/resistance.
+    # We can approximate this by:
+    # density ~ PDF(current_price | N(VWAP, VWSD))
+    # Normalized to have peak 1.0
+    z_score = (close - vwap) / vwsd.replace(0.0, 1.0)
+    density = np.exp(-0.5 * z_score**2) # Gaussian kernel without constant factor
+    
+    # Handle NaNs
+    poc = poc.fillna(close)
+    vah = vah.fillna(close * 1.01)
+    val = val.fillna(close * 0.99)
+    density = density.fillna(0.0)
+    
+    feats = pd.DataFrame({
+        'profile_poc': poc.astype(np.float32),
+        'profile_vah': vah.astype(np.float32),
+        'profile_val': val.astype(np.float32),
+        'profile_density': density.astype(np.float32)
+    }, index=df.index)
+    
+    return feats
+
+
 def compute_market_shape_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Compute shape features for CNN input (price_seq), fully normalized.
@@ -236,13 +318,22 @@ def compute_market_shape_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
          spread_val = pd.Series(0.0, index=df.index)
     
+    # 7. Profile Density (from pre-calculated or simple calc here if light)
+    # Here we call the lightweight approximation
+    # Note: To keep this function self-contained and fast for "step", 
+    # we might need pre-calculated columns in df.
+    # BUT, compute_market_shape_features is usually called ONCE at init for the whole DF.
+    # So we can call the helper here.
+    prof_feats = compute_rolling_profile_features(df, window=288) # 1 day window for short-term density
+    
     features_dict = {
         'ret': ret_norm,
         'range': range_norm,
         'body': body_norm,
         'vol': vol_val,
         'vol_regime': vol_regime,
-        'spread': spread_val
+        'spread': spread_val,
+        'density': prof_feats['profile_density'] # Add density to CNN input
     }
     
     features = pd.DataFrame(features_dict, index=df.index)
@@ -263,5 +354,10 @@ def build_all_features(df: pd.DataFrame, lookback: int = 288) -> pd.DataFrame:
     macd_df = compute_macd_features(df['close'], lookback=lookback)
     liq_df = compute_liquidity_features(df, lookback=lookback)
     smc_df = compute_smc_features(df, lookback=lookback)
-    extra = pd.concat([macd_df, liq_df, smc_df], axis=1)
+    
+    # Add Profile Features (Longer window for macro context in state vector)
+    # 1440 = 5 days (approx)
+    prof_df = compute_rolling_profile_features(df, window=1440)
+    
+    extra = pd.concat([macd_df, liq_df, smc_df, prof_df], axis=1)
     return extra.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(np.float32)

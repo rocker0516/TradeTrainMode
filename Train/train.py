@@ -41,8 +41,13 @@ def make_env(rank, df, seed=0):
             df=df,
             window_size=Config.WINDOW_SIZE,
             leverage=Config.LEVERAGE,
+            initial_balance=Config.INITIAL_BALANCE,
+            min_balance=Config.MIN_BALANCE,
             transaction_fee=Config.TRANSACTION_FEE,
             min_episode_steps=Config.MIN_EPISODE_STEPS,
+            min_position_change=Config.MIN_POSITION_CHANGE,
+            max_step_pos_change_pct=Config.MAX_STEP_POS_CHANGE_PCT,
+            turnover_penalty=Config.REWARD_TURNOVER_PENALTY,
             random_start=True
         )
         env.reset(seed=seed + rank)
@@ -59,6 +64,12 @@ def format_dashboard(global_step, fps, stats, metrics, costs, num_constraints):
     avg_bal = np.mean(stats['balances']) if stats['balances'] else 0.0
     avg_len = np.mean(stats['lengths']) if stats['lengths'] else 0.0
     
+    avg_fees = np.mean(stats['fees']) if stats['fees'] else 0.0
+    avg_trades = np.mean(stats['trades']) if stats['trades'] else 0.0
+    avg_longs = np.mean(stats['longs']) if stats['longs'] else 0.0
+    avg_shorts = np.mean(stats['shorts']) if stats['shorts'] else 0.0
+    avg_sl = np.mean(stats['sl_counts']) if stats['sl_counts'] else 0.0
+
     wins = [p for p in stats['profits'] if p > 0]
     win_rate = (len(wins) / len(stats['profits']) * 100) if stats['profits'] else 0.0
     
@@ -73,10 +84,13 @@ def format_dashboard(global_step, fps, stats, metrics, costs, num_constraints):
     lines.append(f"| Step: {global_step:,} | Progress: {global_step/Config.TOTAL_TIMESTEPS:.1%} | FPS: {int(fps)}".ljust(width-1) + "|")
     lines.append("-" * width)
     
-    lines.append(f"| Account Performance (Last {len(stats['profits'])} Episodes):".ljust(width-1) + "|")
+    lines.append(f"| Account Performance (Last {len(stats['profits'])} Episodes):".ljust(width-1) + "|")# Last {len(stats['profits'])} Episodes 是最後幾集的平均收益
     lines.append(f"|   Avg Profit:      {avg_profit:+.2f}%  (± {std_profit:.1f}%)".ljust(width-1) + "|")
     lines.append(f"|   Avg Balance:     {avg_bal:,.2f}".ljust(width-1) + "|")
+    lines.append(f"|   Avg Fees:        {avg_fees:.2f}".ljust(width-1) + "|")
     lines.append(f"|   Avg Ep Length:   {avg_len:.0f} steps".ljust(width-1) + "|")
+    lines.append(f"|   Avg Trades:      {avg_trades:.1f} (L:{avg_longs:.1f}/S:{avg_shorts:.1f})".ljust(width-1) + "|")
+    lines.append(f"|   Avg StopLoss:    {avg_sl:.1f}".ljust(width-1) + "|")
     lines.append(f"|   Win Rate:        {win_rate:.1f}%".ljust(width-1) + "|")
     lines.append("|".ljust(width-1) + "|")
     
@@ -186,7 +200,12 @@ def train():
         'profits': deque(maxlen=stats_window),
         'balances': deque(maxlen=stats_window),
         'lengths': deque(maxlen=stats_window),
-        'reasons': deque(maxlen=stats_window)
+        'reasons': deque(maxlen=stats_window),
+        'fees': deque(maxlen=stats_window),
+        'trades': deque(maxlen=stats_window),
+        'longs': deque(maxlen=stats_window),
+        'shorts': deque(maxlen=stats_window),
+        'sl_counts': deque(maxlen=stats_window)
     }
     
     logger.info("Starting training loop...")
@@ -241,15 +260,29 @@ def train():
                 profit_pct = infos[i].get('profit_rate', 0.0)
                 term_reason = infos[i].get('termination_reason', 'unknown')
                 
+                total_fees = infos[i].get('total_fees', 0.0)
+                long_entries = infos[i].get('long_entry_count', 0)
+                short_entries = infos[i].get('short_entry_count', 0)
+                sl_count = infos[i].get('episode_stop_loss_count', 0)
+                total_trades = long_entries + short_entries
+
                 stats['profits'].append(profit_pct)
                 stats['balances'].append(final_bal)
                 stats['lengths'].append(episode_lengths[i])
                 stats['reasons'].append(term_reason)
+                stats['fees'].append(total_fees)
+                stats['trades'].append(total_trades)
+                stats['longs'].append(long_entries)
+                stats['shorts'].append(short_entries)
+                stats['sl_counts'].append(sl_count)
                 
                 # TensorBoard (Per Episode)
                 writer.add_scalar("rollout/episode_reward", episode_rewards[i], global_step)
                 writer.add_scalar("rollout/episode_len", episode_lengths[i], global_step)
                 writer.add_scalar("rollout/profit_rate", profit_pct, global_step)
+                writer.add_scalar("rollout/total_fees", total_fees, global_step)
+                writer.add_scalar("rollout/total_trades", total_trades, global_step)
+                writer.add_scalar("rollout/sl_count", sl_count, global_step)
                 
                 # Reset
                 episode_rewards[i] = 0

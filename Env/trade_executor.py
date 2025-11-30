@@ -41,10 +41,12 @@ class TradeExecutor:
         maintenance_margin_rate: float = 0.005, # 維持保證金率
         margin_mode: str = 'cross', # 保證金模式：'cross' 或 'isolated'
         stop_loss_atr: float = 2.5, # 止損距離（ATR 倍數）
+        min_position_change: float = 0.0, # 最小調倉幅度 (0.0 ~ 1.0)
     ) -> None:
         self.fee_rate = float(fee_rate)# 交易手續費
         self.leverage = float(leverage)# 槓桿倍數
         self.min_trade_qty = float(min_trade_qty)# 最低交易數量(BTC)
+        self.min_position_change = float(min_position_change) # 最小調倉幅度
         self.liq_triggered = False# 強平觸發
         self.stop_loss_triggered = False# 止損觸發
         self.stop_loss_atr = float(stop_loss_atr)# 止損距離（ATR 倍數）
@@ -104,6 +106,7 @@ class TradeExecutor:
         low: float, # 當前最低價
         equity: float, # 當前權益
         atr: float = 0.0, # ATR（用於計算止損距離）
+        risk_base: float = None # 用於計算倉位大小的基準金額 (預設為 None，若 None 則使用 wallet_balance)
     ) -> None:
         # 重置本步觸發標記
         self.stop_loss_triggered = False
@@ -125,9 +128,28 @@ class TradeExecutor:
                 self.liq_triggered = True
                 return
 
-        # 以錢包餘額為風險基準計算目標倉位數量（避免未實現損益造成漂移）
-        risk_base = self.wallet_balance
-        target_size = (risk_base * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
+        # 以指定基準(risk_base)計算目標倉位數量
+        # 若未指定，預設使用 wallet_balance (舊邏輯)
+        # 但通常由外部 (Env) 傳入固定的基準金額 (例如每 288 步更新一次的餘額)
+        base_amount = risk_base if risk_base is not None else self.wallet_balance
+        
+        # 避免 base_amount 小於等於 0
+        base_amount = max(0.0, base_amount)
+        
+        target_size = (base_amount * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
+
+        # 檢查最小調倉幅度 (避免微小變動刷手續費)
+        # 計算最大可持倉數量 (Max Capacity) based on base_amount
+        max_capacity_size = (base_amount * self.leverage) / current_price if current_price > 0 else 1.0
+        # 計算變動比例 (相对于总容量)
+        change_ratio = abs(target_size - self.position.size) / max_capacity_size if max_capacity_size > 0 else 0.0
+        
+        if change_ratio < self.min_position_change:
+            # 變動幅度太小，檢查是否為反向交易或平倉，如果是反向/平倉通常還是允許，除非非常小
+            # 但如果只是微調 (例如 0.5 -> 0.51)，則忽略
+            # 這裡簡單處理：只要變動小於閾值且不是為了觸發平倉(target=0)，就忽略
+            if abs(target_size) > 1e-8: # 不是要全平
+                 return
 
         # 3. 若無持倉，則依目標倉位數量開倉
         if self.position.size == 0.0:
@@ -137,9 +159,9 @@ class TradeExecutor:
             # 若方向反轉，先平舊倉再依新方向開倉
             if self.position.size * target_size < 0:
                 self._close_position(price=current_price)
-                # 平倉後依錢包餘額重算目標數量（已實現手續費/損益已反映在餘額）
-                risk_base = self.wallet_balance
-                target_size = (risk_base * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
+                # 平倉後依基準金額重算目標數量
+                # 注意：這裡維持使用 base_amount，而非切換回 wallet_balance，保持基準一致性
+                target_size = (base_amount * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
                 # 新方向倉位若達最小交易量，才開倉
                 if abs(target_size) >= self.min_trade_qty:
                     self._increase_position(delta_size=target_size, price=current_price, atr=atr)
