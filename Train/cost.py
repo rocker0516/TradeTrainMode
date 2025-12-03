@@ -104,21 +104,11 @@ class DrawdownCost(BaseCostCalculator):
                  
         return max(0.0, cost)
 
-class FeeRiskCost(BaseCostCalculator):
-    """
-    Cost 3: Fee Risk (Step Fee / Initial Balance)
-    Directly penalizes incurring fees (trading volume).
-    """
-    def calculate_cost(self, info: Dict) -> float:
-        # Env calculates step_fee_ratio = step_fee / initial_balance
-        return info.get('step_fee_ratio', 0.0)
-
 class CombinedCostCalculator:
     def __init__(self, num_envs: int = 1):
         self.margin_cost = MarginRiskCost(m_safe=Config.MARGIN_SAFE, c_liq=Config.COST_LIQ_PENALTY)
         # Drawdown cost needs state (max_equity) per environment
         self.dd_costs = [DrawdownCost(warn=Config.DD_WARN, crit=Config.DD_CRIT, terminal_penalty=Config.DD_MAX_PENALTY) for _ in range(num_envs)]
-        self.fee_cost = FeeRiskCost()
         self.num_envs = num_envs
 
     def reset(self, env_indices: List[int], initial_balances: List[float]):
@@ -133,6 +123,6 @@ class CombinedCostCalculator:
         for i, info in enumerate(infos):
             c1 = self.margin_cost.calculate_cost(info)
             c2 = self.dd_costs[i].calculate_cost(info)
-            c3 = self.fee_cost.calculate_cost(info)
-            costs.append([c1, c2, c3])
+            # Cost 3 Removed
+            costs.append([c1, c2])
         return np.array(costs, dtype=np.float32)

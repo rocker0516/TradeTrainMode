@@ -5,66 +5,134 @@ class Config:
     # =========================
     # 資料設定
     # =========================
-    DATA_PATH = "Data/BTCUSDT_futures_volume_5years_5min.csv" # 歷史資料CSV路徑(5年，5分鐘線)
+    DATA_PATH = "Data/BTCUSDT_futures_volume_5years_5min.csv" 
+    # 歷史資料CSV路徑 (範例檔案為5年、5分鐘K線資料, 場景：BTCUSDT永續合約。請依自己的資料集調整路徑。)
 
     # =========================
-    # 環境參數
+    # 環境參數（定義每個episode和環境行為）
     # =========================
-    WINDOW_SIZE = 288                # 狀態視窗大小（每一個step需有多少bar的歷史價格資訊，約一天資料若1bar=5min）
-    LEVERAGE = 10                    # 槓桿倍數，影響持倉風險
-    TRANSACTION_FEE = 0.04           # 交易手續費（單邊，百分比形式：0.04 代表萬分之4）
-    INITIAL_BALANCE = 10_000         # 初始帳戶資金
-    MIN_BALANCE = INITIAL_BALANCE * 0.1 # 最小帳戶資金
-    MIN_EPISODE_STEPS = 10000        # Episode最短步數，隨機起始點用
-    MAINTENANCE_MARGIN_RATE = 0.005  # 強制平倉維持保證金率(0.5%)
-    MIN_POSITION_CHANGE = 0.10       # 最小調倉幅度 (5% 總倉位)，避免微小變動造成手續費浪費
-    MAX_STEP_POS_CHANGE_PCT = 0.2    # 單步最大倉位變化限制 (20% Max Capacity)
+    WINDOW_SIZE = 288 * 3            
+    # 狀態視窗長度：
+    # 每一個step時，Agent會看到過去多少根K線(bar)的價格與其他屬性資料（如成交量）。
+    # 1440相當於5天資料（5天*24小時*60分鐘/5分鐘=1440），滿足「3天以上」的觀察需求。
+    LEVERAGE = 10                
+    # 槓桿倍數：
+    # 用於模擬期貨交易時持倉風險與可能損益乘數，影響風險與強平線。
+    TRANSACTION_FEE = 0.04       
+    # 交易手續費率 (單邊)：
+    # 假設為萬分之4，每次交易收取，不論開倉或平倉，每次都需付。
+    # 即買一次/賣一次各收一遍。
+    INITIAL_BALANCE = 10_000     
+    # 初始模擬資產餘額（USDT）
+    MIN_BALANCE = INITIAL_BALANCE * 0.01 
+    # 最低帳戶資產限制：
+    # 若資產跌破此數值(預設1%)，則判定為破產，環境自動結束Episode。
+    MIN_EPISODE_STEPS = 10000    
+    # 每個Episode最少進行的步數：
+    # 用於隨機起始點：強制一個回合至少走這麼多步才允許結束，避免太早結束造成不穩定的統計。
+    MAINTENANCE_MARGIN_RATE = 0.005   
+    # 強制平倉維持保證金率（0.5%）：
+    # 期貨場景下只要保證金比跌破這條線即強制平倉（liquidation）。
+    MIN_POSITION_CHANGE = 0.1   
+    # 最小調倉幅度：
+    # 單次下單動作可調整的最少倉位百分比。例如0.01等於1%，用於抑制微小動作與滑價。
+    MAX_STEP_POS_CHANGE_PCT = 0.2    
+    # 單步最大倉位調整幅度：
+    # 每個step允許調整的最大多/空方向總幅度佔總倉位的比例（如0.5代表一次最多改變50%）。用於避免大跳或爆倉。
 
     # =========================
-    # 訓練設定
+    # 訓練設定（RL核心相關）
     # =========================
-    TOTAL_TIMESTEPS = 50_000_000      # 總訓練步數（例如 10 億步）
-    BATCH_SIZE = 1024                    # 每次訓練批次大小
-    BUFFER_SIZE = 100_000                # 經驗回放池最大容量
-    LEARNING_STARTS = 5_000              # 先隨機探索幾步才開始學習
-    GAMMA = 0.99                         # 折扣因子（回報折現率）
-    TAU = 0.005                          # 軟更新參數（目標網路）
-    LR = 3e-4                            # 學習率
-    SEED = 42                            # 隨機種子
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # 設備選擇，gpu優先
+    TOTAL_TIMESTEPS = 10_000_000      
+    # 總訓練步數：
+    # 指所有環境總共經過的決策次數，包含多進程並行後的總和，規模可調(如2千萬步)。
+    BATCH_SIZE = 256                    
+    # 批次訓練取樣大小：
+    # 一次更新時，從經驗回放池(replay buffer)隨機抽取多少條 transition 資料訓練模型。
+    # (調降至 256 以降低 GPU VRAM 負擔)
+    BUFFER_SIZE = 100_000                
+    # 經驗池最大容量：
+    # 能儲存多少步transition，容量滿時會釋放最舊資料。
+    # (大幅調降以防止 RAM 溢出導致 Swap 變慢。10萬步 * 80KB ≈ 8GB RAM，保留空間給系統)
+    LEARNING_STARTS = 50_000             
+    # 探索期步數：
+    # 一開始預先隨機探索幾步（用來蒐集資料），之後再用學到的策略行為，避免冷啟動時的不穩定。
+    GAMMA = 0.99                         
+    # 折扣因子(γ)：
+    # 強化學習用來折現未來獎勵的權重，越接近1代表更重視長期回報。
+    TAU = 0.005                          
+    # 軟更新參數(τ)：
+    # 目標網路(target network)的參數更新比率，用於平滑更新提升穩定性。
+    LR = 3e-4                            
+    # 學習率：
+    # 神經網路優化時的步進幅度，數值過大或過小會影響收斂速度與穩定性。
+    SEED = 42                            
+    # 隨機種子：
+    # 控制所有隨機性來源（如torch、numpy等），確保實驗可重現（reproducibility）。
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    # 裝置設定：
+    # 優先使用NVIDIA GPU運算，若無GPU則自動切換為CPU。
+    # torch.cuda.is_available()可偵測CUDA裝置。
 
     # =========================
-    # 並行環境數
+    # 並行環境數（加速取樣效率）
     # =========================
-    NUM_ENVS = 64                     # 並行強化環境數（效率為主）
+    NUM_ENVS = 32
+    # 並行執行的環境數量：
+    # 在取樣(training rollout)時，同時運行多組環境，能顯著加速資料生成和訓練速度。
+    # 記憶體與CPU資源不足可調低本數。 (調降至 16)
 
     # =========================
-    # 記錄設定
+    # 記錄設定（進度和訓練結果列印）
     # =========================
-    LOG_INTERVAL = 10_000             # 每多少步顯示一次儀表板結果（console）
+    LOG_INTERVAL = 10_000             
+    # 記錄/顯示間隔：
+    # 每當訓練總步數達到此間隔，就把目前訓練績效、損失、各種指標輸出到Console、Tensorboard或log檔。
 
     # =========================
-    # 安全約束參數(SAC-Lagrangian)
+    # 安全約束參數 (SAC-Lagrangian用)
     # =========================
+    # 本專案支援多重成本(Cost)限制，也就是多目標安全強化學習。
+    # 預設開啟兩項成本約束，分別如下：
     # Cost 1: 保證金/資產比風險 (Margin Risk, d1)
+    #   - 控制極端槓桿帶來的爆倉(強平)或高風險時調降pos或採取防禦。
     # Cost 2: 回撤風險 (Drawdown Risk, d2) - 分段式
-    # Cost 3: 手續費損耗風險 (Fee Risk, d3) - 費率/初始資金
-    # 可調成本參數：若想要嚴格/寬鬆限制，請修改此陣列。 
-    # index 0 = margin risk，上限0.1
-    # index 1 = drawdown risk，上限0.1
-    # index 2 = fee risk (avg per step)，上限 2e-4 (0.02%)
-    COST_LIMITS = [0.1, 0.1, 0.0002]
+    #   - 控制大幅資金回撤，影響Agent風險曲線。
+    # Cost 3: 手續費損耗風險 (Fee Risk, d3) - 不納入，避免干擾(預設移除)
+    # COST_LIMITS:
+    # 每種Cost的允許上限，[d1, d2, ...] 越低越嚴格，0.1意指最多允許10%的平均違規。
+    # index 0 = 保證金風險（Margin Risk），違例率上限0.1
+    # index 1 = 回撤風險（Drawdown Risk），違例率上限0.1
+    COST_LIMITS = [0.1, 0.1]
 
     # =========================
-    # Cost損失相關參數
+    # Cost損失計算相關參數
     # =========================
-    MARGIN_SAFE = 1.5                 # 安全邊際比（M_safe, 保證金比低於此值就開始有懲罰）
-    COST_LIQ_PENALTY = 5.0            # 強平發生懲罰倍數（C_liq）
+    MARGIN_SAFE = 1.5       
+    # 保證金安全邊際比(M_safe)：
+    # 保證金比如果低於此值就開始給予Cost懲罰。越高風控越嚴格，常用1.2~2.0。
+    COST_LIQ_PENALTY = 5.0  
+    # 強制平倉懲罰倍數(C_liq)：
+    # 若資產被強平(liquidation)，則Cost會額外加重處罰，此係數可拉高罰則權重。
     
-    # Drawdown Parameters (Segmented)
-    DD_WARN = 0.1                     # 警告回撤水位 (10%)
-    DD_CRIT = 0.2                     # 嚴重回撤水位 (20%)
-    DD_MAX_PENALTY = 5.0              # 終局最大回撤罰則（alpha, episode結束時大幅回撤的額外懲罰）
-    
-    # Reward Parameters
-    REWARD_TURNOVER_PENALTY = 0.02    # 主線獎勵中對換手的懲罰權重 (alpha_turn)
+    # Drawdown Parameters (Segmented, 回撤風險分段參數)
+    DD_WARN = 0.1             
+    # 回撤警告水位(10%)：
+    # 若最大回撤超過本水位，會開始計算第一級Cost懲罰。
+    DD_CRIT = 0.2             
+    # 回撤嚴重水位(20%)：
+    # 若最大回撤超過此水位，懲罰Num會急劇提升，加速策略修正。
+    DD_MAX_PENALTY = 5.0      
+    # 最大回撤終局懲罰：
+    # 當episode結束時，若最大回撤超標給予region最大Cost延伸懲罰(增強收益surface的懲罰效果)。
+
+    # Reward Parameters (獎勵函數設定)
+    REWARD_TURNOVER_PENALTY = 1.0  * 5  # 5倍
+    # 換手懲罰權重(alpha_turn)：
+    # 在主線獎勵計算r_t時，對倉位變化幅度的罰則。數值高→鼓勵更穩定持倉、少交易。
+    REWARD_DD_PENALTY = 0.5          
+    # 當前回撤懲罰權重(dd_penalty_coef)：
+    # 每個step若有非零回撤會給予額外懲罰，鼓勵減少波動。
+    REWARD_HOLD_BONUS = 0.001       
+    # 持倉不動獎勵(hold bonus)：
+    # 若本步未調整倉位會給予一點微小獎勵，鼓勵策略穩定(減少不必要操作)。

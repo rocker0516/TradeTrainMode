@@ -16,12 +16,16 @@ import numpy as np
 @dataclass
 class RewardCalculator:
     """
-    主線獎勵計算器：Log Return + Turnover Penalty
+    主線獎勵計算器：Log Return + Turnover Penalty + DD Penalty
     """
     # 強平懲罰係數 C_liq
     c_liq: float = 10.0
     # 換手懲罰係數 alpha_turn
     turnover_penalty: float = 0.0
+    # DD懲罰係數
+    dd_penalty_coef: float = 0.0
+    # 持倉獎勵係數 (Hold Bonus)
+    hold_bonus: float = 0.0
     
     def compute(
         self,
@@ -33,6 +37,8 @@ class RewardCalculator:
         episode_steps: int | None = None,
         episode_max_steps: int | None = None,
         position_change_norm: float = 0.0, # Normalize position change (0~1 usually)
+        step_fee_ratio: float = 0.0, # Immediate fee cost (ratio)
+        current_dd: float = 0.0, # Current drawdown (0~1)
         **kwargs
     ) -> float:
         """
@@ -40,6 +46,7 @@ class RewardCalculator:
         
         r = ln(new_equity / last_equity)
         r -= turnover_penalty * position_change_norm
+        r -= dd_penalty_coef * current_dd (風險塑形)
         if liquidation: r -= C_liq * (1 + (T_max - T)/T_max)
         """
         # 1. 計算基礎 Log Return
@@ -52,10 +59,20 @@ class RewardCalculator:
         log_ret = np.log(safe_new / safe_last)
         
         reward = float(log_ret)
+        
+        # (已移除) 1.5 直接扣除手續費成本
+        # new_equity 已包含手續費扣除，Log Return 已反映成本，不應重複扣除。
 
         # 2. 加上換手懲罰 (Turnover Penalty)
         if self.turnover_penalty > 0 and position_change_norm > 0:
             reward -= self.turnover_penalty * position_change_norm
+        elif position_change_norm == 0.0 and self.hold_bonus > 0:
+             # 鼓勵持倉不動 (Stability)
+             reward += self.hold_bonus
+            
+        # 2.5 Drawdown Penalty (Risk Shaping)
+        if self.dd_penalty_coef > 0 and current_dd > 0:
+            reward -= self.dd_penalty_coef * current_dd
         
         # 3. 處理終局 (Liquidation / Balance Insufficient)
         if done and termination_reason in ('liq_triggered', 'balance_insufficient'):
@@ -76,16 +93,17 @@ class RewardCalculator:
             
         # 正常結束 (Data Exhausted) 或 止損 (Stop Loss 不終止) 不加額外懲罰，
         # 僅反映在 Log Return (止損會導致 equity 下降，自然產生負 log return)
-
+    
         return reward
     
     def get_info(self) -> dict:
         return {
             'type': 'log_return_plus_turnover',
             'c_liq': self.c_liq,
-            'turnover_penalty': self.turnover_penalty
+            'turnover_penalty': self.turnover_penalty,
+            'dd_penalty_coef': self.dd_penalty_coef
         }
 
 # 工廠函數
-def create_default_calculator(turnover_penalty: float = 0.0) -> RewardCalculator:
-    return RewardCalculator(turnover_penalty=turnover_penalty)
+def create_default_calculator(turnover_penalty: float = 0.0, dd_penalty_coef: float = 0.0, hold_bonus: float = 0.0) -> RewardCalculator:
+    return RewardCalculator(turnover_penalty=turnover_penalty, dd_penalty_coef=dd_penalty_coef, hold_bonus=hold_bonus)

@@ -22,7 +22,7 @@ from Train.buffer import ReplayBuffer
 from Train.cost import CombinedCostCalculator
 from Train.config import Config
 
-from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
 
 # Setup Logger
 logging.basicConfig(
@@ -48,6 +48,8 @@ def make_env(rank, df, seed=0):
             min_position_change=Config.MIN_POSITION_CHANGE,
             max_step_pos_change_pct=Config.MAX_STEP_POS_CHANGE_PCT,
             turnover_penalty=Config.REWARD_TURNOVER_PENALTY,
+            dd_penalty_coef=Config.REWARD_DD_PENALTY,
+            hold_bonus=Config.REWARD_HOLD_BONUS,
             random_start=True
         )
         env.reset(seed=seed + rank)
@@ -69,13 +71,22 @@ def format_dashboard(global_step, fps, stats, metrics, costs, num_constraints):
     avg_longs = np.mean(stats['longs']) if stats['longs'] else 0.0
     avg_shorts = np.mean(stats['shorts']) if stats['shorts'] else 0.0
     avg_sl = np.mean(stats['sl_counts']) if stats['sl_counts'] else 0.0
+    
+    # New Metric: Avg Max Trade Loss
+    avg_max_trade_loss = np.mean(stats['max_trade_losses']) if stats['max_trade_losses'] else 0.0
 
     wins = [p for p in stats['profits'] if p > 0]
     win_rate = (len(wins) / len(stats['profits']) * 100) if stats['profits'] else 0.0
     
     total_eps = len(stats['reasons'])
     reason_counts = {}
+    
+    # Explicitly track these reasons to ensure they show up even if 0%
+    known_reasons = ['liq_triggered', 'balance_insufficient', 'data_exhausted']
+    
     for r in stats['reasons']:
+        if r not in known_reasons:
+            known_reasons.append(r)
         reason_counts[r] = reason_counts.get(r, 0) + 1
     
     # Format String
@@ -91,11 +102,13 @@ def format_dashboard(global_step, fps, stats, metrics, costs, num_constraints):
     lines.append(f"|   Avg Ep Length:   {avg_len:.0f} steps".ljust(width-1) + "|")
     lines.append(f"|   Avg Trades:      {avg_trades:.1f} (L:{avg_longs:.1f}/S:{avg_shorts:.1f})".ljust(width-1) + "|")
     lines.append(f"|   Avg StopLoss:    {avg_sl:.1f}".ljust(width-1) + "|")
+    lines.append(f"|   Max Trade Loss:  {avg_max_trade_loss:+.2f}%".ljust(width-1) + "|")
     lines.append(f"|   Win Rate:        {win_rate:.1f}%".ljust(width-1) + "|")
     lines.append("|".ljust(width-1) + "|")
     
     lines.append("| Termination Reasons:".ljust(width-1) + "|")
-    for reason, count in reason_counts.items():
+    for reason in sorted(known_reasons):
+        count = reason_counts.get(reason, 0)
         pct = (count / total_eps * 100) if total_eps > 0 else 0
         lines.append(f"|   {reason.ljust(15)}: {pct:.1f}%".ljust(width-1) + "|")
     lines.append("|".ljust(width-1) + "|")
@@ -147,11 +160,23 @@ def train():
     else:
         env = DummyVecEnv(env_fns)
     
+    # Apply VecNormalize to stabilize inputs and reward (Running Mean/Var)
+    env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=Config.GAMMA)
+    
     # Get dimensions
     temp_env = make_env(0, df)()
     obs_sample, _ = temp_env.reset()
     price_seq_shape = obs_sample['price_seq'].shape
-    state_dim = obs_sample['state_vector'].shape[0]
+    
+    # Calculate total state dim from parts
+    state_dim = (
+        obs_sample['account_state'].shape[0] +
+        obs_sample['time_state'].shape[0] +
+        obs_sample['rhythm_state'].shape[0] +
+        obs_sample['cost_state'].shape[0] +
+        obs_sample['market_state'].shape[0]
+    )
+    
     action_dim = temp_env.action_space.shape[0]
     del temp_env
     
@@ -205,7 +230,8 @@ def train():
         'trades': deque(maxlen=stats_window),
         'longs': deque(maxlen=stats_window),
         'shorts': deque(maxlen=stats_window),
-        'sl_counts': deque(maxlen=stats_window)
+        'sl_counts': deque(maxlen=stats_window),
+        'max_trade_losses': deque(maxlen=stats_window)
     }
     
     logger.info("Starting training loop...")
@@ -265,6 +291,7 @@ def train():
                 short_entries = infos[i].get('short_entry_count', 0)
                 sl_count = infos[i].get('episode_stop_loss_count', 0)
                 total_trades = long_entries + short_entries
+                max_trade_loss_pct = infos[i].get('max_single_trade_loss_pct', 0.0)
 
                 stats['profits'].append(profit_pct)
                 stats['balances'].append(final_bal)
@@ -275,6 +302,7 @@ def train():
                 stats['longs'].append(long_entries)
                 stats['shorts'].append(short_entries)
                 stats['sl_counts'].append(sl_count)
+                stats['max_trade_losses'].append(max_trade_loss_pct)
                 
                 # TensorBoard (Per Episode)
                 writer.add_scalar("rollout/episode_reward", episode_rewards[i], global_step)
@@ -283,6 +311,7 @@ def train():
                 writer.add_scalar("rollout/total_fees", total_fees, global_step)
                 writer.add_scalar("rollout/total_trades", total_trades, global_step)
                 writer.add_scalar("rollout/sl_count", sl_count, global_step)
+                writer.add_scalar("rollout/max_single_trade_loss", max_trade_loss_pct, global_step)
                 
                 # Reset
                 episode_rewards[i] = 0
@@ -321,7 +350,14 @@ def train():
         # Save Model
         if global_step % 10000 < num_envs: 
             torch.save(agent.actor.state_dict(), f"{model_dir}/actor_{global_step}.pth")
-            logger.info(f"Model saved at step {global_step}")
+            env.save(f"{model_dir}/vec_normalize_{global_step}.pkl")
+            
+            # Prevent tqdm glitch by clearing line or using pbar.write
+            msg = f"Model saved at step {global_step}"
+            if 'pbar' in locals() and pbar is not None:
+                pbar.write(msg)
+            else:
+                logger.info(msg)
             
     pbar.close()
     env.close()

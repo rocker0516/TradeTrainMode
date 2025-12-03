@@ -67,6 +67,7 @@ class TradeExecutor:
         self.short_close_count: int = 0
         self.long_entry_count: int = 0
         self.short_entry_count: int = 0
+        self.max_trade_loss_pct: float = 0.0  # Max single trade loss percentage (ROI %)
 
     def reset(self, initial_balance: float) -> None:
         self.wallet_balance = float(initial_balance)# 錢包餘額
@@ -80,6 +81,7 @@ class TradeExecutor:
         self.short_close_count = 0
         self.long_entry_count = 0
         self.short_entry_count = 0
+        self.max_trade_loss_pct = 0.0
 
     # ---------- 查詢輔助方法 ----------
     # 未實現損益
@@ -113,6 +115,28 @@ class TradeExecutor:
         
         # 1. 優先檢查止損（先於清算，保護倉位）
         if self.position.size != 0.0 and self.position.stop_loss_price > 0.0:
+            # 移動止損檢查 (Trailing Stop)
+            # 邏輯：當價格朝有利方向移動，將止損價位移至 (CurrentPrice - ATR*Trail)
+            # 但為了簡單起見，這裡只做 "損益兩平後保護" 或 "跟隨價格"
+            # 這裡實作：標準移動止損 - 當價格創新高(多)/新低(空)，提升止損
+            # 需注意：若太敏感會被洗掉。
+            
+            # 參數：Trailing 距離同 StopLoss 距離
+            if atr > 0 and self.stop_loss_atr > 0:
+                trail_dist = atr * self.stop_loss_atr
+                if self.position.size > 0:
+                    # 多單：若 (CurrentHigh - Trail) > CurrentSL，則提升 SL
+                    # 使用 high 雖激進，但能鎖定利潤；保守可用 close
+                    potential_new_sl = high - trail_dist
+                    if potential_new_sl > self.position.stop_loss_price:
+                         self.position.stop_loss_price = potential_new_sl
+                else:
+                    # 空單：若 (CurrentLow + Trail) < CurrentSL，則下移 SL
+                    potential_new_sl = low + trail_dist
+                    if potential_new_sl < self.position.stop_loss_price:
+                         self.position.stop_loss_price = potential_new_sl
+
+            # 執行止損檢查
             if (self.position.size > 0 and low <= self.position.stop_loss_price) or \
                (self.position.size < 0 and high >= self.position.stop_loss_price):
                 # 觸發止損，強制平倉
@@ -209,7 +233,13 @@ class TradeExecutor:
                 return
             max_notional_add = cap * self.leverage
             max_size_add = max_notional_add / price if price > 0 else 0.0
-            delta_size = (max_size_add if delta_size > 0 else -max_size_add)
+            
+            # 正確修正 delta_size 方向
+            if delta_size > 0:
+                delta_size = max_size_add
+            else:
+                delta_size = -max_size_add
+                
             trade_notional = abs(delta_size) * price
             additional_margin = max(0.0, self._required_margin(self.position.size + delta_size, price) - self.used_margin)
             fee = self._fee(trade_notional)
@@ -232,39 +262,62 @@ class TradeExecutor:
         self.wallet_balance -= fee
         self.total_fees += fee
 
-        # 若原先為空倉，視為進場（記一次）並設定止損價
+        # 設定/更新止損價 (固定 ATR 倍數)
+        if atr > 0 and self.stop_loss_atr > 0:
+            stop_distance = atr * self.stop_loss_atr
+            if self.position.size > 0:
+                # 多單止損 = 新均價 - ATR距離
+                new_sl = self.position.entry_price - stop_distance
+                # 若已有止損，加倉時通常不希望止損變寬（往下移），取較高者（更緊）
+                # 但若均價大幅上移，也許可以接受新的寬止損？
+                # 這裡採用：加倉後一律重算 ATR 止損，因為風險基礎（均價）變了
+                self.position.stop_loss_price = new_sl
+            else:
+                # 空單止損 = 新均價 + ATR距離
+                new_sl = self.position.entry_price + stop_distance
+                self.position.stop_loss_price = new_sl
+        else:
+            if self.position.stop_loss_price == 0.0: # 只有未設定時才歸零，否則保留舊值？不，若無 ATR 則無法計算
+                 self.position.stop_loss_price = 0.0
+
+        # 若原先為空倉，視為進場（記一次）
         if was_flat and abs(delta_size) > 0.0:
             if delta_size > 0:
                 self.long_entry_count += 1
             else:
                 self.short_entry_count += 1
-            
-            # 設定固定止損價（以 ATR 倍數計算）
-            if atr > 0 and self.stop_loss_atr > 0:
-                stop_distance = atr * self.stop_loss_atr
-                if self.position.size > 0:
-                    self.position.stop_loss_price = self.position.entry_price - stop_distance
-                else:
-                    self.position.stop_loss_price = self.position.entry_price + stop_distance
-            else:
-                self.position.stop_loss_price = 0.0
+
+    def _update_max_loss(self, realized_pnl: float, close_size: float, entry_price: float) -> None:
+        """Update max trade loss percentage (ROI based)."""
+        if close_size <= 0 or entry_price <= 0:
+            return
+        
+        # ROI Calculation: PnL / Initial Margin
+        # Initial Margin = (Size * Entry Price) / Leverage
+        initial_margin = (close_size * entry_price) / self.leverage
+        if initial_margin > 0:
+            roi_pct = (realized_pnl / initial_margin) * 100.0
+            if roi_pct < self.max_trade_loss_pct:
+                self.max_trade_loss_pct = roi_pct
 
     # 減倉
     def _reduce_position(self, *, delta_size: float, price: float) -> None:
         # delta_size 與當前持倉方向相反；以下計算實際平倉數量
         close_size = -delta_size  # 平倉數量（與現有持倉同號）
+        current_entry_price = self.position.entry_price # Capture entry price
+        
         was_long = self.position.size > 0
         if was_long:
             close_size = min(abs(close_size), abs(self.position.size))
-            realized_pnl = (price - self.position.entry_price) * close_size
+            realized_pnl = (price - current_entry_price) * close_size
             new_size = self.position.size - close_size
         else:
             close_size = min(abs(close_size), abs(self.position.size))
-            realized_pnl = (self.position.entry_price - price) * close_size
+            realized_pnl = (current_entry_price - price) * close_size
             new_size = - (abs(self.position.size) - close_size)
 
         fee = self._fee(close_size * price)
-        margin_release = self._required_margin(close_size, self.position.entry_price)
+        margin_release = self._required_margin(close_size, current_entry_price)
 
         self.wallet_balance += realized_pnl - fee
         self.used_margin = max(0.0, self.used_margin - margin_release)
@@ -287,17 +340,22 @@ class TradeExecutor:
             'realized_pnl': float(realized_pnl),
             'type': 'reduce'
         })
+        
+        # 更新最大虧損統計
+        self._update_max_loss(realized_pnl, close_size, current_entry_price)
 
     # 平倉
     def _close_position(self, price: float) -> None:
         if self.position.size == 0.0:
             return
         size_to_close = abs(self.position.size)
+        current_entry_price = self.position.entry_price # Capture entry price
+        
         was_long = self.position.size > 0
         if was_long:
-            realized_pnl = (price - self.position.entry_price) * size_to_close
+            realized_pnl = (price - current_entry_price) * size_to_close
         else:
-            realized_pnl = (self.position.entry_price - price) * size_to_close
+            realized_pnl = (current_entry_price - price) * size_to_close
 
         fee = self._fee(size_to_close * price)
         self.wallet_balance += realized_pnl - fee
@@ -318,7 +376,10 @@ class TradeExecutor:
             'realized_pnl': float(realized_pnl),
             'type': 'close'
         })
-
+        
+        # 更新最大虧損統計
+        self._update_max_loss(realized_pnl, size_to_close, current_entry_price)
+        
     # ---------- 風險控制與強平 ----------
     def _calc_liquidation_price(self) -> float | None:
         # 根據：equity(p) = wallet + (p - entry) * size

@@ -3,62 +3,103 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, Dict
 
+class SEBlock(nn.Module):
+    """
+    Squeeze-and-Excitation Block to adaptively recalibrate channel-wise feature responses.
+    """
+    def __init__(self, channel, reduction=16):
+        super(SEBlock, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1)
+        return x * y.expand_as(x)
+
 class PriceEncoder(nn.Module):
     """
-    Encoder for Price Sequence using 1D CNN.
-    
-    Args:
-        input_channels (int): Number of input features per time step.
-        window_size (int): Length of the time sequence.
-        output_dim (int): Dimension of the output embedding.
+    Encoder for Price Sequence using Deep 1D CNN with SE Blocks.
+    Optimized for long sequence (1440 steps).
     """
     def __init__(self, input_channels: int, window_size: int, output_dim: int = 128):
         super().__init__()
         self.input_channels = input_channels
         self.window_size = window_size
         
-        # 1D CNN Architecture
-        # Input: (Batch, Channels, Length) - Note: PyTorch Conv1d expects (B, C, L)
-        self.conv1 = nn.Conv1d(in_channels=input_channels, out_channels=32, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3, padding=1)
-        self.conv3 = nn.Conv1d(in_channels=64, out_channels=64, kernel_size=3, padding=1)
+        # Deep 1D CNN Architecture (5 layers)
+        # Input: (Batch, Channels, Length)
         
-        self.pool = nn.MaxPool1d(kernel_size=2)
+        # Layer 1: Capture very short-term patterns (5-min level)
+        self.conv1 = nn.Conv1d(in_channels=input_channels, out_channels=32, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm1d(32)
+        self.pool1 = nn.MaxPool1d(kernel_size=2) # 1440 -> 720
+        
+        # Layer 2: Capture short-term patterns (15-30 min)
+        self.conv2 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm1d(64)
+        self.pool2 = nn.MaxPool1d(kernel_size=2) # 720 -> 360
+        
+        # Layer 3: Capture mid-term patterns (1-2 hour)
+        self.conv3 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm1d(128)
+        self.se3 = SEBlock(128) # Attention on channels
+        self.pool3 = nn.MaxPool1d(kernel_size=2) # 360 -> 180
+        
+        # Layer 4: Capture long-term patterns (4-8 hour)
+        self.conv4 = nn.Conv1d(in_channels=128, out_channels=128, kernel_size=3, padding=1)
+        self.bn4 = nn.BatchNorm1d(128)
+        self.pool4 = nn.MaxPool1d(kernel_size=2) # 180 -> 90
+        
+        # Layer 5: Capture global trends (Daily)
+        self.conv5 = nn.Conv1d(in_channels=128, out_channels=256, kernel_size=3, padding=1)
+        self.bn5 = nn.BatchNorm1d(256)
+        self.se5 = SEBlock(256)
+        # Global Pooling follows
+        
         self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
         
-        # Compute flattened size after convolutions if not using global pool
-        # But global average pooling is flexible and robust.
-        
-        self.fc = nn.Linear(64, output_dim)
+        self.fc = nn.Linear(256, output_dim)
         self.layer_norm = nn.LayerNorm(output_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass.
-        
         Args:
             x: Input tensor of shape (Batch, Window, Features) or (Batch, Features, Window).
-               If (Batch, Window, Features), it will be permuted.
         """
         # Ensure input is (B, C, L)
         if x.dim() == 3 and x.shape[1] == self.window_size:
             x = x.permute(0, 2, 1) # (B, W, F) -> (B, F, W)
             
-        x = F.relu(self.conv1(x))
-        x = self.pool(x)
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.pool1(x)
         
-        x = F.relu(self.conv2(x))
-        x = self.pool(x)
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.pool2(x)
         
-        x = F.relu(self.conv3(x))
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = self.se3(x) # Apply SE
+        x = self.pool3(x)
+        
+        x = F.relu(self.bn4(self.conv4(x)))
+        x = self.pool4(x)
+        
+        x = F.relu(self.bn5(self.conv5(x)))
+        x = self.se5(x) # Apply SE
         
         # Global Average Pooling
-        x = self.global_avg_pool(x) # (B, 64, 1)
-        x = x.flatten(1)            # (B, 64)
+        x = self.global_avg_pool(x) # (B, 256, 1)
+        x = x.flatten(1)            # (B, 256)
         
         x = self.fc(x)
         x = self.layer_norm(x)
-        # Safe ReLU (though LayerNorm usually keeps things sane)
         return F.relu(x)
 
 

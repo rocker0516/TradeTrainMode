@@ -107,7 +107,17 @@ class SACLagrangianAgent:
 
     def select_action(self, obs: Dict[str, np.ndarray], evaluate: bool = False) -> np.ndarray:
         price_seq = torch.FloatTensor(obs['price_seq']).unsqueeze(0).to(self.device)
-        state_vec = torch.FloatTensor(obs['state_vector']).unsqueeze(0).to(self.device)
+        
+        # Reconstruct state_vector from split observation
+        state_parts = [
+            obs['account_state'],
+            obs['time_state'],
+            obs['rhythm_state'],
+            obs['cost_state'],
+            obs['market_state']
+        ]
+        state_vec_np = np.concatenate(state_parts)
+        state_vec = torch.FloatTensor(state_vec_np).unsqueeze(0).to(self.device)
         
         # Augment State with Lambda
         state_vec = self._augment_state(state_vec, self.lagrangian_lambda)

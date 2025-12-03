@@ -44,13 +44,31 @@ class ReplayBuffer:
         done: bool
     ):
         self.price_seqs[self.ptr] = obs['price_seq']
-        self.state_vecs[self.ptr] = obs['state_vector']
+        
+        # Concatenate states for storage
+        self.state_vecs[self.ptr] = np.concatenate([
+            obs['account_state'],
+            obs['time_state'],
+            obs['rhythm_state'],
+            obs['cost_state'],
+            obs['market_state']
+        ])
+        
         self.actions[self.ptr] = action
         self.rewards[self.ptr] = reward
-        self.costs[self.ptr] = cost # expects array of shape (cost_dim,)
+        self.costs[self.ptr] = cost 
         
         self.next_price_seqs[self.ptr] = next_obs['price_seq']
-        self.next_state_vecs[self.ptr] = next_obs['state_vector']
+        
+        # Concatenate next states
+        self.next_state_vecs[self.ptr] = np.concatenate([
+            next_obs['account_state'],
+            next_obs['time_state'],
+            next_obs['rhythm_state'],
+            next_obs['cost_state'],
+            next_obs['market_state']
+        ])
+        
         self.dones[self.ptr] = float(done)
         
         self.ptr = (self.ptr + 1) % self.capacity

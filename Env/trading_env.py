@@ -28,7 +28,8 @@ from .features import build_all_features, compute_market_shape_features
 class TradingEnvironment(gym.Env):
     def __init__(self, df, initial_balance=10_000, transaction_fee=0.001, window_size=288, leverage=10, min_balance=100, min_trade_qty=0.001,
                  reward_weights=None, margin_mode: str = 'isolated', reward_calculator=None, random_start: bool = False, min_episode_steps: int = 1000,
-                 min_position_change: float = 0.0, max_step_pos_change_pct: float = 1.0, turnover_penalty: float = 0.0):
+                 min_position_change: float = 0.0, max_step_pos_change_pct: float = 1.0, turnover_penalty: float = 0.0,
+                 dd_penalty_coef: float = 0.0, hold_bonus: float = 0.0):
         super(TradingEnvironment, self).__init__()
         
         # 只保留數值列，並確保包含必要的OHLCV列
@@ -58,6 +59,8 @@ class TradingEnvironment(gym.Env):
         self.min_position_change = float(min_position_change)
         self.max_step_pos_change_pct = float(max_step_pos_change_pct)
         self.turnover_penalty = float(turnover_penalty)
+        self.dd_penalty_coef = float(dd_penalty_coef)
+        self.hold_bonus = float(hold_bonus)
         
         # 定義動作空間
         # 目標持倉比例 (-1.0 ~ 1.0)，限制小數位為1位
@@ -91,11 +94,13 @@ class TradingEnvironment(gym.Env):
             'atr_ratio': atr_ratio
         }, index=df_num.index)
         
-        # 1.5 Pre-calculate Profile Features for State Vector to avoid slow lookup
-        from .features import compute_rolling_profile_features
-        # Use longer window for State Vector context (e.g. 1440)
-        prof_levels = compute_rolling_profile_features(self.df, window=1440)
-        self.internal_features = pd.concat([self.internal_features, prof_levels], axis=1)
+        # 1.5 Pre-calculate All Features for State Vector to avoid slow lookup
+        # This ensures all columns required by _get_observation (dollar_volume_log_z, amihud_z, etc.) are present.
+        all_feats = build_all_features(self.df, lookback=self.feature_lookback)
+        self.internal_features = pd.concat([self.internal_features, all_feats], axis=1)
+        
+        # Remove duplicate columns if any (keep first occurrence)
+        self.internal_features = self.internal_features.loc[:, ~self.internal_features.columns.duplicated()]
 
         # 2. 準備觀測特徵 (price_seq)
         self.market_shape_df = compute_market_shape_features(self.df)
@@ -103,14 +108,14 @@ class TradingEnvironment(gym.Env):
         
         # 3. 定義觀察空間
         # price_seq: [window_size, F]
-        # state_vector: [D]
-        # Original dim was 20. 
-        # New features (Previous): 4 profile metrics = 24.
-        # New features (Now): 
-        #   + accumulated_fee_ratio (1)
-        #   + step_fee_ratio (1)
-        # Total = 26
-        self.state_dim = 26 
+        # Split state_vector into 5 semantic groups:
+        # 1. Account Status (10)
+        # 2. Time (8)
+        # 3. Rhythm (2)
+        # 4. Cost/Value (11)
+        # 5. Market Context (9)
+        # Total Dims = 40
+        self.state_dim = 40 # For reference, though calculated dynamically in train.py now
         
         self.observation_space = spaces.Dict({
             "price_seq": spaces.Box(
@@ -119,12 +124,11 @@ class TradingEnvironment(gym.Env):
                 shape=(self.window_size, self.price_seq_features), 
                 dtype=np.float32
             ),
-            "state_vector": spaces.Box(
-                low=-np.inf, 
-                high=np.inf, 
-                shape=(self.state_dim,), 
-                dtype=np.float32
-            )
+            "account_state": spaces.Box(low=-np.inf, high=np.inf, shape=(10,), dtype=np.float32),
+            "time_state": spaces.Box(low=0.0, high=1.0, shape=(8,), dtype=np.float32),
+            "rhythm_state": spaces.Box(low=0.0, high=1.0, shape=(2,), dtype=np.float32),
+            "cost_state": spaces.Box(low=-np.inf, high=np.inf, shape=(11,), dtype=np.float32),
+            "market_state": spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)
         })
         
         # 建立交易執行器
@@ -147,7 +151,11 @@ class TradingEnvironment(gym.Env):
             'wallet': np.zeros(series_len, dtype=np.float32),
         }
 
-        self.reward_calculator = reward_calculator or create_default_calculator(turnover_penalty=self.turnover_penalty)
+        self.reward_calculator = reward_calculator or create_default_calculator(
+            turnover_penalty=self.turnover_penalty,
+            dd_penalty_coef=self.dd_penalty_coef,
+            hold_bonus=self.hold_bonus
+        )
         self._last_position_size = 0.0
         
         # State tracking variables
@@ -226,72 +234,65 @@ class TradingEnvironment(gym.Env):
         # Shape: [window_size, F]
         price_seq = self.market_shape_df.iloc[self.current_step - self.window_size : self.current_step].values.astype(np.float32)
         
-        # 2. State Vector (MLP Input)
-        # Gather features
+        # 2. State Features Extraction
         current_price = float(self.df.iloc[self.current_step]['close'])
         equity = self.executor.equity(current_price)
         
-        # Pos Side One-Hot (3)
+        # --- Account Status (10) ---
         size = self.executor.position.size
         pos_side_oh = np.zeros(3, dtype=np.float32)
         if size > 0: pos_side_oh[0] = 1.0
         elif size < 0: pos_side_oh[1] = 1.0
         else: pos_side_oh[2] = 1.0
         
-        # Pos Size Norm (1) - Normalized by Max Leverage
         pos_notional = abs(size) * current_price
         max_notional = equity * self.leverage
         pos_size_norm = pos_notional / max_notional if max_notional > 0 else 0.0
         pos_size_norm = np.clip(pos_size_norm, 0.0, 1.0)
         
-        # Unreal PnL Ratio (1)
         upnl = self.executor.unrealized_pnl(current_price)
         unreal_pnl_ratio = upnl / self.initial_balance if self.initial_balance > 0 else 0.0
         unreal_pnl_ratio = np.clip(unreal_pnl_ratio, -2.0, 2.0)
         
-        # Equity Ratio (1)
         equity_ratio = equity / self.initial_balance if self.initial_balance > 0 else 0.0
-        equity_ratio = np.clip(equity_ratio, 0.0, 5.0) # Cap at 5x
+        equity_ratio = np.clip(equity_ratio, 0.0, 5.0)
         
-        # Max Equity Ratio (1)
         max_equity_ratio = self.max_equity_so_far / self.initial_balance if self.initial_balance > 0 else 0.0
         max_equity_ratio = np.clip(max_equity_ratio, 0.0, 5.0)
         
-        # Drawdown (1)
         dd = (self.max_equity_so_far - equity) / self.max_equity_so_far if self.max_equity_so_far > 0 else 0.0
         dd = np.clip(dd, 0.0, 1.0)
         
-        # Margin Ratio (1)
         if equity > 0:
             effective_leverage = pos_notional / equity
             margin_ratio = effective_leverage / self.leverage
         else:
-            margin_ratio = 1.0 # Max danger
+            margin_ratio = 1.0
         margin_ratio = np.clip(margin_ratio, 0.0, 1.0)
-        
-        # Steps Since Last Trade Norm (1)
-        steps_since = self.current_step - self.last_trade_step
-        steps_since_norm = steps_since / self.window_size # Normalize by window
-        steps_since_norm = np.clip(steps_since_norm, 0.0, 1.0) # Clip to 1 window length
-        
-        # Trade Count Recent Norm (1)
-        recent_threshold = self.current_step - self.window_size
-        recent_trades = [t for t in self.trade_steps_buffer if t > recent_threshold]
-        trade_count_norm = len(recent_trades) / 20.0 # Assume 20 is high activity
-        trade_count_norm = np.clip(trade_count_norm, 0.0, 1.0)
-        
-        # Est Cost Per Unit (1) - Log deviation
-        entry_price = self.executor.position.entry_price
-        if size != 0 and entry_price > 0:
-            est_cost_norm = np.log(current_price / entry_price)
-            est_cost_norm = np.clip(est_cost_norm, -0.5, 0.5) # +/- 50% move
+
+        # Recent Performance
+        closed_trades = self.executor.closed_trades
+        if len(closed_trades) > 0:
+            recent = closed_trades[-5:]
+            avg_pnl = sum(t['realized_pnl'] for t in recent) / len(recent)
+            avg_pnl_norm = avg_pnl / self.initial_balance if self.initial_balance > 0 else 0.0
+            avg_pnl_norm = np.clip(avg_pnl_norm, -0.5, 0.5)
         else:
-            est_cost_norm = 0.0
+            avg_pnl_norm = 0.0
+
+        account_state = np.concatenate([
+            pos_side_oh,        # 3
+            [pos_size_norm],    # 1
+            [unreal_pnl_ratio], # 1
+            [equity_ratio],     # 1
+            [max_equity_ratio], # 1
+            [dd],               # 1
+            [margin_ratio],     # 1
+            [avg_pnl_norm]      # 1
+        ]).astype(np.float32)
         
-        # Time of Day (1)
+        # --- Time (8) ---
         time_of_day = (self.current_step % 288) / 288.0
-        
-        # Day of Week One-Hot (7)
         day_of_week_oh = np.zeros(7, dtype=np.float32)
         if isinstance(self.df.index, pd.DatetimeIndex):
             day_idx = self.df.index[self.current_step].dayofweek
@@ -300,63 +301,87 @@ class TradingEnvironment(gym.Env):
             approx_day = (self.current_step // 288) % 7
             day_of_week_oh[approx_day] = 1.0
             
-        # --- Profile Features (State Vector) ---
+        time_state = np.concatenate([
+            [time_of_day],      # 1
+            day_of_week_oh      # 7
+        ]).astype(np.float32)
+        
+        # --- Rhythm (2) ---
+        steps_since = self.current_step - self.last_trade_step
+        steps_since_norm = steps_since / self.window_size
+        steps_since_norm = np.clip(steps_since_norm, 0.0, 1.0)
+        
+        recent_threshold = self.current_step - self.window_size
+        recent_trades = [t for t in self.trade_steps_buffer if t > recent_threshold]
+        trade_count_norm = len(recent_trades) / 20.0
+        trade_count_norm = np.clip(trade_count_norm, 0.0, 1.0)
+        
+        rhythm_state = np.concatenate([
+            [steps_since_norm], # 1
+            [trade_count_norm]  # 1
+        ]).astype(np.float32)
+        
+        # --- Cost Constraints / Value (11) ---
+        entry_price = self.executor.position.entry_price
+        if size != 0 and entry_price > 0:
+            est_cost_norm = np.log(current_price / entry_price)
+            est_cost_norm = np.clip(est_cost_norm, -0.5, 0.5)
+        else:
+            est_cost_norm = 0.0
+
         poc = float(self.internal_features['profile_poc'].iloc[self.current_step])
         vah = float(self.internal_features['profile_vah'].iloc[self.current_step])
         val = float(self.internal_features['profile_val'].iloc[self.current_step])
-        
         atr_val = float(self.internal_features['atr_ratio'].iloc[self.current_step]) * current_price
         atr_val = max(1e-8, atr_val)
         
-        dist_poc = (current_price - poc) / atr_val
-        dist_vah = (current_price - vah) / atr_val
-        dist_val = (current_price - val) / atr_val
+        dist_poc = np.clip((current_price - poc) / atr_val, -10, 10)
+        dist_vah = np.clip((current_price - vah) / atr_val, -10, 10)
+        dist_val = np.clip((current_price - val) / atr_val, -10, 10)
+        va_width = np.clip(((vah - val) / current_price if current_price > 0 else 0.0), 0, 1.0)
         
-        va_width = (vah - val) / current_price if current_price > 0 else 0.0
-        
-        dist_poc = np.clip(dist_poc, -10, 10)
-        dist_vah = np.clip(dist_vah, -10, 10)
-        dist_val = np.clip(dist_val, -10, 10)
-        va_width = np.clip(va_width, 0, 1.0)
-        
-        # --- Fee Features ---
         total_fees = float(self.executor.total_fees)
-        acc_fee_ratio = total_fees / self.initial_balance if self.initial_balance > 0 else 0.0
-        acc_fee_ratio = np.clip(acc_fee_ratio, 0.0, 2.0)
+        acc_fee_ratio = np.clip((total_fees / self.initial_balance if self.initial_balance > 0 else 0.0), 0.0, 2.0)
+        step_fee_ratio_stable = np.clip((self.last_step_fee / self.initial_balance if self.initial_balance > 0 else 0.0), 0.0, 0.1)
         
-        # Step Fee Ratio (Immediate Cost) - Use stored last_step_fee
-        step_fee_ratio_stable = self.last_step_fee / self.initial_balance if self.initial_balance > 0 else 0.0
-        step_fee_ratio_stable = np.clip(step_fee_ratio_stable, 0.0, 0.1)
-
-        # Concatenate all
-        state_vector = np.concatenate([
-            pos_side_oh,                    # 3
-            [pos_size_norm],                # 1
-            [unreal_pnl_ratio],             # 1
-            [equity_ratio],                 # 1
-            [max_equity_ratio],             # 1
-            [dd],                           # 1
-            [margin_ratio],                 # 1
-            [steps_since_norm],             # 1
-            [trade_count_norm],             # 1
-            [est_cost_norm],                # 1
-            [time_of_day],                  # 1
-            day_of_week_oh,                 # 7
-            [dist_poc],                     # 1
-            [dist_vah],                     # 1
-            [dist_val],                     # 1
-            [va_width],                     # 1
-            [acc_fee_ratio],                # 1
-            [step_fee_ratio_stable]         # 1
+        dollar_vol_z = float(self.internal_features['dollar_volume_log_z'].iloc[self.current_step])
+        amihud_z = float(self.internal_features['amihud_z'].iloc[self.current_step])
+        hl_spread_z = float(self.internal_features['hl_spread_z'].iloc[self.current_step])
+        
+        cost_state = np.concatenate([
+            [est_cost_norm],        # 1
+            [dist_poc],             # 1
+            [dist_vah],             # 1
+            [dist_val],             # 1
+            [va_width],             # 1
+            [acc_fee_ratio],        # 1
+            [step_fee_ratio_stable],# 1
+            [dollar_vol_z],         # 1
+            [amihud_z],             # 1
+            [hl_spread_z],          # 1
+            [float(self.internal_features['trades_z'].iloc[self.current_step])] # 1 (Added trades_z here as activity cost)
         ]).astype(np.float32)
         
-        # Ensure size matches self.state_dim (26)
-        if len(state_vector) != self.state_dim:
-             pass
+        # --- Market State (Context) (9) ---
+        market_state = np.concatenate([
+            [float(self.internal_features['lt_ret_5d_z'].iloc[self.current_step])],
+            [float(self.internal_features['lt_vol_regime'].iloc[self.current_step])],
+            [float(self.internal_features['lt_vol_5d_z'].iloc[self.current_step])],
+            [float(self.internal_features['vol_imbalance_z'].iloc[self.current_step])],
+            [float(self.internal_features['bias_15m'].iloc[self.current_step])],
+            [float(self.internal_features['bias_1h'].iloc[self.current_step])],
+            [float(self.internal_features['bias_1d'].iloc[self.current_step])],
+            [float(self.internal_features['price_pos_in_range'].iloc[self.current_step])],
+            [float(self.internal_features['atr_z_score'].iloc[self.current_step])]
+        ]).astype(np.float32)
 
         obs = {
             "price_seq": np.nan_to_num(price_seq, nan=0.0),
-            "state_vector": np.nan_to_num(state_vector, nan=0.0)
+            "account_state": np.nan_to_num(account_state, nan=0.0),
+            "time_state": np.nan_to_num(time_state, nan=0.0),
+            "rhythm_state": np.nan_to_num(rhythm_state, nan=0.0),
+            "cost_state": np.nan_to_num(cost_state, nan=0.0),
+            "market_state": np.nan_to_num(market_state, nan=0.0)
         }
         
         return obs
@@ -593,6 +618,7 @@ class TradingEnvironment(gym.Env):
                 info['window_size'] = int(self.window_size)
                 info['episode_stop_loss_count'] = int(self.episode_stop_loss_count)
                 info['episode_liq_count'] = int(self.episode_liq_count)
+                info['max_single_trade_loss_pct'] = float(self.executor.max_trade_loss_pct)
             except Exception:
                 pass
             
