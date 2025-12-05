@@ -17,6 +17,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from Env.trading_env import TradingEnvironment
+from Env.wrappers import ActionRepeatWrapper
 from Train.sac_lagrangian import SACLagrangianAgent
 from Train.buffer import ReplayBuffer
 from Train.cost import CombinedCostCalculator
@@ -50,8 +51,16 @@ def make_env(rank, df, seed=0):
             turnover_penalty=Config.REWARD_TURNOVER_PENALTY,
             dd_penalty_coef=Config.REWARD_DD_PENALTY,
             hold_bonus=Config.REWARD_HOLD_BONUS,
-            random_start=True
+            fee_limit_ratio=Config.FEE_LIMIT_RATIO,
+            fee_rolling_window=Config.FEE_ROLLING_WINDOW,
+            fee_budget_penalty=Config.REWARD_FEE_BUDGET_PENALTY,
+            random_start=True,
+            stop_loss_atr=Config.STOP_LOSS_ATR
         )
+        # Apply Action Repeat Wrapper
+        if hasattr(Config, 'ACTION_REPEAT') and Config.ACTION_REPEAT > 1:
+            env = ActionRepeatWrapper(env, repeat=Config.ACTION_REPEAT)
+            
         env.reset(seed=seed + rank)
         return env
     return _init
@@ -335,7 +344,7 @@ def train():
                     writer.add_scalar(k, v, global_step)
         
         # Dashboard Summary
-        if global_step - last_summary_step >= summary_interval:
+        if global_step - last_summary_step >= summary_interval: #每隔N步更新一次dashboard
             elapsed = time.time() - start_time
             fps = global_step / elapsed
             dashboard = format_dashboard(global_step, fps, stats, metrics, episode_costs[0], len(Config.COST_LIMITS))
@@ -348,7 +357,7 @@ def train():
             last_summary_step = global_step
         
         # Save Model
-        if global_step % 10000 < num_envs: 
+        if global_step % 100_000 < num_envs: 
             torch.save(agent.actor.state_dict(), f"{model_dir}/actor_{global_step}.pth")
             env.save(f"{model_dir}/vec_normalize_{global_step}.pkl")
             

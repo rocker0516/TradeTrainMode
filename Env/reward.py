@@ -26,6 +26,10 @@ class RewardCalculator:
     dd_penalty_coef: float = 0.0
     # 持倉獎勵係數 (Hold Bonus)
     hold_bonus: float = 0.0
+    # Fee limit penalty coefficient
+    fee_limit_penalty: float = 2.0
+    # 逼近手續費上限的塑形懲罰
+    fee_budget_penalty: float = 0.0
     
     def compute(
         self,
@@ -39,6 +43,7 @@ class RewardCalculator:
         position_change_norm: float = 0.0, # Normalize position change (0~1 usually)
         step_fee_ratio: float = 0.0, # Immediate fee cost (ratio)
         current_dd: float = 0.0, # Current drawdown (0~1)
+        fee_budget_ratio: float | None = None, # Remaining fee budget ratio (1 = safe, 0 = exceeded)
         **kwargs
     ) -> float:
         """
@@ -73,6 +78,11 @@ class RewardCalculator:
         # 2.5 Drawdown Penalty (Risk Shaping)
         if self.dd_penalty_coef > 0 and current_dd > 0:
             reward -= self.dd_penalty_coef * current_dd
+
+        # 2.6 費用預算塑形：remaining budget 越低懲罰越高
+        if self.fee_budget_penalty > 0 and fee_budget_ratio is not None:
+            shortage = max(0.0, 1.0 - fee_budget_ratio)
+            reward -= self.fee_budget_penalty * shortage
         
         # 3. 處理終局 (Liquidation / Balance Insufficient)
         if done and termination_reason in ('liq_triggered', 'balance_insufficient'):
@@ -91,6 +101,13 @@ class RewardCalculator:
             
             reward -= penalty
             
+        # Fee limit termination -> apply explicit penalty
+        if done and termination_reason == 'fee_limit':
+            penalty = self.fee_limit_penalty
+            # 加上費率越高懲罰可加乘 step_fee_ratio
+            penalty += step_fee_ratio * self.fee_limit_penalty
+            reward -= penalty
+
         # 正常結束 (Data Exhausted) 或 止損 (Stop Loss 不終止) 不加額外懲罰，
         # 僅反映在 Log Return (止損會導致 equity 下降，自然產生負 log return)
     
@@ -105,5 +122,10 @@ class RewardCalculator:
         }
 
 # 工廠函數
-def create_default_calculator(turnover_penalty: float = 0.0, dd_penalty_coef: float = 0.0, hold_bonus: float = 0.0) -> RewardCalculator:
-    return RewardCalculator(turnover_penalty=turnover_penalty, dd_penalty_coef=dd_penalty_coef, hold_bonus=hold_bonus)
+def create_default_calculator(turnover_penalty: float = 0.0, dd_penalty_coef: float = 0.0, hold_bonus: float = 0.0,
+                              fee_limit_penalty: float = 2.0, fee_budget_penalty: float = 0.0) -> RewardCalculator:
+    return RewardCalculator(turnover_penalty=turnover_penalty,
+                            dd_penalty_coef=dd_penalty_coef,
+                            hold_bonus=hold_bonus,
+                            fee_limit_penalty=fee_limit_penalty,
+                            fee_budget_penalty=fee_budget_penalty)

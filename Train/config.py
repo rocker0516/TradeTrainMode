@@ -36,13 +36,21 @@ class Config:
     MIN_POSITION_CHANGE = 0.1   
     # 最小調倉幅度：
     # 單次下單動作可調整的最少倉位百分比。例如0.01等於1%，用於抑制微小動作與滑價。
-    MAX_STEP_POS_CHANGE_PCT = 0.2    
+    # 將其與 MIN_POSITION_CHANGE 同步
+    
+    # MAX_STEP_POS_CHANGE_PCT = 0.2    
+    MAX_STEP_POS_CHANGE_PCT = 0.2
     # 單步最大倉位調整幅度：
     # 每個step允許調整的最大多/空方向總幅度佔總倉位的比例（如0.5代表一次最多改變50%）。用於避免大跳或爆倉。
 
     # =========================
     # 訓練設定（RL核心相關）
     # =========================
+    ACTION_REPEAT = 2
+    # 動作重複次數 (Frame Skip)：
+    # Agent 每做一次決策，環境會持續執行該動作 4 個 Step (約20分鐘)。
+    # 這能自然降低交易頻率，讓 Agent 學習更長期的趨勢，而非追逐短期雜訊。
+
     TOTAL_TIMESTEPS = 10_000_000      
     # 總訓練步數：
     # 指所有環境總共經過的決策次數，包含多進程並行後的總和，規模可調(如2千萬步)。
@@ -54,7 +62,7 @@ class Config:
     # 經驗池最大容量：
     # 能儲存多少步transition，容量滿時會釋放最舊資料。
     # (大幅調降以防止 RAM 溢出導致 Swap 變慢。10萬步 * 80KB ≈ 8GB RAM，保留空間給系統)
-    LEARNING_STARTS = 50_000             
+    LEARNING_STARTS = 5_000             
     # 探索期步數：
     # 一開始預先隨機探索幾步（用來蒐集資料），之後再用學到的策略行為，避免冷啟動時的不穩定。
     GAMMA = 0.99                         
@@ -77,7 +85,7 @@ class Config:
     # =========================
     # 並行環境數（加速取樣效率）
     # =========================
-    NUM_ENVS = 32
+    NUM_ENVS = 64
     # 並行執行的環境數量：
     # 在取樣(training rollout)時，同時運行多組環境，能顯著加速資料生成和訓練速度。
     # 記憶體與CPU資源不足可調低本數。 (調降至 16)
@@ -85,7 +93,7 @@ class Config:
     # =========================
     # 記錄設定（進度和訓練結果列印）
     # =========================
-    LOG_INTERVAL = 10_000             
+    LOG_INTERVAL = 50_000             
     # 記錄/顯示間隔：
     # 每當訓練總步數達到此間隔，就把目前訓練績效、損失、各種指標輸出到Console、Tensorboard或log檔。
 
@@ -103,14 +111,16 @@ class Config:
     # 每種Cost的允許上限，[d1, d2, ...] 越低越嚴格，0.1意指最多允許10%的平均違規。
     # index 0 = 保證金風險（Margin Risk），違例率上限0.1
     # index 1 = 回撤風險（Drawdown Risk），違例率上限0.1
-    COST_LIMITS = [0.1, 0.1]
+    COST_LIMITS = [0.1, 0.2]
+    # index 0 = 保證金風險（Margin Risk），違例率上限0.1
+    # index 1 = 回撤風險（Drawdown Risk），違例率上限0.2 (放寬回撤容忍度，避免過早的高懲罰干擾學習)
 
     # =========================
     # Cost損失計算相關參數
     # =========================
-    MARGIN_SAFE = 1.5       
+    MARGIN_SAFE = 1.2       
     # 保證金安全邊際比(M_safe)：
-    # 保證金比如果低於此值就開始給予Cost懲罰。越高風控越嚴格，常用1.2~2.0。
+    # 下調至 1.2，避免在高槓桿下稍微波動就觸發懲罰。
     COST_LIQ_PENALTY = 5.0  
     # 強制平倉懲罰倍數(C_liq)：
     # 若資產被強平(liquidation)，則Cost會額外加重處罰，此係數可拉高罰則權重。
@@ -127,12 +137,39 @@ class Config:
     # 當episode結束時，若最大回撤超標給予region最大Cost延伸懲罰(增強收益surface的懲罰效果)。
 
     # Reward Parameters (獎勵函數設定)
-    REWARD_TURNOVER_PENALTY = 1.0  * 5  # 5倍
+    REWARD_TURNOVER_PENALTY = 5.0      
     # 換手懲罰權重(alpha_turn)：
-    # 在主線獎勵計算r_t時，對倉位變化幅度的罰則。數值高→鼓勵更穩定持倉、少交易。
-    REWARD_DD_PENALTY = 0.5          
+    # 降低至 5.0，因為我們透過 MIN_POSITION_CHANGE_FEE_PROTECT 來控制無效交易。
+    
+    REWARD_DD_PENALTY = 0.1          
     # 當前回撤懲罰權重(dd_penalty_coef)：
     # 每個step若有非零回撤會給予額外懲罰，鼓勵減少波動。
-    REWARD_HOLD_BONUS = 0.001       
+    REWARD_HOLD_BONUS = 0.5       
     # 持倉不動獎勵(hold bonus)：
-    # 若本步未調整倉位會給予一點微小獎勵，鼓勵策略穩定(減少不必要操作)。
+    # 微幅調升至 0.5，Action Repeat 模式下這會累積成可觀的獎勵，鼓勵"耐心"。
+
+    # =========================
+    # 交易執行參數
+    # =========================
+    STOP_LOSS_ATR = 5.0
+    # 止損距離 (ATR倍數)：
+    # 原預設 2.5 過於敏感，導致大部分交易被雜訊掃出場 (Avg StopLoss ~180/ep)。
+    # 調寬至 5.0，給予交易更多呼吸空間，避免被隨機波動洗掉。
+
+    MIN_POSITION_CHANGE = 0.20   
+    # 最小調倉幅度 (原有參數)：
+    # 調升至 0.20 (20%)。
+    # 之前 0.05 太小，導致 Agent 仍能進行無效的微調。
+    # 現在限制：除非一次要調整總倉位的 20% 以上，否則不允許動作。
+    # 這能強制 Agent 只能做「決定性」的大動作，杜絕刷單。
+
+    FEE_LIMIT_RATIO = 0.35
+    # 單回合累積手續費上限比例： 0.35
+    # 降低上限並配合滾動窗口縮短，讓費用風控更即時。
+
+    FEE_ROLLING_WINDOW = 2000
+    # 手續費滾動計算窗口 (Steps)：
+    # 縮短為約 2000 步，讓費用過熱時更快反映。
+
+    # 費用預算塑形懲罰 (remaining budget 越低懲罰越高)
+    REWARD_FEE_BUDGET_PENALTY = 2.0
