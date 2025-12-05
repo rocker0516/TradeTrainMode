@@ -38,20 +38,23 @@ class Config:
     # 單次下單動作可調整的最少倉位百分比。例如0.01等於1%，用於抑制微小動作與滑價。
     # 將其與 MIN_POSITION_CHANGE 同步
     
-    # MAX_STEP_POS_CHANGE_PCT = 0.2    
-    MAX_STEP_POS_CHANGE_PCT = 0.2
+    MAX_STEP_POS_CHANGE_PCT = 0.5
     # 單步最大倉位調整幅度：
     # 每個step允許調整的最大多/空方向總幅度佔總倉位的比例（如0.5代表一次最多改變50%）。用於避免大跳或爆倉。
+
+    # 目標持倉硬上限 (行為裁剪用)，同時配合平滑避免高頻翻倉
+    MAX_POSITION_PCT = 0.5
+    ACTION_SMOOTHING_ALPHA = 0.3  # 指數平滑係數，越小越平滑；0.3 建議值
 
     # =========================
     # 訓練設定（RL核心相關）
     # =========================
-    ACTION_REPEAT = 2
+    ACTION_REPEAT = 4
     # 動作重複次數 (Frame Skip)：
     # Agent 每做一次決策，環境會持續執行該動作 4 個 Step (約20分鐘)。
     # 這能自然降低交易頻率，讓 Agent 學習更長期的趨勢，而非追逐短期雜訊。
 
-    TOTAL_TIMESTEPS = 10_000_000      
+    TOTAL_TIMESTEPS = 10_000_000    
     # 總訓練步數：
     # 指所有環境總共經過的決策次數，包含多進程並行後的總和，規模可調(如2千萬步)。
     BATCH_SIZE = 256                    
@@ -96,6 +99,13 @@ class Config:
     LOG_INTERVAL = 50_000             
     # 記錄/顯示間隔：
     # 每當訓練總步數達到此間隔，就把目前訓練績效、損失、各種指標輸出到Console、Tensorboard或log檔。
+
+    # =========================
+    # 逐步Log設定（除錯用，預設關閉）
+    # =========================
+    STEP_LOG_ENABLED = False           # 是否記錄每一步（建議只在除錯時開啟）
+    STEP_LOG_DIR = "step_logs"         # 根目錄；每個env_id會各自一個子資料夾
+    STEP_LOG_EVERY_N = 1               # 每N步記錄一次（越大越省I/O）
 
     # =========================
     # 安全約束參數 (SAC-Lagrangian用)
@@ -144,7 +154,7 @@ class Config:
     REWARD_DD_PENALTY = 0.1          
     # 當前回撤懲罰權重(dd_penalty_coef)：
     # 每個step若有非零回撤會給予額外懲罰，鼓勵減少波動。
-    REWARD_HOLD_BONUS = 0.5       
+    REWARD_HOLD_BONUS = 0.01
     # 持倉不動獎勵(hold bonus)：
     # 微幅調升至 0.5，Action Repeat 模式下這會累積成可觀的獎勵，鼓勵"耐心"。
 
@@ -155,13 +165,6 @@ class Config:
     # 止損距離 (ATR倍數)：
     # 原預設 2.5 過於敏感，導致大部分交易被雜訊掃出場 (Avg StopLoss ~180/ep)。
     # 調寬至 5.0，給予交易更多呼吸空間，避免被隨機波動洗掉。
-
-    MIN_POSITION_CHANGE = 0.20   
-    # 最小調倉幅度 (原有參數)：
-    # 調升至 0.20 (20%)。
-    # 之前 0.05 太小，導致 Agent 仍能進行無效的微調。
-    # 現在限制：除非一次要調整總倉位的 20% 以上，否則不允許動作。
-    # 這能強制 Agent 只能做「決定性」的大動作，杜絕刷單。
 
     FEE_LIMIT_RATIO = 0.35
     # 單回合累積手續費上限比例： 0.35

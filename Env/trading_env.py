@@ -3,6 +3,9 @@ import numpy as np
 import pandas as pd
 from gymnasium import spaces
 import random
+import os
+import json
+import time
 from collections import deque
 from .trade_executor import TradeExecutor
 from .reward import create_default_calculator
@@ -33,7 +36,8 @@ class TradingEnvironment(gym.Env):
                  dd_penalty_coef: float = 0.0, hold_bonus: float = 0.0, fee_limit_ratio: float = 0.08, fee_rolling_window: int = 3000,
                  fee_budget_penalty: float = 0.0,
                  flip_budget_max: float = 1.0, flip_cost: float = 0.25, flip_threshold: float = 0.2,
-                 flip_recovery_rate: float = 0.01, flip_profit_recovery_rate: float = 0.1, stop_loss_atr: float = 2.5):
+                 flip_recovery_rate: float = 0.01, flip_profit_recovery_rate: float = 0.1, stop_loss_atr: float = 2.5,
+                 env_id: int = 0, step_log_enabled: bool = False, step_log_dir: str = "step_logs", step_log_every_n: int = 1):
         super(TradingEnvironment, self).__init__()
         
         # 只保留數值列，並確保包含必要的OHLCV列
@@ -73,6 +77,17 @@ class TradingEnvironment(gym.Env):
         self.flip_recovery_rate = float(flip_recovery_rate)
         self.flip_profit_recovery_rate = float(flip_profit_recovery_rate)
         self.fee_budget_penalty = float(fee_budget_penalty)
+        # Step logging (debug)
+        self.env_id = int(env_id)
+        self.step_log_enabled = bool(step_log_enabled)
+        self.step_log_every_n = max(1, int(step_log_every_n))
+        self.step_log_dir = step_log_dir
+        self._step_log_path = None
+        if self.step_log_enabled:
+            env_dir = os.path.join(self.step_log_dir, f"env_{self.env_id:03d}")
+            os.makedirs(env_dir, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            self._step_log_path = os.path.join(env_dir, f"steps_{timestamp}.jsonl")
         
         # 定義動作空間
         # 目標持倉比例 (-1.0 ~ 1.0)，限制小數位為1位
@@ -236,6 +251,18 @@ class TradingEnvironment(gym.Env):
             self.account_series['position_value'][self.current_step] = float(pos_value_norm)
             self.account_series['equity'][self.current_step] = float(equity_norm)
             self.account_series['wallet'][self.current_step] = float(wallet_norm)
+
+    def _log_step(self, payload: dict):
+        """將本步資訊以 JSONL 方式寫入檔案；僅除錯用。"""
+        if not (self.step_log_enabled and self._step_log_path):
+            return
+        try:
+            with open(self._step_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False))
+                f.write("\n")
+        except Exception:
+            # 除錯log失敗不應影響訓練流程
+            pass
 
     def _get_observation(self):
         if self.current_step >= len(self.df):
@@ -725,6 +752,53 @@ class TradingEnvironment(gym.Env):
         info['risk_budget'] = float(self.risk_budget)
         info['current_dd'] = current_dd
         info['remaining_fee_budget_ratio'] = remaining_fee_budget_ratio
+
+        maint_margin_ratio_log = 0.0
+        if abs(self.executor.position.size) > 0:
+            mmr = self.executor.maintenance_margin_rate
+            pos_val = abs(self.executor.position.size * current_price)
+            if new_equity > 0:
+                maint_margin_ratio_log = (pos_val * mmr) / new_equity
+        maint_margin_ratio_log = float(np.clip(maint_margin_ratio_log, 0.0, 2.0))
+
+        # 逐步記錄（可依頻率或關鍵事件寫入）
+        should_log_step = self.step_log_enabled and (
+            (self.episode_steps % self.step_log_every_n == 0) or
+            self.done or stop_loss_triggered or liq_triggered
+        )
+        if should_log_step:
+            step_payload = {
+                "env_id": self.env_id,
+                "global_step": int(self.current_step),
+                "episode_step": int(self.episode_steps),
+                "price": current_price,
+                "action_raw": float(action[0]),
+                "target_pos_pct": float(target_pos_pct),
+                "final_pos_pct": float(position_percent),
+                "position_size": float(self.executor.position.size),
+                "equity_before": float(last_equity),
+                "equity_after": float(new_equity),
+                "wallet": float(self.executor.wallet_balance),
+                "unrealized_pnl": float(unrealized_pnl),
+                "realized_pnl_step": float(realized_pnl_step),
+                "turnover_ratio": float(turnover_ratio),
+                "position_change_norm": float(position_change_norm),
+                "fees_step": float(step_fee),
+                "fees_total": float(self.executor.total_fees),
+                "rolling_fee_sum": float(self.rolling_fee_sum),
+                "fee_limit_hit": bool(self.fee_limit_hit),
+                "maint_margin_ratio": maint_margin_ratio_log,
+                "leverage_ratio": float(leverage_ratio),
+                "current_dd": float(current_dd),
+                "stop_loss_triggered": bool(stop_loss_triggered),
+                "liq_triggered": bool(liq_triggered),
+                "risk_budget": float(self.risk_budget),
+                "flip_blocked": bool(flip_blocked),
+                "reward": float(reward),
+                "done": bool(self.done),
+                "termination_reason": termination_reason if termination_reason else "",
+            }
+            self._log_step(step_payload)
 
         if self.done:
             if termination_reason:

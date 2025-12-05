@@ -10,6 +10,7 @@ from datetime import datetime
 from tqdm import tqdm
 import logging
 from collections import deque
+import shutil
 
 # Add project root to sys.path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -17,7 +18,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from Env.trading_env import TradingEnvironment
-from Env.wrappers import ActionRepeatWrapper
+from Env.wrappers import ActionRepeatWrapper, ActionSmoothClipWrapper
 from Train.sac_lagrangian import SACLagrangianAgent
 from Train.buffer import ReplayBuffer
 from Train.cost import CombinedCostCalculator
@@ -35,6 +36,19 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+def cleanup_step_logs():
+    """Clear step log directory at training start to avoid stale logs."""
+    if getattr(Config, "STEP_LOG_ENABLED", False):
+        log_dir = getattr(Config, "STEP_LOG_DIR", "step_logs")
+        if os.path.exists(log_dir):
+            try:
+                shutil.rmtree(log_dir)
+                logger.info(f"Cleared step log directory: {log_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to clear step log directory {log_dir}: {e}")
+        os.makedirs(log_dir, exist_ok=True)
 
 def make_env(rank, df, seed=0):
     def _init():
@@ -55,11 +69,22 @@ def make_env(rank, df, seed=0):
             fee_rolling_window=Config.FEE_ROLLING_WINDOW,
             fee_budget_penalty=Config.REWARD_FEE_BUDGET_PENALTY,
             random_start=True,
-            stop_loss_atr=Config.STOP_LOSS_ATR
+            stop_loss_atr=Config.STOP_LOSS_ATR,
+            env_id=rank,
+            step_log_enabled=getattr(Config, "STEP_LOG_ENABLED", False),
+            step_log_dir=getattr(Config, "STEP_LOG_DIR", "step_logs"),
+            step_log_every_n=getattr(Config, "STEP_LOG_EVERY_N", 1)
         )
         # Apply Action Repeat Wrapper
         if hasattr(Config, 'ACTION_REPEAT') and Config.ACTION_REPEAT > 1:
             env = ActionRepeatWrapper(env, repeat=Config.ACTION_REPEAT)
+
+        # 先裁剪持倉上限，再做動作平滑，降低高頻翻倉/換手
+        env = ActionSmoothClipWrapper(
+            env,
+            max_position_pct=getattr(Config, "MAX_POSITION_PCT", 0.5),
+            smoothing_alpha=getattr(Config, "ACTION_SMOOTHING_ALPHA", 0.3)
+        )
             
         env.reset(seed=seed + rank)
         return env
@@ -141,6 +166,7 @@ def format_dashboard(global_step, fps, stats, metrics, costs, num_constraints):
 
 def train():
     logger.info("Initializing Training...")
+    cleanup_step_logs()
     
     # Setup logging
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
