@@ -155,7 +155,11 @@ class TradeExecutor:
         # 以指定基準(risk_base)計算目標倉位數量
         # 若未指定，預設使用 wallet_balance (舊邏輯)
         # 但通常由外部 (Env) 傳入固定的基準金額 (例如每 288 步更新一次的餘額)
-        base_amount = risk_base if risk_base is not None else self.wallet_balance
+        if risk_base is not None:
+            base_amount = risk_base
+        else:
+            # 使用可用資金與權益的保守基準，避免未實現虧損時放大倉位
+            base_amount = min(self.wallet_balance, self.equity(current_price))
         
         # 避免 base_amount 小於等於 0
         base_amount = max(0.0, base_amount)

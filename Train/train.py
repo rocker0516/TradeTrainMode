@@ -383,7 +383,7 @@ def train():
             last_summary_step = global_step
         
         # Save Model
-        if global_step % 100_000 < num_envs: 
+        if global_step % 1_000_000 < num_envs: 
             torch.save(agent.actor.state_dict(), f"{model_dir}/actor_{global_step}.pth")
             env.save(f"{model_dir}/vec_normalize_{global_step}.pkl")
             

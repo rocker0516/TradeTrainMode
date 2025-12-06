@@ -214,6 +214,7 @@ class TradingEnvironment(gym.Env):
         
         self.episode_stop_loss_count = 0
         self.episode_liq_count = 0
+        self.stop_loss_cooldown = 0
         
         self.prev_total_fees = 0.0
         self.last_step_fee = 0.0
@@ -400,6 +401,11 @@ class TradingEnvironment(gym.Env):
     def step(self, action):
         # 限制動作範圍
         action = np.clip(action, self.action_space.low, self.action_space.high)
+
+        # 若處於止損冷卻期，強制不調倉（action -> 0），避免剛砍倉又立刻重開
+        if self.stop_loss_cooldown > 0:
+            action = np.zeros_like(action, dtype=np.float32)
+            self.stop_loss_cooldown -= 1
         
         # 取得當前市場數據
         current_data = self.df.iloc[self.current_step]
@@ -638,6 +644,11 @@ class TradingEnvironment(gym.Env):
         stop_loss_triggered = self.executor.stop_loss_triggered
         if stop_loss_triggered:
             self.episode_stop_loss_count += 1
+            # 啟動止損冷卻，下一步強制不調倉
+            from Train.config import Config  # lazy import to avoid circular at module load
+            cooldown_steps = getattr(Config, "STOP_LOSS_COOLDOWN_STEPS", 0)
+            if cooldown_steps > 0:
+                self.stop_loss_cooldown = int(cooldown_steps)
 
         # 計算結構性指標 (for reward)
         dist_to_extreme_atr = None

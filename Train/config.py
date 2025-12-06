@@ -38,13 +38,16 @@ class Config:
     # 單次下單動作可調整的最少倉位百分比。例如0.01等於1%，用於抑制微小動作與滑價。
     # 將其與 MIN_POSITION_CHANGE 同步
     
-    MAX_STEP_POS_CHANGE_PCT = 0.5
+    MAX_STEP_POS_CHANGE_PCT = 0.3
     # 單步最大倉位調整幅度：
     # 每個step允許調整的最大多/空方向總幅度佔總倉位的比例（如0.5代表一次最多改變50%）。用於避免大跳或爆倉。
 
     # 目標持倉硬上限 (行為裁剪用)，同時配合平滑避免高頻翻倉
     MAX_POSITION_PCT = 0.5
-    ACTION_SMOOTHING_ALPHA = 0.3  # 指數平滑係數，越小越平滑；0.3 建議值
+    ACTION_SMOOTHING_ALPHA = 0.2  # 指數平滑係數，越小越平滑；0.3 建議值
+
+    # 止損後的冷卻步數：在此步數內忽略 agent 動作（強制持倉為 0），避免剛砍倉又立刻重開
+    STOP_LOSS_COOLDOWN_STEPS = 1
 
     # =========================
     # 訓練設定（RL核心相關）
@@ -88,7 +91,7 @@ class Config:
     # =========================
     # 並行環境數（加速取樣效率）
     # =========================
-    NUM_ENVS = 64
+    NUM_ENVS = 40
     # 並行執行的環境數量：
     # 在取樣(training rollout)時，同時運行多組環境，能顯著加速資料生成和訓練速度。
     # 記憶體與CPU資源不足可調低本數。 (調降至 16)
@@ -96,7 +99,7 @@ class Config:
     # =========================
     # 記錄設定（進度和訓練結果列印）
     # =========================
-    LOG_INTERVAL = 50_000             
+    LOG_INTERVAL = NUM_ENVS * 1000  
     # 記錄/顯示間隔：
     # 每當訓練總步數達到此間隔，就把目前訓練績效、損失、各種指標輸出到Console、Tensorboard或log檔。
 
@@ -121,9 +124,10 @@ class Config:
     # 每種Cost的允許上限，[d1, d2, ...] 越低越嚴格，0.1意指最多允許10%的平均違規。
     # index 0 = 保證金風險（Margin Risk），違例率上限0.1
     # index 1 = 回撤風險（Drawdown Risk），違例率上限0.1
-    COST_LIMITS = [0.1, 0.2]
-    # index 0 = 保證金風險（Margin Risk），違例率上限0.1
-    # index 1 = 回撤風險（Drawdown Risk），違例率上限0.2 (放寬回撤容忍度，避免過早的高懲罰干擾學習)
+    # 將逐步比例上限換算為折現總成本尺度，避免與 Cost Q 的尺度不一致
+    COST_LIMITS = [0.1 / (1 - GAMMA), 0.2 / (1 - GAMMA)]  # 約 [10, 20]
+    # index 0 = 保證金風險（Margin Risk），折現總成本上限約 10
+    # index 1 = 回撤風險（Drawdown Risk），折現總成本上限約 20 (放寬回撤容忍度，避免過早的高懲罰干擾學習)
 
     # =========================
     # Cost損失計算相關參數
@@ -161,13 +165,13 @@ class Config:
     # =========================
     # 交易執行參數
     # =========================
-    STOP_LOSS_ATR = 5.0
+    STOP_LOSS_ATR = 10
     # 止損距離 (ATR倍數)：
     # 原預設 2.5 過於敏感，導致大部分交易被雜訊掃出場 (Avg StopLoss ~180/ep)。
     # 調寬至 5.0，給予交易更多呼吸空間，避免被隨機波動洗掉。
 
     FEE_LIMIT_RATIO = 0.35
-    # 單回合累積手續費上限比例： 0.35
+    # 單回合累積手續費上限比例： 0.35 = 35%
     # 降低上限並配合滾動窗口縮短，讓費用風控更即時。
 
     FEE_ROLLING_WINDOW = 2000
@@ -175,4 +179,4 @@ class Config:
     # 縮短為約 2000 步，讓費用過熱時更快反映。
 
     # 費用預算塑形懲罰 (remaining budget 越低懲罰越高)
-    REWARD_FEE_BUDGET_PENALTY = 2.0
+    REWARD_FEE_BUDGET_PENALTY = 3.0
