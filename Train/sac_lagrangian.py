@@ -106,6 +106,8 @@ class SACLagrangianAgent:
         return torch.cat([state_vec, lam_batch], dim=1)
 
     def select_action(self, obs: Dict[str, np.ndarray], evaluate: bool = False) -> np.ndarray:
+        # Single observation handling
+        # Add batch dimension
         price_seq = torch.FloatTensor(obs['price_seq']).unsqueeze(0).to(self.device)
         
         # Reconstruct state_vector from split observation
@@ -122,20 +124,9 @@ class SACLagrangianAgent:
         # Augment State with Lambda
         state_vec = self._augment_state(state_vec, self.lagrangian_lambda)
         
-        # NaN Check on Input
-        if torch.isnan(price_seq).any() or torch.isnan(state_vec).any():
-             print("CRITICAL: NaN detected in select_action input!")
-        
         self.actor.eval()
         with torch.no_grad():
             mean, log_std = self.actor(price_seq, state_vec)
-            
-            # NaN Check on Output
-            if torch.isnan(mean).any():
-                print("CRITICAL: NaN detected in Actor Output (Mean)!")
-                print(f"Price Seq Range: {price_seq.min()} - {price_seq.max()}")
-                print(f"State Vec Range: {state_vec.min()} - {state_vec.max()}")
-            
             std = log_std.exp()
             
             if evaluate:
@@ -147,6 +138,43 @@ class SACLagrangianAgent:
                 
         self.actor.train()
         return action.cpu().numpy()[0]
+
+    def select_action_batch(self, obs: Dict[str, np.ndarray], evaluate: bool = False) -> np.ndarray:
+        """
+        Batched action selection.
+        Input obs values are expected to be (Batch, ...)
+        """
+        price_seq = torch.FloatTensor(obs['price_seq']).to(self.device)
+        
+        # Concatenate state parts along axis 1 (Batch is 0)
+        state_parts = [
+            obs['account_state'],
+            obs['time_state'],
+            obs['rhythm_state'],
+            obs['cost_state'],
+            obs['market_state']
+        ]
+        # Check if they are numpy arrays
+        state_vec_np = np.concatenate(state_parts, axis=1)
+        state_vec = torch.FloatTensor(state_vec_np).to(self.device)
+        
+        # Augment State
+        state_vec = self._augment_state(state_vec, self.lagrangian_lambda)
+        
+        self.actor.eval()
+        with torch.no_grad():
+            mean, log_std = self.actor(price_seq, state_vec)
+            std = log_std.exp()
+            
+            if evaluate:
+                action = torch.tanh(mean)
+            else:
+                normal = torch.distributions.Normal(mean, std)
+                z = normal.sample()
+                action = torch.tanh(z)
+                
+        self.actor.train()
+        return action.cpu().numpy()
 
     def update(self, replay_buffer: ReplayBuffer, batch_size: int) -> Dict[str, float]:
         batch = replay_buffer.sample(batch_size)

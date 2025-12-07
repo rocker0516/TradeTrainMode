@@ -29,59 +29,43 @@ from .features import build_all_features, compute_market_shape_features
         max_step_pos_change_pct: 單步最大倉位變化限制 (0.0 ~ 1.0, 相對 Max Capacity)
         turnover_penalty: 換手獎勵懲罰係數
 '''
+from Train.config import Config
+
 class TradingEnvironment(gym.Env):
-    def __init__(self, df, initial_balance=10_000, transaction_fee=0.001, window_size=288, leverage=10, min_balance=100, min_trade_qty=0.001,
-                 reward_weights=None, margin_mode: str = 'isolated', reward_calculator=None, random_start: bool = False, min_episode_steps: int = 1000,
-                 min_position_change: float = 0.0, max_step_pos_change_pct: float = 1.0, turnover_penalty: float = 0.0,
-                 dd_penalty_coef: float = 0.0, hold_bonus: float = 0.0, fee_limit_ratio: float = 0.08, fee_rolling_window: int = 3000,
-                 fee_budget_penalty: float = 0.0,
-                 flip_budget_max: float = 1.0, flip_cost: float = 0.25, flip_threshold: float = 0.2,
-                 flip_recovery_rate: float = 0.01, flip_profit_recovery_rate: float = 0.1, stop_loss_atr: float = 2.5,
-                 env_id: int = 0, step_log_enabled: bool = False, step_log_dir: str = "step_logs", step_log_every_n: int = 1):
+    def __init__(self, df, env_id: int = 0, **kwargs):
         super(TradingEnvironment, self).__init__()
         
-        # 只保留數值列，並確保包含必要的OHLCV列
-        required_columns = ['open', 'high', 'low', 'close', 'volume', 'buy_volume', 'sell_volume', 'volume_ratio', 'long_short_ratio', 'trades', 'quote_volume']
+        # Override with Config to ensure consistency
+        self.initial_balance = Config.INITIAL_BALANCE
+        self.transaction_fee = Config.TRANSACTION_FEE
+        self.window_size = Config.WINDOW_SIZE
+        self.leverage = Config.LEVERAGE
+        self.min_balance = Config.MIN_BALANCE
+        self.min_episode_steps = Config.MIN_EPISODE_STEPS
+        self.min_position_change = Config.MIN_POSITION_CHANGE
+        self.max_step_pos_change_pct = Config.MAX_STEP_POS_CHANGE_PCT
+        self.fee_limit_ratio = Config.FEE_LIMIT_RATIO
+        self.fee_rolling_window = Config.FEE_ROLLING_WINDOW
+        self.stop_loss_atr = Config.STOP_LOSS_ATR
         
-        # 檢查必要列是否存在
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        if missing_columns:
-            raise ValueError(f"數據缺少必要列: {missing_columns}")
+        # Flip Strategy Params from Config
+        self.flip_budget_max = Config.FLIP_BUDGET_MAX
+        self.flip_cost = Config.FLIP_COST
+        self.flip_threshold = Config.FLIP_THRESHOLD
+        self.flip_recovery_rate = Config.FLIP_RECOVERY_RATE
+        self.flip_profit_recovery_rate = Config.FLIP_PROFIT_RECOVERY_RATE
         
-        # 過濾數值列
-        numeric_columns = df.select_dtypes(include=[np.number]).columns
-        self.df = df[numeric_columns].copy()  # 只保留數值列
-        # 嘗試保留 datetime index 若存在
-        if isinstance(df.index, pd.DatetimeIndex):
-            self.df.index = df.index
+        self.margin_mode = 'isolated' # Default to isolated
+        self.random_start = True # Default to random start
         
-        self.initial_balance = initial_balance  # 初始資金
-        self.transaction_fee = transaction_fee  # 交易手續費
-        self.window_size = window_size # 窗口大小(K線數量)
-        self.leverage = leverage    #槓桿倍數
-        self.min_balance = min_balance  # 最小資金(資金不足時強制結束)
-        self.min_trade_qty = min_trade_qty  # 最低交易數量(BTC)
-        self.margin_mode = str(margin_mode).lower()  # 保證金模式
-        self.random_start = bool(random_start)
-        self.min_episode_steps = int(min_episode_steps)
-        self.min_position_change = float(min_position_change)
-        self.max_step_pos_change_pct = float(max_step_pos_change_pct)
-        self.turnover_penalty = float(turnover_penalty)
-        self.dd_penalty_coef = float(dd_penalty_coef)
-        self.hold_bonus = float(hold_bonus)
-        self.fee_limit_ratio = float(fee_limit_ratio)
-        self.fee_rolling_window = int(fee_rolling_window)
-        self.flip_budget_max = float(flip_budget_max)
-        self.flip_cost = float(flip_cost)
-        self.flip_threshold = float(flip_threshold)
-        self.flip_recovery_rate = float(flip_recovery_rate)
-        self.flip_profit_recovery_rate = float(flip_profit_recovery_rate)
-        self.fee_budget_penalty = float(fee_budget_penalty)
-        # Step logging (debug)
+        self.min_trade_qty = 0.001 # Default hardcoded or move to config
+        
+        # Step logging
         self.env_id = int(env_id)
-        self.step_log_enabled = bool(step_log_enabled)
-        self.step_log_every_n = max(1, int(step_log_every_n))
-        self.step_log_dir = step_log_dir
+        self.step_log_enabled = Config.STEP_LOG_ENABLED
+        self.step_log_dir = Config.STEP_LOG_DIR
+        self.step_log_every_n = Config.STEP_LOG_EVERY_N
+
         self._step_log_path = None
         if self.step_log_enabled:
             env_dir = os.path.join(self.step_log_dir, f"env_{self.env_id:03d}")
@@ -100,6 +84,10 @@ class TradingEnvironment(gym.Env):
         
         # 1. 準備內部特徵（主要用於 step 邏輯，如 ATR 止損）
         self.feature_lookback = int(max(288, self.window_size))
+        
+        # --- Convert to NumPy Arrays for Fast Access in Step ---
+        # Ensure df is processed correctly
+        self.df = df.copy()
         df_num = self.df
         
         close = df_num['close'].astype(np.float64)
@@ -133,6 +121,34 @@ class TradingEnvironment(gym.Env):
         self.market_shape_df = compute_market_shape_features(self.df)
         self.price_seq_features = self.market_shape_df.shape[1]
         
+        # --- Convert to NumPy Arrays for Fast Access in Step ---
+        self._close_arr = self.df['close'].values.astype(np.float32)
+        self._high_arr = self.df['high'].values.astype(np.float32)
+        self._low_arr = self.df['low'].values.astype(np.float32)
+        self._low_arr = self.df['low'].values.astype(np.float32)
+        
+        # Time features prep
+        if 'timestamp' in self.df.columns:
+            ts = self.df['timestamp']
+            self._hour_arr = ts.dt.hour.values.astype(np.float32)
+        else:
+            self._hour_arr = np.zeros(len(self.df), dtype=np.float32)
+
+        # Market Shape DF -> NumPy
+        self._market_shape_arr = self.market_shape_df.values.astype(np.float32)
+        
+        # Internal Features -> NumPy
+        # Required columns for market state:
+        market_cols = ['dollar_volume_log_z', 'amihud_z', 'parkinson_vol_z', 'kyle_lambda_z', 'vpin_z', 'trade_entropy_z']
+        # Ensure they exist in internal_features, fill 0 if missing
+        for c in market_cols:
+            if c not in self.internal_features.columns:
+                self.internal_features[c] = 0.0
+        
+        self._market_state_features_arr = self.internal_features[market_cols].values.astype(np.float32)
+        self._atr_ratio_arr = self.internal_features['atr_ratio'].values.astype(np.float32)
+        # -----------------------------------------------------
+
         # 3. 定義觀察空間
         # price_seq: [window_size, F]
         # Split state_vector into 5 semantic groups:
@@ -145,7 +161,7 @@ class TradingEnvironment(gym.Env):
         
         self.observation_space = spaces.Dict({
             'price_seq': spaces.Box(low=-np.inf, high=np.inf, shape=(self.window_size, self.price_seq_features), dtype=np.float32),
-            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(11,), dtype=np.float32),
+            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(13,), dtype=np.float32), # Updated shape to 13
             'time_state': spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
             'rhythm_state': spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
             'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32),
@@ -159,14 +175,12 @@ class TradingEnvironment(gym.Env):
             min_trade_qty=self.min_trade_qty,
             margin_mode=self.margin_mode,
             min_position_change=self.min_position_change,
-            stop_loss_atr=stop_loss_atr
+            stop_loss_atr=self.stop_loss_atr
         )
         
-        self.reward_calculator = reward_calculator or create_default_calculator(
-            turnover_penalty=self.turnover_penalty,
-            dd_penalty_coef=self.dd_penalty_coef,
-            hold_bonus=self.hold_bonus,
-            fee_budget_penalty=self.fee_budget_penalty
+        self.reward_calculator = create_default_calculator(
+            c_liq=getattr(Config, "COST_LIQ_PENALTY", 10.0),
+            fee_limit_penalty=getattr(Config, "REWARD_FEE_LIMIT_PENALTY", 2.0)
         )
         
         self.account_series = {
@@ -235,7 +249,8 @@ class TradingEnvironment(gym.Env):
         self.last_risk_base_update_step = self.current_step
 
         # 初始化帳戶序列 (填入初始值)
-        current_price = float(self.df.iloc[self.current_step]['close'])
+        # Use NumPy array access
+        current_price = float(self._close_arr[self.current_step])
         self._update_account_series(current_price)
 
         return self._get_observation(), {}
@@ -271,10 +286,11 @@ class TradingEnvironment(gym.Env):
             
         # 1. Price Sequence (CNN Input)
         # Shape: [window_size, F]
-        price_seq = self.market_shape_df.iloc[self.current_step - self.window_size : self.current_step].values.astype(np.float32)
+        # USE NUMPY SLICING (Fast)
+        price_seq = self._market_shape_arr[self.current_step - self.window_size : self.current_step]
         
         # 2. State Features Extraction
-        current_price = float(self.df.iloc[self.current_step]['close'])
+        current_price = float(self._close_arr[self.current_step])
         equity = self.executor.equity(current_price)
         
         # --- Account Status (10) ---
@@ -324,6 +340,21 @@ class TradingEnvironment(gym.Env):
         profit_rate = (equity - self.initial_balance) / self.initial_balance if self.initial_balance > 0 else 0.0
         profit_rate = np.clip(profit_rate, -1.0, 5.0)
 
+        # Distance to Stop Loss (Risk Perception)
+        dist_to_sl_norm = 0.0
+        if abs(size) > 0 and self.executor.position.stop_loss_price > 0:
+            sl_price = self.executor.position.stop_loss_price
+            if size > 0:
+                dist = max(0.0, current_price - sl_price)
+            else:
+                dist = max(0.0, sl_price - current_price)
+            
+            # Normalize by price (Percentage Distance)
+            if current_price > 0:
+                dist_ratio = dist / current_price
+                # Scale up so 1% distance = 0.1, 10% = 1.0 (Approx)
+                dist_to_sl_norm = np.clip(dist_ratio * 10.0, 0.0, 5.0)
+
         account_state = np.array([
             pos_size_norm,
             unreal_pnl_ratio,
@@ -335,27 +366,22 @@ class TradingEnvironment(gym.Env):
             self.executor.long_entry_count * 0.01,
             self.executor.short_entry_count * 0.01,
             self.episode_stop_loss_count * 0.1,
-            self.episode_liq_count * 1.0
+            self.episode_liq_count * 1.0,
+            dist_to_sl_norm,
+            float(self.risk_budget) # Add Risk Budget to Observation
         ], dtype=np.float32)
         
         # --- Time Features (2) ---
         time_state = np.zeros(2, dtype=np.float32)
-        if 'timestamp' in self.df.columns:
-            ts = self.df.iloc[self.current_step]['timestamp']
-            # Encode Hour of Day (Cyclical)
-            hour = ts.hour
-            time_state[0] = np.sin(2 * np.pi * hour / 24.0)
-            time_state[1] = np.cos(2 * np.pi * hour / 24.0)
+        # USE NUMPY ACCESS
+        hour = self._hour_arr[self.current_step]
+        time_state[0] = np.sin(2 * np.pi * hour / 24.0)
+        time_state[1] = np.cos(2 * np.pi * hour / 24.0)
             
         # --- Market Rhythm (2) ---
-        # Use pre-calculated internal features for speed
+        # USE NUMPY ACCESS
         rhythm_state = np.zeros(2, dtype=np.float32)
-        try:
-            idx = self.current_step
-            rhythm_state[0] = self.internal_features['atr_ratio'].iloc[idx] if 'atr_ratio' in self.internal_features else 0.0
-            # Add more rhythm features if needed (e.g. volume trend)
-        except:
-            pass
+        rhythm_state[0] = self._atr_ratio_arr[self.current_step]
             
         # --- Cost/Risk State (2) ---
         cost_state = np.zeros(6, dtype=np.float32)
@@ -379,15 +405,9 @@ class TradingEnvironment(gym.Env):
         cost_state[5] = remaining_fee_budget_ratio
         
         # --- Market State (6) ---
+        # USE NUMPY ACCESS
         # [dollar_volume_log_z, amihud_z, parkinson_vol_z, kyle_lambda_z, vpin_z, trade_entropy_z]
-        market_cols = ['dollar_volume_log_z', 'amihud_z', 'parkinson_vol_z', 'kyle_lambda_z', 'vpin_z', 'trade_entropy_z']
-        market_vals = []
-        for c in market_cols:
-            val = 0.0
-            if c in self.internal_features.columns:
-                 val = self.internal_features[c].iloc[self.current_step]
-            market_vals.append(val)
-        market_state = np.array(market_vals, dtype=np.float32)
+        market_state = self._market_state_features_arr[self.current_step]
         
         return {
             'price_seq': price_seq,
@@ -407,11 +427,10 @@ class TradingEnvironment(gym.Env):
             action = np.zeros_like(action, dtype=np.float32)
             self.stop_loss_cooldown -= 1
         
-        # 取得當前市場數據
-        current_data = self.df.iloc[self.current_step]
-        current_price = float(current_data['close'])
-        current_high = float(current_data['high'])
-        current_low = float(current_data['low'])
+        # 取得當前市場數據 (USE NUMPY)
+        current_price = float(self._close_arr[self.current_step])
+        current_high = float(self._high_arr[self.current_step])
+        current_low = float(self._low_arr[self.current_step])
         
         # 更新 risk_base（每日/每一定期間更新一次基準，用於動態風控）
         risk_base = self.daily_risk_base
@@ -442,40 +461,19 @@ class TradingEnvironment(gym.Env):
                  self.risk_budget -= cost
                  flip_budget_spent = cost
              else:
-                 # Budget exhausted, try partial flip or reduce size
-                 # Allow flipping but cap the target size to what remaining budget allows?
-                 # Simplification: If budget is low, force a smaller target in the new direction 
-                 # instead of blocking completely.
+                 # --- Hard Limit Enforcement ---
+                 # 預算不足，禁止反向開倉。強制平倉(0.0)或維持原方向(current_pos_pct)?
+                 # 為了安全與明確，強制平倉是比較好的"冷靜"手段。
+                 # 或者允許平倉到 0，但不允許跨越 0 到反向。
                  
-                 # Assume cost is proportional to flip size? 
-                 # Current model: Fixed cost "flip_cost" per flip event.
-                 # If we want to allow partial flip, we need to define "partial cost" or allow flip
-                 # but with penalty.
+                 # 策略：將目標強制修正為 0.0 (平倉)
+                 target_pos_pct = 0.0
                  
-                 # New Logic: Allow flip, but limit the TARGET SIZE in the new direction
-                 # to be very small (e.g. 10% of intended) if budget is low?
-                 # Or just force target to 0.0 (Close) as before?
+                 # 標記被阻擋
+                 flip_blocked = True 
                  
-                 # Let's try: Force target to be sign(target) * min(abs(target), 0.1)
-                 # Effectively capping the new position size to 10% leverage equivalent if budget empty.
-                 # This allows direction change but prevents aggressive betting when "tired".
-                 
-                 # BUT, for simplicity and robustness based on request #2:
-                 # We want to avoid "Deadlock" (Forced to 0 forever).
-                 # Let's allow a small flip.
-                 
-                 target_sign = np.sign(target_pos_pct)
-                 # Allow at least 0.05 (5%) position in new direction
-                 safe_flip_limit = 0.05 
-                 
-                 if abs(target_pos_pct) > safe_flip_limit:
-                     target_pos_pct = target_sign * safe_flip_limit
-                     flip_blocked = True # Mark as blocked/limited
-                 
-                 # Still consume whatever small budget or set to 0?
-                 # Let's just say no cost charged if we are forced to limit?
-                 # Or charge what we have.
-                 self.risk_budget = max(0.0, self.risk_budget - 0.1 * cost) # Penalize slightly
+                 # 不扣預算(已經沒了)，也不允許動作。
+
         
         # Convert target percent to concrete position change
         # Action is target position % (-1.0 ~ 1.0) of Max Capacity (Equity * Leverage)
@@ -526,8 +524,8 @@ class TradingEnvironment(gym.Env):
         position_percent = float(final_action)
         # ----------------------------------------------
 
-        # 估算當前 ATR（用於止損計算）
-        atr_ratio = float(self.internal_features['atr_ratio'].iloc[self.current_step - 1]) if self.current_step > 0 else 0.02
+        # 估算當前 ATR（用於止損計算） (USE NUMPY)
+        atr_ratio = float(self._atr_ratio_arr[self.current_step - 1]) if self.current_step > 0 else 0.02
         atr_est = atr_ratio * current_price
 
         # 檢查是否需要更新 daily_risk_base
@@ -655,8 +653,9 @@ class TradingEnvironment(gym.Env):
         mae_atr = None
         try:
             start_idx = max(0, self.current_step - self.window_size)
-            window_high = float(np.max(self.df['high'].iloc[start_idx:self.current_step]))
-            window_low = float(np.min(self.df['low'].iloc[start_idx:self.current_step]))
+            # USE NUMPY SLICING
+            window_high = float(np.max(self._high_arr[start_idx:self.current_step]))
+            window_low = float(np.min(self._low_arr[start_idx:self.current_step]))
             
             atr_est = max(1e-8, atr_est)
             if has_position:
@@ -687,6 +686,14 @@ class TradingEnvironment(gym.Env):
             self.episode_liq_count += 1
 
         self.done = data_exhausted or balance_insufficient or liq_triggered or self.fee_limit_hit
+        
+        # 強制最小步數限制：如果還沒跑滿 min_episode_steps，除非數據沒了或錢沒了，否則不結束
+        # 讓 Agent 有機會從手續費泥淖中爬出來，而不是直接被 fee_limit 判死刑
+        if self.episode_steps < self.min_episode_steps:
+             if self.fee_limit_hit and not (data_exhausted or balance_insufficient or liq_triggered):
+                 self.done = False
+                 # 但給予懲罰警告它
+                 # (reward calculation already handles fee_limit penalty via fee_limit_hit flag)
 
         termination_reason = None
         if self.fee_limit_hit:

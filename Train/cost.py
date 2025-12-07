@@ -104,11 +104,41 @@ class DrawdownCost(BaseCostCalculator):
                  
         return max(0.0, cost)
 
+class TurnoverCost(BaseCostCalculator):
+    """
+    Cost 3: 換手成本（以倉位變動比例衡量）
+    - position_change_norm 介於 0~1，直接作為成本訊號。
+    """
+    def __init__(self, scale: float = 1.0):
+        self.scale = scale
+
+    def calculate_cost(self, info: Dict) -> float:
+        change_norm = info.get('position_change_norm', 0.0)
+        change_norm = max(0.0, float(change_norm))
+        return min(1.0, change_norm * self.scale)
+
+class FeeBudgetCost(BaseCostCalculator):
+    """
+    Cost 4: 手續費預算成本
+    - 使用剩餘預算比例 remaining_fee_budget_ratio (1 安全, 0 超限)。
+    - 成本 = shortage = max(0, 1 - remaining_ratio)
+    """
+    def __init__(self, scale: float = 1.0):
+        self.scale = scale
+
+    def calculate_cost(self, info: Dict) -> float:
+        remaining_ratio = info.get('remaining_fee_budget_ratio', 1.0)
+        remaining_ratio = float(np.clip(remaining_ratio, 0.0, 1.0))
+        shortage = 1.0 - remaining_ratio
+        return min(1.0, shortage * self.scale)
+
 class CombinedCostCalculator:
     def __init__(self, num_envs: int = 1):
         self.margin_cost = MarginRiskCost(m_safe=Config.MARGIN_SAFE, c_liq=Config.COST_LIQ_PENALTY)
         # Drawdown cost needs state (max_equity) per environment
         self.dd_costs = [DrawdownCost(warn=Config.DD_WARN, crit=Config.DD_CRIT, terminal_penalty=Config.DD_MAX_PENALTY) for _ in range(num_envs)]
+        self.turnover_cost = TurnoverCost(scale=getattr(Config, "TURNOVER_COST_SCALE", 1.0))
+        self.fee_budget_cost = FeeBudgetCost(scale=getattr(Config, "FEE_BUDGET_COST_SCALE", 1.0))
         self.num_envs = num_envs
 
     def reset(self, env_indices: List[int], initial_balances: List[float]):
@@ -123,6 +153,7 @@ class CombinedCostCalculator:
         for i, info in enumerate(infos):
             c1 = self.margin_cost.calculate_cost(info)
             c2 = self.dd_costs[i].calculate_cost(info)
-            # Cost 3 Removed
-            costs.append([c1, c2])
+            c3 = self.turnover_cost.calculate_cost(info)
+            c4 = self.fee_budget_cost.calculate_cost(info)
+            costs.append([c1, c2, c3, c4])
         return np.array(costs, dtype=np.float32)

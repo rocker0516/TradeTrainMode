@@ -54,26 +54,7 @@ def make_env(rank, df, seed=0):
     def _init():
         env = TradingEnvironment(
             df=df,
-            window_size=Config.WINDOW_SIZE,
-            leverage=Config.LEVERAGE,
-            initial_balance=Config.INITIAL_BALANCE,
-            min_balance=Config.MIN_BALANCE,
-            transaction_fee=Config.TRANSACTION_FEE,
-            min_episode_steps=Config.MIN_EPISODE_STEPS,
-            min_position_change=Config.MIN_POSITION_CHANGE,
-            max_step_pos_change_pct=Config.MAX_STEP_POS_CHANGE_PCT,
-            turnover_penalty=Config.REWARD_TURNOVER_PENALTY,
-            dd_penalty_coef=Config.REWARD_DD_PENALTY,
-            hold_bonus=Config.REWARD_HOLD_BONUS,
-            fee_limit_ratio=Config.FEE_LIMIT_RATIO,
-            fee_rolling_window=Config.FEE_ROLLING_WINDOW,
-            fee_budget_penalty=Config.REWARD_FEE_BUDGET_PENALTY,
-            random_start=True,
-            stop_loss_atr=Config.STOP_LOSS_ATR,
-            env_id=rank,
-            step_log_enabled=getattr(Config, "STEP_LOG_ENABLED", False),
-            step_log_dir=getattr(Config, "STEP_LOG_DIR", "step_logs"),
-            step_log_every_n=getattr(Config, "STEP_LOG_EVERY_N", 1)
+            env_id=rank
         )
         # Apply Action Repeat Wrapper
         if hasattr(Config, 'ACTION_REPEAT') and Config.ACTION_REPEAT > 1:
@@ -285,52 +266,48 @@ def train():
         if global_step < Config.LEARNING_STARTS:
             actions = np.array([env.action_space.sample() for _ in range(num_envs)])
         else:
-            actions = []
-            for i in range(num_envs):
-                single_obs = {k: v[i] for k, v in obs.items()}
-                actions.append(agent.select_action(single_obs))
-            actions = np.array(actions)
+            # Batch inference
+            actions = agent.select_action_batch(obs)
 
         # Step
         next_obs, rewards, dones, infos = env.step(actions)
         costs = cost_calculator.calculate_costs(infos) 
         
-        for i in range(num_envs):
-            real_next_obs = {k: next_obs[k][i] for k in next_obs}
-            if dones[i]:
-                if 'terminal_observation' in infos[i]:
-                    term_obs = infos[i]['terminal_observation']
-                    real_next_obs = term_obs
-                    
-            replay_buffer.add(
-                {k: obs[k][i] for k in obs},
-                actions[i],
-                rewards[i],
-                costs[i],
-                real_next_obs,
-                dones[i]
-            )
-            
-            episode_rewards[i] += rewards[i]
-            episode_costs[i] += costs[i]
-            episode_lengths[i] += 1
-            
-            if dones[i]:
-                # Gather stats for Dashboard
-                final_bal = infos[i].get('final_balance', Config.INITIAL_BALANCE)
-                profit_pct = infos[i].get('profit_rate', 0.0)
-                term_reason = infos[i].get('termination_reason', 'unknown')
+        # Vectorized Stats Updates
+        episode_rewards += rewards
+        episode_costs += costs
+        episode_lengths += 1
+        
+        # Prepare next observations (Handle terminal states)
+        # Conditional copy: Only deep copy if there are done envs that need patching
+        if np.any(dones):
+            real_next_obs = {k: v.copy() for k, v in next_obs.items()}
+            # Handle Dones (Logging & Term Obs Injection)
+            done_indices = np.where(dones)[0]
+            for idx in done_indices:
+                info = infos[idx]
                 
-                total_fees = infos[i].get('total_fees', 0.0)
-                long_entries = infos[i].get('long_entry_count', 0)
-                short_entries = infos[i].get('short_entry_count', 0)
-                sl_count = infos[i].get('episode_stop_loss_count', 0)
+                # Overwrite real_next_obs with terminal observation if available
+                if 'terminal_observation' in info:
+                    term_obs = info['terminal_observation']
+                    for k in real_next_obs:
+                        real_next_obs[k][idx] = term_obs[k]
+                
+                # Gather Stats
+                final_bal = info.get('final_balance', Config.INITIAL_BALANCE)
+                profit_pct = info.get('profit_rate', 0.0)
+                term_reason = info.get('termination_reason', 'unknown')
+                
+                total_fees = info.get('total_fees', 0.0)
+                long_entries = info.get('long_entry_count', 0)
+                short_entries = info.get('short_entry_count', 0)
+                sl_count = info.get('episode_stop_loss_count', 0)
                 total_trades = long_entries + short_entries
-                max_trade_loss_pct = infos[i].get('max_single_trade_loss_pct', 0.0)
+                max_trade_loss_pct = info.get('max_single_trade_loss_pct', 0.0)
 
                 stats['profits'].append(profit_pct)
                 stats['balances'].append(final_bal)
-                stats['lengths'].append(episode_lengths[i])
+                stats['lengths'].append(episode_lengths[idx])
                 stats['reasons'].append(term_reason)
                 stats['fees'].append(total_fees)
                 stats['trades'].append(total_trades)
@@ -340,20 +317,58 @@ def train():
                 stats['max_trade_losses'].append(max_trade_loss_pct)
                 
                 # TensorBoard (Per Episode)
-                writer.add_scalar("rollout/episode_reward", episode_rewards[i], global_step)
-                writer.add_scalar("rollout/episode_len", episode_lengths[i], global_step)
+                writer.add_scalar("rollout/episode_reward", episode_rewards[idx], global_step)
+                writer.add_scalar("rollout/episode_len", episode_lengths[idx], global_step)
                 writer.add_scalar("rollout/profit_rate", profit_pct, global_step)
                 writer.add_scalar("rollout/total_fees", total_fees, global_step)
                 writer.add_scalar("rollout/total_trades", total_trades, global_step)
                 writer.add_scalar("rollout/sl_count", sl_count, global_step)
                 writer.add_scalar("rollout/max_single_trade_loss", max_trade_loss_pct, global_step)
                 
-                # Reset
-                episode_rewards[i] = 0
-                episode_costs[i] = np.zeros(len(Config.COST_LIMITS))
-                episode_lengths[i] = 0
-                cost_calculator.dd_costs[i].reset(Config.INITIAL_BALANCE)
+                # Reset Trackers
+                episode_rewards[idx] = 0
+                episode_costs[idx] = np.zeros(len(Config.COST_LIMITS))
+                episode_lengths[idx] = 0
+                cost_calculator.dd_costs[idx].reset(Config.INITIAL_BALANCE)
+        else:
+             real_next_obs = next_obs
 
+        # --- Sample Filtering (Quality Control) ---
+        # 邏輯：過濾掉「無效動作」且「無顯著後果」的樣本，減少 Buffer 冗餘。
+        # 條件：|Action| < 0.01 (幾乎不動) AND |Reward| < 0.01 (無損益) AND Not Done
+        # 保留率：10% (即丟棄 90% 的這類樣本)
+        
+        # 1. 計算過濾掩碼 (True = 保留, False = 丟棄)
+        # 動作幅度極小
+        small_action = np.abs(actions).squeeze() < Config.FILTER_SMALL_ACTION_THRESHOLD
+        # 獎勵回饋極小
+        small_reward = np.abs(rewards) < Config.FILTER_SMALL_REWARD_THRESHOLD
+        # 且不是結束狀態 (結束狀態必須保留)
+        not_done = ~dones
+        
+        # 候選丟棄樣本
+        candidates = small_action & small_reward & not_done
+        
+        # 隨機保留 10% 的候選樣本 (丟棄 90%)
+        keep_probability = 1.0 - Config.FILTER_DROP_PROBABILITY
+        keep_mask = ~candidates | (np.random.random(size=len(actions)) < keep_probability)
+        
+        # 2. 根據掩碼篩選數據
+        if np.any(keep_mask):
+            # 對 Dict obs 進行篩選
+            filtered_obs = {k: v[keep_mask] for k, v in obs.items()}
+            filtered_next_obs = {k: v[keep_mask] for k, v in real_next_obs.items()}
+            
+            # Batch Add to Buffer
+            replay_buffer.add_batch(
+                filtered_obs,
+                actions[keep_mask],
+                rewards[keep_mask],
+                costs[keep_mask],
+                filtered_next_obs,
+                dones[keep_mask]
+            )
+            
         obs = next_obs
         global_step += num_envs
         
@@ -365,7 +380,9 @@ def train():
             # Update once per step (or adjust ratio)
             metrics = agent.update(replay_buffer, Config.BATCH_SIZE)
             
-            if global_step % 100 == 0:
+            # Fix logging frequency bug: ensure we log roughly every 100 steps
+            # Since global_step jumps by num_envs, strict modulo 100 might fail
+            if global_step % 100 < num_envs:
                 for k, v in metrics.items():
                     writer.add_scalar(k, v, global_step)
         

@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import random
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 
 class ReplayBuffer:
     """
@@ -73,6 +73,73 @@ class ReplayBuffer:
         
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
+
+    def add_batch(
+        self,
+        obs: Dict[str, np.ndarray],
+        action: np.ndarray,
+        reward: np.ndarray,
+        cost: np.ndarray,
+        next_obs: Dict[str, np.ndarray],
+        done: np.ndarray
+    ):
+        """
+        Batch add transitions.
+        Obs values are expected to be (batch_size, ...)
+        """
+        batch_size = len(action)
+        end_idx = self.ptr + batch_size
+        
+        if end_idx <= self.capacity:
+            indices = np.arange(self.ptr, end_idx)
+            self._store_batch(indices, obs, action, reward, cost, next_obs, done)
+            self.ptr = end_idx % self.capacity
+        else:
+            # Split into two parts (Wrap around)
+            first_part = self.capacity - self.ptr
+            indices_1 = np.arange(self.ptr, self.capacity)
+            self._store_batch(indices_1, obs, action, reward, cost, next_obs, done, 0, first_part)
+            
+            second_part = batch_size - first_part
+            indices_2 = np.arange(0, second_part)
+            self._store_batch(indices_2, obs, action, reward, cost, next_obs, done, first_part, batch_size)
+            
+            self.ptr = second_part
+            
+        self.size = min(self.size + batch_size, self.capacity)
+
+    def _store_batch(self, indices, obs, action, reward, cost, next_obs, done, start_slice=0, end_slice=None):
+        # Slicing helper
+        sl = slice(start_slice, end_slice) if end_slice is not None else slice(start_slice, None)
+        
+        self.price_seqs[indices] = obs['price_seq'][sl]
+        
+        # Batch Concatenate States
+        # Axis 1 because 0 is batch dimension
+        self.state_vecs[indices] = np.concatenate([
+            obs['account_state'][sl],
+            obs['time_state'][sl],
+            obs['rhythm_state'][sl],
+            obs['cost_state'][sl],
+            obs['market_state'][sl]
+        ], axis=1)
+        
+        self.actions[indices] = action[sl]
+        # Reshape reward/done to (B, 1) if needed
+        self.rewards[indices] = reward[sl].reshape(-1, 1)
+        self.costs[indices] = cost[sl] # Assuming cost is already (B, cost_dim)
+        
+        self.next_price_seqs[indices] = next_obs['price_seq'][sl]
+        
+        self.next_state_vecs[indices] = np.concatenate([
+            next_obs['account_state'][sl],
+            next_obs['time_state'][sl],
+            next_obs['rhythm_state'][sl],
+            next_obs['cost_state'][sl],
+            next_obs['market_state'][sl]
+        ], axis=1)
+        
+        self.dones[indices] = done[sl].reshape(-1, 1)
 
     def sample(self, batch_size: int) -> Dict[str, torch.Tensor]:
         indices = np.random.randint(0, self.size, size=batch_size)
