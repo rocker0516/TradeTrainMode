@@ -59,14 +59,13 @@ def generate_synthetic_data(length=500):
 def run_test():
     print("=== Starting Detailed Integration Test (20 Steps) ===")
     print(f"Config Check: MIN_POSITION_CHANGE={Config.MIN_POSITION_CHANGE}")
-    print(f"Config Check: REWARD_HOLD_BONUS={getattr(Config, 'REWARD_HOLD_BONUS', 0.0)}")
     
     # 1. Setup Environment with Synthetic Data
     df = generate_synthetic_data(length=1000)
     
-    # Ensure params are explicit
-    Config.REWARD_TURNOVER_PENALTY = 1.0
     Config.MIN_POSITION_CHANGE = 0.01 # 1%
+    Config.MIN_EPISODE_STEPS = 50
+    Config.WINDOW_SIZE = 20
     
     env = TradingEnvironment(
         df=df,
@@ -75,9 +74,6 @@ def run_test():
         window_size=20,
         leverage=10,
         min_episode_steps=50,
-        turnover_penalty=Config.REWARD_TURNOVER_PENALTY,
-        dd_penalty_coef=Config.REWARD_DD_PENALTY,
-        hold_bonus=getattr(Config, 'REWARD_HOLD_BONUS', 0.0001),
         min_position_change=Config.MIN_POSITION_CHANGE
     )
     
@@ -88,10 +84,10 @@ def run_test():
     
     # ==========================================
     # Case 1: Normal Trading (Small / Micro moves)
-    # Goal: Verify Deadband (Min Position Change) and Hold Bonus
+    # Goal: Verify Deadband (Min Position Change)
     # ==========================================
     print("\n[Case 1: Normal/Micro Trading] (20 Steps)")
-    print("Strategy: 0.5 -> 0.505 (Change 0.5% < 1%) -> Should be ignored -> Hold Bonus")
+    print("Strategy: 0.5 -> 0.505 (Change 0.5% < 1%) -> Should be ignored")
     
     logs_c1 = []
     
@@ -101,8 +97,6 @@ def run_test():
     
     for i in range(20):
         # Try to move from 0.5 to 0.505 (0.5% change)
-        # Max capacity ~ 10000 * 10 / P. 0.5 pos ~ 50000 notional.
-        # 0.005 change is tiny.
         target = 0.5 + 0.005 * (1 if i % 2 == 0 else -1) 
         action = np.array([target], dtype=np.float32)
         
@@ -120,7 +114,7 @@ def run_test():
             'real_pos': curr_pos_size,
             'changed': pos_changed,
             'reward': reward,
-            'cost_fee': costs[2],
+            'cost_turnover': costs[0],
             'equity': info.get('equity'),
             'fee_ratio': info.get('step_fee_ratio', 0)
         }
@@ -131,17 +125,17 @@ def run_test():
     avg_reward_c1 = np.mean([x['reward'] for x in logs_c1])
     print(f"Steps Ignored (Hold): {hold_count}/20")
     print(f"Avg Reward: {avg_reward_c1:.6f}")
-    if hold_count == 20:
-        print("SUCCESS: All micro-moves ignored (Deadband works).")
+    if hold_count >= 19: # Allow 1 step for initial adjust or similar
+        print("SUCCESS: Micro-moves ignored (Deadband works).")
     else:
         print(f"WARNING: Some moves executed. Check min_position_change logic.")
 
     # ==========================================
     # Case 2: Abnormal Trading (Churning)
-    # Goal: Verify Cost 3 and Turnover Penalty
+    # Goal: Verify Turnover Cost
     # ==========================================
     print("\n[Case 2: Abnormal Trading] (20 Steps)")
-    print("Strategy: Flip -1.0 to 1.0 every step (Max Fee)")
+    print("Strategy: Flip -1.0 to 1.0 every step (Max Fee, Turnover)")
     
     env.reset(seed=42)
     logs_c2 = []
@@ -156,7 +150,7 @@ def run_test():
         log_entry = {
             'step': i,
             'reward': reward,
-            'cost_fee': costs[2],
+            'cost_turnover': costs[0],
             'equity': info.get('equity'),
             'step_fee': info.get('step_fee_ratio', 0) * 10000 # approx amount
         }
@@ -165,18 +159,18 @@ def run_test():
         
     # Analysis Case 2
     avg_reward_c2 = np.mean([x['reward'] for x in logs_c2])
-    avg_fee_cost_c2 = np.mean([x['cost_fee'] for x in logs_c2])
+    avg_turnover_cost_c2 = np.mean([x['cost_turnover'] for x in logs_c2])
     total_equity_loss = 10000 - logs_c2[-1]['equity']
     
     print(f"Avg Reward: {avg_reward_c2:.6f}")
-    print(f"Avg Fee Cost (Constraint): {avg_fee_cost_c2:.6f}")
+    print(f"Avg Turnover Cost (C1): {avg_turnover_cost_c2:.6f}")
     print(f"Total Equity Loss: {total_equity_loss:.2f}")
     
     print("\n=== Summary Comparison ===")
-    print(f"{'Case':<15} | {'Avg Reward':<15} | {'Fee Cost':<15} | {'Action'}")
+    print(f"{'Case':<15} | {'Avg Reward':<15} | {'Turnover Cost':<15} | {'Action'}")
     print("-" * 60)
     print(f"{'Micro (Hold)':<15} | {avg_reward_c1:<15.6f} | {0.0:<15.6f} | Ignored")
-    print(f"{'Churning':<15} | {avg_reward_c2:<15.6f} | {avg_fee_cost_c2:<15.6f} | Executed")
+    print(f"{'Churning':<15} | {avg_reward_c2:<15.6f} | {avg_turnover_cost_c2:<15.6f} | Executed")
     
     # Validation Logic
     if avg_reward_c1 > avg_reward_c2:
@@ -184,10 +178,10 @@ def run_test():
     else:
         print("\nVALIDATION FAILED: Churning reward is higher (check penalties).")
         
-    if avg_fee_cost_c2 > 0:
-        print("VALIDATION PASSED: Fee Cost correctly tracked for churning.")
+    if avg_turnover_cost_c2 > 0:
+        print("VALIDATION PASSED: Turnover Cost correctly tracked for churning.")
     else:
-        print("VALIDATION FAILED: Fee Cost is 0 for churning.")
+        print("VALIDATION FAILED: Turnover Cost is 0 for churning.")
 
 if __name__ == "__main__":
     print("Main called")

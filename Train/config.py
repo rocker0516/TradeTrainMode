@@ -31,10 +31,14 @@ class Config:
     # 強制清算閾值（初始資金 1%）： 
     # 餘額低於此值立即結束該輪實驗（模擬破產）。
 
-    MIN_EPISODE_STEPS = 10000    
+    MIN_EPISODE_STEPS = 105_120
     # 每回合最小步數（保護期）：
     # 防止因軟性規則（如手續費限制）太早終止，  
     # 迫使 agent 經歷長期後果。
+
+    MAX_EPISODE_STEPS = 105_120     # 105,120 steps = 1 year
+    # 每回合最大步數（約 1 年）：
+    # 超過此步數視為自然存活（資料耗盡），不給予死亡懲罰。
     
     # =========================
     # 2. 交易物理（交易所模擬）
@@ -75,10 +79,11 @@ class Config:
     # 停損後冷卻步數： 1 = 1步
     # 強迫 N 步內動作為 0，防止報復性交易。
 
-    ACTION_SMOOTHING_ALPHA = 0.2  
-    # 動作 EMA 平滑係數： 0.2 = 20%
-    # 0.2=極平滑, 1.0=不平滑
+    ACTION_SMOOTHING_ALPHA = 0.3
+    # 動作 EMA 平滑係數： 0.3 = 30%
+    # 0.2=極平滑, 0.3=平滑, 0.5=不平滑, 0.7=極不平滑, 1.0=極不平滑
     # 降低高頻振盪。
+    #如何選擇平滑係數？ 動作變化 = 平滑係數 * 前一動作 + (1 - 平滑係數) * 當前動作
 
     # =========================
     # 4. 風險預算與手續費限制
@@ -90,7 +95,7 @@ class Config:
     FLIP_RECOVERY_RATE = 0.01 # 0.01 = 1%
     FLIP_PROFIT_RECOVERY_RATE = 0.1 # 0.1 = 10%
     
-    FEE_LIMIT_RATIO = 0.30
+    FEE_LIMIT_RATIO = 0.20
     # 手續費滾動上限（30%）： 0.30 = 30%
     # 滾動窗口內收費累計超過權益50%則強制結束該回合。
     # （之前為0.35，現放寬至0.5方便學習）
@@ -108,21 +113,22 @@ class Config:
     # =========================
     # 6. 強化學習訓練超參數（SAC）
     # =========================
-    ACTION_REPEAT = 6
+    ACTION_REPEAT = 2
     # 幀跳（frame skip）：
     # 每 6 步 agent 再做一次決策（每30分鐘作一次決策）
     # 降低高頻投注造成不穩定
 
-    TOTAL_TIMESTEPS = 20_000_000    
+    TOTAL_TIMESTEPS = 10_000_000    
     # 訓練總步數（環境互動數）
 
-    BATCH_SIZE = 256                    
+    BATCH_SIZE = 512
     # 單次 mini-batch 訓練樣本數
 
-    BUFFER_SIZE = 100_000                
+    BUFFER_SIZE = 300_000                
     # Replay Buffer 最大容量
+    # 更新比率 Batch_Size / Buffer_Size = 256 / 300,000 = 0.0008533333333333333 = 0.08533333333333333%
 
-    LEARNING_STARTS = 5_000             
+    LEARNING_STARTS = int(BUFFER_SIZE / 5)       #  BUFFER_SIZE / 5 = 60,000
     # 預熱步數：前 N 步完全隨機探索
 
     GAMMA = 0.99                         
@@ -143,38 +149,25 @@ class Config:
     # =========================
     # 7. 安全層（Lagrangian約束）
     # =========================
-    # 成本1：保證金風險（爆倉概率）
-    # 成本2：回撤風險（大幅虧損概率）
-    # 成本3：換手成本（position_change_norm）
-    # 成本4：手續費預算成本（fee budget shortage）
+    # 成本1：換手率約束 c_t(turnover) = |Δpos_notional| / notional_scale
+    # 成本2：死亡約束 c_t(death) = 1 (爆倉/強平終局), 0 其他
+    TURNOVER_TAU_MAX = 0.05   # 允許的期望換手率 (per-step)
+    DEATH_P_MAX = 0.02        # 允許的爆倉概率
     COST_LIMITS = [
-        0.1 / (1 - GAMMA),   # Margin risk
-        0.2 / (1 - GAMMA),   # Drawdown risk
-        0.05 / (1 - GAMMA),  # Turnover cost (~0.05 均值)
-        0.10 / (1 - GAMMA)   # Fee budget cost (~0.10 均值)
+        TURNOVER_TAU_MAX / (1 - GAMMA),
+        DEATH_P_MAX / (1 - GAMMA),
     ]
-    # 成本斜率微調
-    TURNOVER_COST_SCALE = 1.0
-    FEE_BUDGET_COST_SCALE = 1.0
-
-    MARGIN_SAFE = 1.2       
-    # 安全保證金緩衝區比例
-
-    COST_LIQ_PENALTY = 5.0  
-    # 爆倉時的惡性成本懲罰
-
-    DD_WARN = 0.1             
-    DD_CRIT = 0.2             
-    DD_MAX_PENALTY = 5.0      
-    # 回撤成本曲線參數
+    
+    # 成本計算相關參數
+    TURNOVER_NOTIONAL_SCALE = None  # None 則使用 equity * leverage 動態尺度
 
     # =========================
     # 8. 系統＆日誌
     # =========================
-    NUM_ENVS = 40
+    NUM_ENVS = 32
     # 並行環境數（開啟多進程）
 
-    LOG_INTERVAL = NUM_ENVS * 1000  
+    LOG_INTERVAL = MAX_EPISODE_STEPS
     # Dashboard 印出間隔（步數）
 
     STEP_LOG_ENABLED = False           
@@ -193,6 +186,5 @@ class Config:
     FILTER_SMALL_REWARD_THRESHOLD = 0.01 # 0.01 = 1%
     # 獎勵回饋閾值：絕對值小於此值視為"無顯著後果"
     
-    FILTER_DROP_PROBABILITY = 0.60 # 0.90 = 90%
+    FILTER_DROP_PROBABILITY = 0.70 # 0.90 = 90%
     # 丟棄機率：對於無效動作樣本，有 90% 機率不寫入 Buffer
-

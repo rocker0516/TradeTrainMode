@@ -243,6 +243,8 @@ class TradingEnvironment(gym.Env):
         
         self.episode_start_step = int(self.current_step)
         self.episode_max_steps = max(0, (len(self.df) - 1) - self.episode_start_step)
+        if hasattr(Config, 'MAX_EPISODE_STEPS'):
+             self.episode_max_steps = min(self.episode_max_steps, Config.MAX_EPISODE_STEPS)
         
         # 初始化 risk_base (每日更新一次的基準資金)
         self.daily_risk_base = self.initial_balance
@@ -626,12 +628,21 @@ class TradingEnvironment(gym.Env):
             self.trade_steps_buffer.append(self.current_step)
             
         turnover_ratio = 0.0
+        turnover_notional_change = 0.0
+        turnover_notional_scale = 0.0
         try:
             notional_change = position_change * current_price
-            if new_equity > 0:
-                turnover_ratio = float(abs(notional_change) / new_equity)
+            turnover_notional_change = float(abs(notional_change))
+            # 主成本：使用名義換手率 / 基準名義規模
+            base_scale = getattr(Config, "TURNOVER_NOTIONAL_SCALE", None)
+            if base_scale is None:
+                base_scale = last_equity * self.leverage
+            turnover_notional_scale = float(max(base_scale, 1e-8))
+            turnover_ratio = float(turnover_notional_change / turnover_notional_scale)
         except Exception:
             turnover_ratio = 0.0
+            turnover_notional_change = 0.0
+            turnover_notional_scale = 1.0
             
         self._last_position_size = float(self.executor.position.size)
 
@@ -643,7 +654,7 @@ class TradingEnvironment(gym.Env):
         if stop_loss_triggered:
             self.episode_stop_loss_count += 1
             # 啟動止損冷卻，下一步強制不調倉
-            from Train.config import Config  # lazy import to avoid circular at module load
+            # from Train.config import Config  # lazy import removed to avoid UnboundLocalError
             cooldown_steps = getattr(Config, "STOP_LOSS_COOLDOWN_STEPS", 0)
             if cooldown_steps > 0:
                 self.stop_loss_cooldown = int(cooldown_steps)
@@ -677,7 +688,10 @@ class TradingEnvironment(gym.Env):
         position_change_norm = abs(position_change) / max_capacity_qty if max_capacity_qty > 0 else 0.0
 
         # 檢查結束條件 (先算好以便 reward 塑形)
-        data_exhausted = self.current_step >= len(self.df) - 1
+        data_exhausted = (self.current_step >= len(self.df) - 1)
+        if hasattr(Config, 'MAX_EPISODE_STEPS') and (self.episode_steps + 1) >= Config.MAX_EPISODE_STEPS:
+            data_exhausted = True
+            
         balance_insufficient = new_equity <= self.min_balance
         liq_triggered = self.executor.liq_triggered
         stop_loss_hit = stop_loss_triggered
@@ -770,6 +784,9 @@ class TradingEnvironment(gym.Env):
         info['risk_budget'] = float(self.risk_budget)
         info['current_dd'] = current_dd
         info['remaining_fee_budget_ratio'] = remaining_fee_budget_ratio
+        info['turnover_notional_change'] = turnover_notional_change
+        info['turnover_notional_scale'] = turnover_notional_scale
+        info['done'] = bool(self.done)
 
         maint_margin_ratio_log = 0.0
         if abs(self.executor.position.size) > 0:

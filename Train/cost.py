@@ -1,159 +1,125 @@
+
 import numpy as np
-from typing import Dict, List
+from typing import Dict, List, Optional, TypedDict
 from abc import ABC, abstractmethod
 from .config import Config
 
+
+class CostSignal(TypedDict, total=False):
+    """
+    標準化成本訊號。
+    - turnover_notional_change：當前步倉位名義變化量（正值）
+    - turnover_notional_scale：規模基準；若缺省則使用 equity*leverage
+    - done/termination_reason：用於判斷是否「爆倉死亡」
+    """
+    equity: float
+    turnover_notional_change: float
+    turnover_notional_scale: float
+    done: bool
+    termination_reason: Optional[str]
+
+
 class BaseCostCalculator(ABC):
-    """
-    Abstract base class for cost calculation in SAC-Lagrangian.
-    """
+    """成本計算抽象介面。"""
+
     @abstractmethod
-    def calculate_cost(self, info: Dict) -> float:
-        pass
+    def calculate_cost(self, signal: CostSignal) -> float:
+        ...
 
-class MarginRiskCost(BaseCostCalculator):
-    """
-    Cost 1: Margin Risk / Liquidation Risk
-    
-    Formula:
-        MR = Equity / MaintenanceMargin
-        If MR >= M_safe: cost = 0
-        If 1 <= MR < M_safe: cost = (M_safe - MR) / (M_safe - 1)
-        If MR < 1 (Liq): cost = 1 + C_liq
-    """
-    def __init__(self, m_safe: float = 1.5, c_liq: float = 5.0):
-        self.m_safe = m_safe
-        self.c_liq = c_liq
-
-    def calculate_cost(self, info: Dict) -> float:
-        # Check for liquidation signal first
-        if info.get('liq_triggered', False):
-            return 1.0 + self.c_liq
-        
-        equity = info.get('equity', 0.0)
-        mm = info.get('maintenance_margin', 0.0)
-        
-        if mm <= 1e-9:
-            # No position or negligible margin -> Safe
-            return 0.0
-            
-        mr = equity / mm
-        
-        if mr >= self.m_safe:
-            return 0.0
-        elif mr >= 1.0:
-            # Linear scaling
-            return (self.m_safe - mr) / (self.m_safe - 1.0)
-        else:
-            # Should be covered by liq_triggered, but just in case
-            return 1.0 + self.c_liq
-
-class DrawdownCost(BaseCostCalculator):
-    """
-    Cost 2: Drawdown Risk (Segmented)
-    
-    Segments:
-    1. DD <= Warn: Cost = 0
-    2. Warn < DD <= Crit: Linear increase from 0 to 0.5
-    3. DD > Crit: Linear increase from 0.5 to 1.0
-    """
-    def __init__(self, warn: float = 0.1, crit: float = 0.2, terminal_penalty: float = 5.0):
-        self.warn = warn
-        self.crit = crit
-        self.terminal_penalty = terminal_penalty
-        self.max_equity = 0.0
-        self.initial_balance = 1.0 # Placeholder, updated on reset
-        
     def reset(self, initial_balance: float):
-        self.max_equity = initial_balance
-        self.initial_balance = initial_balance
-        
-    def calculate_cost(self, info: Dict) -> float:
-        equity = info.get('equity', 0.0)
-        
-        # Update running max
-        if equity > self.max_equity:
-            self.max_equity = equity
-            
-        if self.max_equity <= 0:
-            return 0.0
-            
-        dd = 1.0 - (equity / self.max_equity)
-        
-        cost = 0.0
-        if dd <= self.warn:
-            cost = 0.0
-        elif dd <= self.crit:
-            # Segment 1: Warn to Crit -> Cost 0.0 to 0.5
-            # (DD - Warn) / (Crit - Warn) * 0.5
-            if self.crit > self.warn:
-                cost = ((dd - self.warn) / (self.crit - self.warn)) * 0.5
-            else:
-                cost = 0.5 # Edge case
-        else:
-            # Segment 2: > Crit -> Cost 0.5 to 1.0
-            # 0.5 + (DD - Crit) / (1 - Crit) * 0.5
-            cost = 0.5 + ((dd - self.crit) / (1.0 - self.crit)) * 0.5
-            
-        # Terminal penalty check
-        if info.get('termination_reason') == 'liq_triggered':
-             # Extra penalty
-             if self.initial_balance > 0:
-                 penalty = self.terminal_penalty * (self.max_equity - equity) / self.initial_balance
-                 cost += penalty
-                 
-        return max(0.0, cost)
+        """預留給需狀態的成本；此處為無狀態實作。"""
+        return None
+
 
 class TurnoverCost(BaseCostCalculator):
     """
-    Cost 3: 換手成本（以倉位變動比例衡量）
-    - position_change_norm 介於 0~1，直接作為成本訊號。
+    成本線1：換手率成本
+    c_t = |Δposition_notional| / notional_scale
+    - notional_scale 預設採用 equity * leverage，亦可由外部傳入。
+    - 上限裁剪至 1.0，避免 Qc 發散。
     """
-    def __init__(self, scale: float = 1.0):
-        self.scale = scale
 
-    def calculate_cost(self, info: Dict) -> float:
-        change_norm = info.get('position_change_norm', 0.0)
-        change_norm = max(0.0, float(change_norm))
-        return min(1.0, change_norm * self.scale)
+    def __init__(self, default_scale: Optional[float] = None, clip: float = 1.0):
+        self.default_scale = default_scale
+        self.clip = clip
 
-class FeeBudgetCost(BaseCostCalculator):
+    def calculate_cost(self, signal: CostSignal) -> float:
+        change = abs(float(signal.get("turnover_notional_change", 0.0)))
+        scale = signal.get("turnover_notional_scale") or self.default_scale
+
+        if scale is None or scale <= 0:
+            equity = float(signal.get("equity", 0.0))
+            scale = max(equity * getattr(Config, "LEVERAGE", 1.0), 1e-8)
+
+        cost = change / max(scale, 1e-8)
+        if self.clip is not None:
+            cost = min(self.clip, cost)
+        return float(cost)
+
+
+class DeathCost(BaseCostCalculator):
     """
-    Cost 4: 手續費預算成本
-    - 使用剩餘預算比例 remaining_fee_budget_ratio (1 安全, 0 超限)。
-    - 成本 = shortage = max(0, 1 - remaining_ratio)
+    成本線2：爆倉/強平死亡成本
+    - 若 episode 因「爆倉/強平/資金不足/費用上限」提前結束：c_t = 1
+    - 自然結束（data_exhausted）或尚未結束：c_t = 0
+    - 採「終局給 1」的實作，簡化回填。
     """
-    def __init__(self, scale: float = 1.0):
-        self.scale = scale
 
-    def calculate_cost(self, info: Dict) -> float:
-        remaining_ratio = info.get('remaining_fee_budget_ratio', 1.0)
-        remaining_ratio = float(np.clip(remaining_ratio, 0.0, 1.0))
-        shortage = 1.0 - remaining_ratio
-        return min(1.0, shortage * self.scale)
+    def __init__(self, death_reasons: Optional[List[str]] = None):
+        self.death_reasons = set(
+            death_reasons
+            or ["liq_triggered", "balance_insufficient", "fee_limit"]
+        )
+
+    def calculate_cost(self, signal: CostSignal) -> float:
+        done = bool(signal.get("done", False))
+        if not done:
+            return 0.0
+
+        reason = signal.get("termination_reason")
+        if reason in (None, "data_exhausted"):
+            return 0.0
+
+        return 1.0 if reason in self.death_reasons else 0.0
+
 
 class CombinedCostCalculator:
-    def __init__(self, num_envs: int = 1):
-        self.margin_cost = MarginRiskCost(m_safe=Config.MARGIN_SAFE, c_liq=Config.COST_LIQ_PENALTY)
-        # Drawdown cost needs state (max_equity) per environment
-        self.dd_costs = [DrawdownCost(warn=Config.DD_WARN, crit=Config.DD_CRIT, terminal_penalty=Config.DD_MAX_PENALTY) for _ in range(num_envs)]
-        self.turnover_cost = TurnoverCost(scale=getattr(Config, "TURNOVER_COST_SCALE", 1.0))
-        self.fee_budget_cost = FeeBudgetCost(scale=getattr(Config, "FEE_BUDGET_COST_SCALE", 1.0))
+    """
+    成本計算入口：
+    - C1: turnover (換手率)
+    - C2: death (爆倉/強平提前終局)
+    """
+
+    def __init__(
+        self,
+        num_envs: int = 1,
+        turnover_scale: Optional[float] = None,
+        death_reasons: Optional[List[str]] = None,
+    ):
+        self.turnover_cost = TurnoverCost(default_scale=turnover_scale)
+        self.death_cost = DeathCost(death_reasons=death_reasons)
         self.num_envs = num_envs
 
     def reset(self, env_indices: List[int], initial_balances: List[float]):
-        for idx, balance in zip(env_indices, initial_balances):
-            self.dd_costs[idx].reset(balance)
+        # 本版成本為無狀態，預留接口以便未來擴充。
+        return None
 
     def calculate_costs(self, infos: List[Dict]) -> np.ndarray:
-        """
-        Returns shape (num_envs, num_constraints)
-        """
-        costs = []
-        for i, info in enumerate(infos):
-            c1 = self.margin_cost.calculate_cost(info)
-            c2 = self.dd_costs[i].calculate_cost(info)
-            c3 = self.turnover_cost.calculate_cost(info)
-            c4 = self.fee_budget_cost.calculate_cost(info)
-            costs.append([c1, c2, c3, c4])
+        costs: List[List[float]] = []
+
+        for info in infos:
+            equity = float(info.get("equity", 0.0))
+            signal: CostSignal = {
+                "equity": equity,
+                "turnover_notional_change": float(info.get("turnover_notional_change", 0.0)),
+                "turnover_notional_scale": float(info.get("turnover_notional_scale", 0.0)),
+                "done": bool(info.get("done", False)),
+                "termination_reason": info.get("termination_reason"),
+            }
+
+            c_turnover = self.turnover_cost.calculate_cost(signal)
+            c_death = self.death_cost.calculate_cost(signal)
+
+            costs.append([c_turnover, c_death])
+
         return np.array(costs, dtype=np.float32)

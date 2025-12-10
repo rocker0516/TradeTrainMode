@@ -25,7 +25,7 @@ class SACLagrangianAgent:
         alpha: float = 0.2,
         automatic_entropy_tuning: bool = True,
         use_lagrangian: bool = True,
-        lagrangian_lr: float = 0.05
+        lagrangian_lr: float = 0.1
     ):
         self.device = device
         self.gamma = gamma
@@ -284,9 +284,10 @@ class SACLagrangianAgent:
             # We want lambda to increase if QC > limit
             violation = qc_pi_detached - self.cost_limits
             
-            # We want to maximize: lambda * (QC - limit) -> Gradient Ascent
-            # Loss to minimize: - lambda * (QC - limit)
-            lambda_loss = - (self.log_lambda * violation).mean()
+            # Use exp(log_lambda) to keep lambda >= 0 and apply correct ascent direction
+            lambda_vals = self.log_lambda.exp()
+            # Loss to minimize: - lambda * violation (gradient ascent on lambda)
+            lambda_loss = - (lambda_vals * violation).mean()
             
             self.lambda_optimizer.zero_grad()
             lambda_loss.backward()
@@ -294,11 +295,11 @@ class SACLagrangianAgent:
             torch.nn.utils.clip_grad_norm_([self.log_lambda], 1.0)
             self.lambda_optimizer.step()
             
-            # Clamp Lambda to prevent explosion/NaN
-            # Max lambda ~ exp(3.5) = 33.1, exp(3.4) = 29.9
-            # We want max lambda approx 30.0
             with torch.no_grad():
-                self.log_lambda.data.clamp_(max=3.4)
+                # Clamp Lambda to a reasonable range to avoid numerical issues
+                # min ~ exp(-5) ~= 0.0067 (not exactly zero, keeps gradient alive)
+                # max ~ exp(5.0) ~= 148
+                self.log_lambda.data.clamp_(min=-5.0, max=5.0)
             
             self.lagrangian_lambda = self.log_lambda.exp()
 

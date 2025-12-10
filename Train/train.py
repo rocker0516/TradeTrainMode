@@ -79,8 +79,10 @@ def format_dashboard(global_step, fps, stats, metrics, costs, num_constraints):
     avg_profit = np.mean(stats['profits']) if stats['profits'] else 0.0
     std_profit = np.std(stats['profits']) if stats['profits'] else 0.0
     avg_bal = np.mean(stats['balances']) if stats['balances'] else 0.0
-    avg_len = np.mean(stats['lengths']) if stats['lengths'] else 0.0
-    
+    # 透過 ActionRepeatWrapper，環境實際步數 = 記錄的決策步數 * ACTION_REPEAT
+    avg_len = (np.mean(stats['lengths']) * Config.ACTION_REPEAT) if stats['lengths'] else 0.0
+    min_len = (np.min(stats['lengths']) * Config.ACTION_REPEAT) if stats['lengths'] else 0.0
+    max_len = (np.max(stats['lengths']) * Config.ACTION_REPEAT) if stats['lengths'] else 0.0
     avg_fees = np.mean(stats['fees']) if stats['fees'] else 0.0
     avg_trades = np.mean(stats['trades']) if stats['trades'] else 0.0
     avg_longs = np.mean(stats['longs']) if stats['longs'] else 0.0
@@ -114,7 +116,7 @@ def format_dashboard(global_step, fps, stats, metrics, costs, num_constraints):
     lines.append(f"|   Avg Profit:      {avg_profit:+.2f}%  (± {std_profit:.1f}%)".ljust(width-1) + "|")
     lines.append(f"|   Avg Balance:     {avg_bal:,.2f}".ljust(width-1) + "|")
     lines.append(f"|   Avg Fees:        {avg_fees:.2f}".ljust(width-1) + "|")
-    lines.append(f"|   Avg Ep Length:   {avg_len:.0f} steps".ljust(width-1) + "|")
+    lines.append(f"|   Avg Ep Length:   {avg_len:.0f} steps (min {min_len:.0f}, max {max_len:.0f})".ljust(width-1) + "|")
     lines.append(f"|   Avg Trades:      {avg_trades:.1f} (L:{avg_longs:.1f}/S:{avg_shorts:.1f})".ljust(width-1) + "|")
     lines.append(f"|   Avg StopLoss:    {avg_sl:.1f}".ljust(width-1) + "|")
     lines.append(f"|   Max Trade Loss:  {avg_max_trade_loss:+.2f}%".ljust(width-1) + "|")
@@ -329,7 +331,7 @@ def train():
                 episode_rewards[idx] = 0
                 episode_costs[idx] = np.zeros(len(Config.COST_LIMITS))
                 episode_lengths[idx] = 0
-                cost_calculator.dd_costs[idx].reset(Config.INITIAL_BALANCE)
+                cost_calculator.reset([idx], [Config.INITIAL_BALANCE])
         else:
              real_next_obs = next_obs
 
