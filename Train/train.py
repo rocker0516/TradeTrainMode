@@ -76,8 +76,15 @@ def format_dashboard(global_step, fps, stats, metrics, costs, num_constraints):
     width = 60
     
     # Calculate Statistics
-    avg_profit = np.mean(stats['profits']) if stats['profits'] else 0.0
-    std_profit = np.std(stats['profits']) if stats['profits'] else 0.0
+    # Avg Profit 僅計算「成功存活至資料結束」的回合
+    survived_profits = stats.get('survived_profits', [])
+    if survived_profits:
+        avg_profit = np.mean(survived_profits)
+        std_profit = np.std(survived_profits)
+    else:
+        # 若目前沒有任何存活回合，退而使用全部回合做參考（避免顯示全 0 誤導）
+        avg_profit = np.mean(stats['profits']) if stats['profits'] else 0.0
+        std_profit = np.std(stats['profits']) if stats['profits'] else 0.0
     avg_bal = np.mean(stats['balances']) if stats['balances'] else 0.0
     # 透過 ActionRepeatWrapper，環境實際步數 = 記錄的決策步數 * ACTION_REPEAT
     avg_len = (np.mean(stats['lengths']) * Config.ACTION_REPEAT) if stats['lengths'] else 0.0
@@ -240,7 +247,8 @@ def train():
     # Dashboard Stats (Rolling Window)
     stats_window = 100
     stats = {
-        'profits': deque(maxlen=stats_window),
+        'profits': deque(maxlen=stats_window),  # 所有回合的收益（含爆倉/死亡）
+        'survived_profits': deque(maxlen=stats_window),  # 僅「存活至資料結束」回合的收益
         'balances': deque(maxlen=stats_window),
         'lengths': deque(maxlen=stats_window),
         'reasons': deque(maxlen=stats_window),
@@ -308,6 +316,9 @@ def train():
                 max_trade_loss_pct = info.get('max_single_trade_loss_pct', 0.0)
 
                 stats['profits'].append(profit_pct)
+                # 僅將「成功走完資料」的回合收益，記錄到 survived_profits
+                if term_reason == 'data_exhausted':
+                    stats['survived_profits'].append(profit_pct)
                 stats['balances'].append(final_bal)
                 stats['lengths'].append(episode_lengths[idx])
                 stats['reasons'].append(term_reason)

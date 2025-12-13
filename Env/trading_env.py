@@ -47,6 +47,8 @@ class TradingEnvironment(gym.Env):
         self.fee_limit_ratio = Config.FEE_LIMIT_RATIO
         self.fee_rolling_window = Config.FEE_ROLLING_WINDOW
         self.stop_loss_atr = Config.STOP_LOSS_ATR
+        self.liq_warn_pct = getattr(Config, "LIQUIDATION_WARN_PCT", 0.005)
+        self.stop_loss_warn_pct = getattr(Config, "STOP_LOSS_WARN_PCT", 0.002)
         
         # Flip Strategy Params from Config
         self.flip_budget_max = Config.FLIP_BUDGET_MAX
@@ -56,7 +58,7 @@ class TradingEnvironment(gym.Env):
         self.flip_profit_recovery_rate = Config.FLIP_PROFIT_RECOVERY_RATE
         
         self.margin_mode = 'isolated' # Default to isolated
-        self.random_start = True # Default to random start
+        self.random_start = kwargs.get('random_start', True) # Default to random start
         
         self.min_trade_qty = 0.001 # Default hardcoded or move to config
         
@@ -152,19 +154,19 @@ class TradingEnvironment(gym.Env):
         # 3. 定義觀察空間
         # price_seq: [window_size, F]
         # Split state_vector into 5 semantic groups:
-        # 1. Account Status (11)
+        # 1. Account Status (13)
         # 2. Time Features (2)
         # 3. Market Rhythm (2)
-        # 4. Cost/Risk State (6)
-        # 5. Market State (6) -> Total 27
-        state_dim = 27
+        # 4. Cost/Risk State (14)
+        # 5. Market State (6) -> Total 37
+        state_dim = 37
         
         self.observation_space = spaces.Dict({
             'price_seq': spaces.Box(low=-np.inf, high=np.inf, shape=(self.window_size, self.price_seq_features), dtype=np.float32),
             'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(13,), dtype=np.float32), # Updated shape to 13
             'time_state': spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
             'rhythm_state': spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
-            'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32),
+            'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
             'market_state': spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32)
         })
         
@@ -173,6 +175,7 @@ class TradingEnvironment(gym.Env):
             fee_rate=self.transaction_fee,
             leverage=self.leverage,
             min_trade_qty=self.min_trade_qty,
+            maintenance_margin_rate=Config.MAINTENANCE_MARGIN_RATE,
             margin_mode=self.margin_mode,
             min_position_change=self.min_position_change,
             stop_loss_atr=self.stop_loss_atr
@@ -180,7 +183,7 @@ class TradingEnvironment(gym.Env):
         
         self.reward_calculator = create_default_calculator(
             c_liq=getattr(Config, "COST_LIQ_PENALTY", 10.0),
-            fee_limit_penalty=getattr(Config, "REWARD_FEE_LIMIT_PENALTY", 2.0)
+            base_log_ret_weight=getattr(Config, "REWARD_LOG_RET_WEIGHT", 1.0)
         )
         
         self.account_series = {
@@ -282,6 +285,64 @@ class TradingEnvironment(gym.Env):
             # 除錯log失敗不應影響訓練流程
             pass
 
+    def _compute_risk_signals(self, current_price: float) -> dict:
+        """
+        計算即時風險指標，包含強平價、距離、保證金率與止損距離。
+        返回的數值將用於觀測與 info，便於 Agent 感知風險。
+        """
+        size = float(self.executor.position.size)
+        if self.current_step >= len(self.df) or abs(size) < 1e-12 or current_price <= 0.0:
+            return {
+                'liq_price': 0.0,
+                'price_gap': 0.0,
+                'gap_pct': 0.0,
+                'abs_gap_pct': 0.0,
+                'margin_ratio': 0.0,
+                'sl_gap_pct': 0.0,
+                'stop_loss_missing': 0.0,
+                'near_liq': False,
+                'near_margin': False,
+                'near_stop': False,
+            }
+
+        liq_price = float(self.executor.get_liquidation_price(current_price))
+        price_gap = current_price - liq_price if liq_price > 0 else 0.0
+        gap_pct = price_gap / current_price
+        abs_gap_pct = abs(price_gap) / current_price
+
+        equity = float(self.executor.equity(current_price))
+        upnl = float(self.executor.unrealized_pnl(current_price))
+        unrealized_loss = max(0.0, -upnl)
+        pos_notional = abs(size) * current_price
+        margin_ratio = (equity - unrealized_loss) / pos_notional if pos_notional > 0 else 0.0
+
+        mmr = float(getattr(self.executor, "maintenance_margin_rate", 0.0))
+        near_liq = abs_gap_pct <= self.liq_warn_pct
+        near_margin = (pos_notional > 0) and (margin_ratio <= mmr if mmr > 0 else False)
+
+        stop_price = float(self.executor.position.stop_loss_price)
+        has_stop = stop_price > 0.0
+        sl_gap_pct = 0.0
+        near_stop = False
+        if has_stop:
+            sl_gap_pct = (current_price - stop_price) / current_price
+            near_stop = abs(sl_gap_pct) <= self.stop_loss_warn_pct
+
+        stop_loss_missing = float(1.0 if (pos_notional > 0 and not has_stop) else 0.0)
+
+        return {
+            'liq_price': liq_price,
+            'price_gap': price_gap,
+            'gap_pct': gap_pct,
+            'abs_gap_pct': abs_gap_pct,
+            'margin_ratio': margin_ratio,
+            'sl_gap_pct': sl_gap_pct,
+            'stop_loss_missing': stop_loss_missing,
+            'near_liq': bool(near_liq),
+            'near_margin': bool(near_margin),
+            'near_stop': bool(near_stop),
+        }
+
     def _get_observation(self):
         if self.current_step >= len(self.df):
             self.current_step = len(self.df) - 1
@@ -294,6 +355,7 @@ class TradingEnvironment(gym.Env):
         # 2. State Features Extraction
         current_price = float(self._close_arr[self.current_step])
         equity = self.executor.equity(current_price)
+        risk_signals = self._compute_risk_signals(current_price)
         
         # --- Account Status (10) ---
         size = self.executor.position.size
@@ -386,7 +448,7 @@ class TradingEnvironment(gym.Env):
         rhythm_state[0] = self._atr_ratio_arr[self.current_step]
             
         # --- Cost/Risk State (2) ---
-        cost_state = np.zeros(6, dtype=np.float32)
+        cost_state = np.zeros(14, dtype=np.float32)
         step_fee_ratio_stable = np.clip((self.last_step_fee / self.initial_balance if self.initial_balance > 0 else 0.0), 0.0, 0.1)
         # Use rolling fee ratio instead of cumulative
         rolling_fee_ratio = 0.0
@@ -405,6 +467,19 @@ class TradingEnvironment(gym.Env):
         cost_state[3] = dd
         cost_state[4] = leverage_ratio
         cost_state[5] = remaining_fee_budget_ratio
+        # 風險觀測：強平距離、保證金率與止損距離
+        gap_pct = float(np.clip(risk_signals['gap_pct'], -5.0, 5.0))
+        abs_gap_pct = float(np.clip(risk_signals['abs_gap_pct'], 0.0, 5.0))
+        margin_ratio = float(np.clip(risk_signals['margin_ratio'], 0.0, 5.0))
+        sl_gap_pct = float(np.clip(risk_signals['sl_gap_pct'], -5.0, 5.0))
+        cost_state[6] = gap_pct
+        cost_state[7] = abs_gap_pct
+        cost_state[8] = margin_ratio
+        cost_state[9] = sl_gap_pct
+        cost_state[10] = float(risk_signals['stop_loss_missing'])
+        cost_state[11] = float(risk_signals['near_liq'])
+        cost_state[12] = float(risk_signals['near_margin'])
+        cost_state[13] = float(risk_signals['near_stop'])
         
         # --- Market State (6) ---
         # USE NUMPY ACCESS
@@ -759,6 +834,7 @@ class TradingEnvironment(gym.Env):
         self.current_step += 1
         self.episode_steps += 1
 
+        risk_signals = self._compute_risk_signals(current_price)
         info = {}
         if stop_loss_hit:
             info['stop_loss_triggered'] = True
@@ -787,6 +863,18 @@ class TradingEnvironment(gym.Env):
         info['turnover_notional_change'] = turnover_notional_change
         info['turnover_notional_scale'] = turnover_notional_scale
         info['done'] = bool(self.done)
+        info['risk_signals'] = {
+            'liq_price': float(risk_signals['liq_price']),
+            'price_gap': float(risk_signals['price_gap']),
+            'gap_pct': float(risk_signals['gap_pct']),
+            'abs_gap_pct': float(risk_signals['abs_gap_pct']),
+            'margin_ratio': float(risk_signals['margin_ratio']),
+            'sl_gap_pct': float(risk_signals['sl_gap_pct']),
+            'stop_loss_missing': float(risk_signals['stop_loss_missing']),
+            'near_liq': bool(risk_signals['near_liq']),
+            'near_margin': bool(risk_signals['near_margin']),
+            'near_stop': bool(risk_signals['near_stop']),
+        }
 
         maint_margin_ratio_log = 0.0
         if abs(self.executor.position.size) > 0:

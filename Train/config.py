@@ -19,7 +19,7 @@ class Config:
     DATA_PATH = "Data/BTCUSDT_futures_volume_5years_5min.csv" 
     # 歷史 OHLCV 數據路徑（建議 5 分 K 線）
 
-    WINDOW_SIZE = 288 * 3            
+    WINDOW_SIZE = 288 * 7      
     # 觀察窗口長度（回看天數）：
     # 288 步/天 × 3 天 = 864 步。
     # 策略看到過去三天的行情做決策。
@@ -43,7 +43,7 @@ class Config:
     # =========================
     # 2. 交易物理（交易所模擬）
     # =========================
-    LEVERAGE = 10                
+    LEVERAGE = 10   
     # 槓桿倍數：
     # 放大盈虧風險，影響爆倉價。
 
@@ -54,15 +54,19 @@ class Config:
     MAINTENANCE_MARGIN_RATE = 0.005   
     # 維持保證金比率（0.5%）： 0.005 = 0.5%
     # 當 (權益/持倉價值) < 此值時，觸發爆倉。
+    LIQUIDATION_WARN_PCT = 0.005
+    # 強平距離風險門檻（價格距離 / 現價），低於此值視為高風險。
+    STOP_LOSS_WARN_PCT = 0.002
+    # 止損距離風險門檻（價格距離 / 現價），低於此值視為即將觸發。
     
     # =========================
     # 3. 策略限制（硬／軟約束）
     # =========================
-    MIN_POSITION_CHANGE = 0.05   
+    MIN_POSITION_CHANGE = 0.03
     # 最小動作死區（5%）： 0.05 = 5%
     # 小於 5% 倉位變動直接忽略（降低雜訊）。
 
-    MAX_STEP_POS_CHANGE_PCT = 0.3
+    MAX_STEP_POS_CHANGE_PCT = 0.5
     # 每步最大倉位變動（30%）： 0.3 = 30%
     # 除風險降低動作外，單步限最大增減30%倉位，防止瞬間滿倉。
 
@@ -75,11 +79,11 @@ class Config:
     # 動態停損 = 進場價 ± ATR×倍數
     # 觸及即強平（最近常用 6）
 
-    STOP_LOSS_COOLDOWN_STEPS = 4
+    STOP_LOSS_COOLDOWN_STEPS = 6
     # 停損後冷卻步數： 1 = 1步
     # 強迫 N 步內動作為 0，防止報復性交易。
 
-    ACTION_SMOOTHING_ALPHA = 0.3
+    ACTION_SMOOTHING_ALPHA = 0.5
     # 動作 EMA 平滑係數： 0.3 = 30%
     # 0.2=極平滑, 0.3=平滑, 0.5=不平滑, 0.7=極不平滑, 1.0=極不平滑
     # 降低高頻振盪。
@@ -107,13 +111,13 @@ class Config:
     # =========================
     # 5. 獎勵塑形（"教師"設計）
     # =========================
-    # 主線獎勵僅保留 log return + 終局懲罰；其他塑形移至成本線
-    REWARD_FEE_LIMIT_PENALTY = 2.0
+    # 主線獎勵僅保留 log return；其他塑形移至成本線
+    REWARD_LOG_RET_WEIGHT = 1  # 方案B：放大 log-return 影響力（預設 2x）
 
     # =========================
     # 6. 強化學習訓練超參數（SAC）
     # =========================
-    ACTION_REPEAT = 2
+    ACTION_REPEAT = 1
     # 幀跳（frame skip）：
     # 每 6 步 agent 再做一次決策（每30分鐘作一次決策）
     # 降低高頻投注造成不穩定
@@ -121,12 +125,12 @@ class Config:
     TOTAL_TIMESTEPS = 10_000_000    
     # 訓練總步數（環境互動數）
 
-    BATCH_SIZE = 512
+    BATCH_SIZE = 128
     # 單次 mini-batch 訓練樣本數
 
     BUFFER_SIZE = 300_000                
     # Replay Buffer 最大容量
-    # 更新比率 Batch_Size / Buffer_Size = 256 / 300,000 = 0.0008533333333333333 = 0.08533333333333333%
+    # 更新比率 Batch_Size / Buffer_Size = 128 / 300,000 = 0.0004266666666666667 = 0.04266666666666667%
 
     LEARNING_STARTS = int(BUFFER_SIZE / 5)       #  BUFFER_SIZE / 5 = 60,000
     # 預熱步數：前 N 步完全隨機探索
@@ -151,8 +155,8 @@ class Config:
     # =========================
     # 成本1：換手率約束 c_t(turnover) = |Δpos_notional| / notional_scale
     # 成本2：死亡約束 c_t(death) = 1 (爆倉/強平終局), 0 其他
-    TURNOVER_TAU_MAX = 0.05   # 允許的期望換手率 (per-step)
-    DEATH_P_MAX = 0.02        # 允許的爆倉概率
+    TURNOVER_TAU_MAX = 0.003   # 允許的期望換手率 (per-step)
+    DEATH_P_MAX = 0.0005        # 允許的爆倉概率
     COST_LIMITS = [
         TURNOVER_TAU_MAX / (1 - GAMMA),
         DEATH_P_MAX / (1 - GAMMA),
@@ -183,7 +187,7 @@ class Config:
     FILTER_SMALL_ACTION_THRESHOLD = MIN_POSITION_CHANGE # 0.05 = 5%
     # 動作幅度閾值：小於此值視為"不動"
     
-    FILTER_SMALL_REWARD_THRESHOLD = 0.01 # 0.01 = 1%
+    FILTER_SMALL_REWARD_THRESHOLD = 0.005 # 0.005 = 0.5%
     # 獎勵回饋閾值：絕對值小於此值視為"無顯著後果"
     
     FILTER_DROP_PROBABILITY = 0.70 # 0.90 = 90%

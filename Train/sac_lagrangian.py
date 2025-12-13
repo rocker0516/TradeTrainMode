@@ -25,7 +25,7 @@ class SACLagrangianAgent:
         alpha: float = 0.2,
         automatic_entropy_tuning: bool = True,
         use_lagrangian: bool = True,
-        lagrangian_lr: float = 0.1
+        lagrangian_lr: float = 0.5
     ):
         self.device = device
         self.gamma = gamma

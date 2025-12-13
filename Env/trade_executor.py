@@ -13,10 +13,12 @@ class PositionState:
             size: 持倉數量
             entry_price: 進場價格
             stop_loss_price: 止損價格（固定規則計算）
+            liq_price: 依維持保證金率推導的即時強平價
     '''
     size: float = 0.0  # 正數為多單，負數為空單（合約大小，資產單位）
     entry_price: float = 0.0
     stop_loss_price: float = 0.0  # 止損價格
+    liq_price: float = 0.0  # 強平價快取，便於觀測/風險提示
 
 
 class TradeExecutor:
@@ -83,6 +85,20 @@ class TradeExecutor:
         self.short_entry_count = 0
         self.max_trade_loss_pct = 0.0
 
+    def get_liquidation_price(self, current_price: float) -> float:
+        """
+        計算並快取當前持倉的強平價。
+        
+        Args:
+            current_price: 最新標記價格
+        
+        Returns:
+            最新強平價，若無倉位則回傳 0.0。
+        """
+        liq_price = self._calc_liquidation_price(current_price=current_price)
+        self.position.liq_price = float(liq_price) if liq_price is not None else 0.0
+        return self.position.liq_price
+
     # ---------- 查詢輔助方法 ----------
     # 未實現損益
     def unrealized_pnl(self, current_price: float) -> float:
@@ -145,7 +161,7 @@ class TradeExecutor:
                 return  # 止損後不再執行其他邏輯
         
         # 2. 檢查清算（極端情況兜底）
-        liq_price = self._calc_liquidation_price()
+        liq_price = self._calc_liquidation_price(current_price=current_price)
         if liq_price is not None and liq_price > 0.0:
             if (self.position.size > 0 and low <= liq_price) or (self.position.size < 0 and high >= liq_price):
                 self._close_position(liq_price)
@@ -385,29 +401,40 @@ class TradeExecutor:
         self._update_max_loss(realized_pnl, size_to_close, current_entry_price)
         
     # ---------- 風險控制與強平 ----------
-    def _calc_liquidation_price(self) -> float | None:
-        # 根據：equity(p) = wallet + (p - entry) * size
-        # 維持保證金：|size| * p * mmr
-        # 觸發強平條件：equity(p) <= maintenance_margin(p)
+    def _calc_liquidation_price(self, *, current_price: float) -> float | None:
+        """
+        以「當前價格的權益」作為全倉抵押，避免只用 wallet_balance 導致過早/過晚觸發。
+        清算條件：equity(p) <= maintenance_margin(p)
+        """
         if self.position.size == 0.0 or self.position.entry_price == 0.0:
             return None
-        m = self.maintenance_margin_rate# 維持保證金率
-        s = self.position.size# 持倉數量
-        e = self.position.entry_price# 進場價格
 
-        # 全倉使用錢包餘額作為抵押；逐倉使用倉位佔用保證金作為抵押
-        collateral = self.wallet_balance if self.margin_mode == "cross" else self.used_margin
+        m = self.maintenance_margin_rate  # 維持保證金率
+        s = self.position.size
+        e = self.position.entry_price
+
+        # 使用當前價格計算權益，避免忽略未實現損益
+        equity_now = self.equity(current_price)
+
+        # Cross：用全部 equity 作抵押；Isolated：用已用保證金 + 正向的未實現盈餘
+        if self.margin_mode == "cross":
+            collateral = equity_now
+        else:
+            collateral = self.used_margin + max(self.unrealized_pnl(current_price), 0.0)
+
+        collateral = max(0.0, collateral)
+
         if s > 0:
             denom = s * (1.0 - m)
             if denom <= 0:
                 return None
             price = (s * e - collateral) / denom
-            return max(0.0, price)
         else:
             u = abs(s)
             denom = u * (1.0 + m)
             if denom <= 0:
                 return None
             price = (collateral + u * e) / denom
-            return max(0.0, price)
+
+        return max(0.0, price)
 
