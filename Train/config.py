@@ -155,11 +155,25 @@ class Config:
     # =========================
     # 成本1：換手率約束 c_t(turnover) = |Δpos_notional| / notional_scale
     # 成本2：死亡約束 c_t(death) = 1 (爆倉/強平終局), 0 其他
+    # 成本3：保證金安全約束 c_t(margin) = max(0, m_target - equity/maint_margin)
+    # 成本4：回撤約束 c_t(dd) = max(0, dd_t - dd_soft)
+    
     TURNOVER_TAU_MAX = 0.003   # 允許的期望換手率 (per-step)
-    DEATH_P_MAX = 0.0005        # 允許的爆倉概率
+    DEATH_P_MAX = 0.0005       # 允許的爆倉概率
+    
+    # C3: Margin Safety
+    COST_MARGIN_TARGET = 1.5   # 目標維持保證金倍數 (m_target)，低於此值開始產生成本
+    MARGIN_VIOLATION_MAX = 0.05 # 允許的平均違規程度 (per-step cost budget)
+
+    # C4: Drawdown Control
+    COST_DD_SOFT_LIMIT = 0.20  # 軟性回撤限制 (dd_soft)，超過 20% 開始產生成本
+    DD_VIOLATION_MAX = 0.05    # 允許的平均違規程度 (per-step cost budget)
+
     COST_LIMITS = [
         TURNOVER_TAU_MAX / (1 - GAMMA),
         DEATH_P_MAX / (1 - GAMMA),
+        MARGIN_VIOLATION_MAX / (1 - GAMMA),
+        DD_VIOLATION_MAX / (1 - GAMMA),
     ]
     
     # 成本計算相關參數
