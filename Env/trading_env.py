@@ -774,20 +774,10 @@ class TradingEnvironment(gym.Env):
         if liq_triggered:
             self.episode_liq_count += 1
 
-        self.done = data_exhausted or balance_insufficient or liq_triggered or self.fee_limit_hit
+        self.done = data_exhausted or balance_insufficient or liq_triggered
         
-        # 強制最小步數限制：如果還沒跑滿 min_episode_steps，除非數據沒了或錢沒了，否則不結束
-        # 讓 Agent 有機會從手續費泥淖中爬出來，而不是直接被 fee_limit 判死刑
-        if self.episode_steps < self.min_episode_steps:
-             if self.fee_limit_hit and not (data_exhausted or balance_insufficient or liq_triggered):
-                 self.done = False
-                 # 但給予懲罰警告它
-                 # (reward calculation already handles fee_limit penalty via fee_limit_hit flag)
-
         termination_reason = None
-        if self.fee_limit_hit:
-            termination_reason = 'fee_limit'
-        elif data_exhausted:
+        if data_exhausted:
             termination_reason = 'data_exhausted'
         elif liq_triggered:
             termination_reason = 'liq_triggered'

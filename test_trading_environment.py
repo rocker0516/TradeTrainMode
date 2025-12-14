@@ -1,3 +1,4 @@
+print("STARTING TEST SCRIPT", flush=True)
 """
 交易環境完整測試腳本
 測試所有功能包括：基本交易、止盈止損、最低交易金額、觀察空間等
@@ -5,8 +6,15 @@
 import numpy as np
 import pandas as pd
 from Env.trading_env import TradingEnvironment
+from Train.config import Config
 import matplotlib.pyplot as plt
 import pytest
+
+# Patch Config for testing with small data
+Config.MIN_EPISODE_STEPS = 50
+Config.WINDOW_SIZE = 20 # Reduce window size for small data tests
+Config.TRANSACTION_FEE = 0.001 # Default small fee for tests
+Config.FEE_LIMIT_RATIO = 1.0 # Loose limit so tests don't die unexpectedly
 
 def create_test_data(n_samples=2000):
     """創建模擬的交易數據"""
@@ -91,7 +99,12 @@ def test_basic_functionality():
     
     # 重置環境
     obs, info = env.reset()
-    print(f"✅ 環境重置成功，觀察空間形狀: {obs.shape}")
+    if isinstance(obs, dict):
+         print(f"✅ 環境重置成功，觀察空間為 Dict")
+         for k, v in obs.items():
+             print(f"   - {k}: {v.shape}")
+    else:
+         print(f"✅ 環境重置成功，觀察空間形狀: {obs.shape}")
     
     return env, obs
 
@@ -148,6 +161,12 @@ def test_stop_loss_take_profit():
     print("\n🛡️ 止盈止損測試")
     print("-" * 40)
     
+    # Save original min steps
+    original_min_steps = Config.MIN_EPISODE_STEPS
+    original_window_size = Config.WINDOW_SIZE
+    Config.MIN_EPISODE_STEPS = 5 # Small enough for this test
+    Config.WINDOW_SIZE = 5
+    
     # 創建特殊的測試數據（價格大幅波動）
     base_price = 50000
     prices = [base_price]
@@ -183,8 +202,8 @@ def test_stop_loss_take_profit():
     
     print(f"開倉後:")
     print(f"   持倉: {env.btc_held:.6f} BTC")
-    print(f"   止盈價: ${env.take_profit_price:.2f}")
-    print(f"   止損價: ${env.stop_loss_price:.2f}")
+    print(f"   止盈價: ${env.take_profit_price if hasattr(env, 'take_profit_price') else 'N/A'}")
+    print(f"   止損價: ${env.executor.position.stop_loss_price if hasattr(env.executor.position, 'stop_loss_price') else 'N/A'}")
     
     # 繼續執行幾步，觀察止盈止損是否觸發
     for step in range(5):
@@ -200,6 +219,9 @@ def test_stop_loss_take_profit():
         if env.btc_held == 0:
             print("   ✅ 止盈/止損已觸發，倉位已平倉")
             break
+            
+    Config.MIN_EPISODE_STEPS = original_min_steps
+    Config.WINDOW_SIZE = original_window_size
 
 def test_minimum_trade_amount():
     """測試最低交易數量限制"""
@@ -244,25 +266,14 @@ def test_observation_space():
     
     obs, _ = env.reset()
     
-    print(f"觀察空間形狀: {obs.shape}")
-    print(f"觀察空間範圍: [{obs.min():.3f}, {obs.max():.3f}]")
-    
-    # 檢查是否有NaN或無限值
-    has_nan = np.isnan(obs).any()
-    has_inf = np.isinf(obs).any()
-    
-    print(f"包含NaN: {'是' if has_nan else '否'}")
-    print(f"包含無限值: {'是' if has_inf else '否'}")
-    
-    # 檢查各個特徵的統計信息
-    print(f"\n特徵統計:")
-    feature_names = ['Open', 'High', 'Low', 'Close', 'Volume', '持倉', '持倉價值', '總資產', '資金']
-    
-    for i in range(obs.shape[0]):
-        feature_data = obs[i]
-        print(f"   {feature_names[i] if i < len(feature_names) else f'特徵{i}'}: "
-              f"均值={feature_data.mean():.3f}, "
-              f"標準差={feature_data.std():.3f}")
+    # env.observation_space is a Dict now
+    print(f"觀察空間類型: {type(obs)}")
+    if isinstance(obs, dict):
+         for key, val in obs.items():
+             print(f"   Key: {key}, Shape: {val.shape}, Range: [{val.min():.3f}, {val.max():.3f}]")
+    else:
+        print(f"觀察空間形狀: {obs.shape}")
+        print(f"觀察空間範圍: [{obs.min():.3f}, {obs.max():.3f}]")
 
 def run_full_episode():
     """運行完整回合測試"""
