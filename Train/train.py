@@ -71,7 +71,7 @@ def make_env(rank, df, seed=0):
         return env
     return _init
 
-def format_dashboard(global_step, fps, stats, metrics, costs, num_constraints):
+def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, num_constraints):
     """Generates a clean periodic dashboard string"""
     width = 60
     
@@ -102,7 +102,7 @@ def format_dashboard(global_step, fps, stats, metrics, costs, num_constraints):
     wins = [p for p in stats['profits'] if p > 0]
     win_rate = (len(wins) / len(stats['profits']) * 100) if stats['profits'] else 0.0
     
-    total_eps = len(stats['reasons'])
+    total_eps_in_window = len(stats['reasons'])
     reason_counts = {}
     
     # Explicitly track these reasons to ensure they show up even if 0%
@@ -116,7 +116,7 @@ def format_dashboard(global_step, fps, stats, metrics, costs, num_constraints):
     # Format String
     lines = []
     lines.append("-" * width)
-    lines.append(f"| Step: {global_step:,} | Progress: {global_step/Config.TOTAL_TIMESTEPS:.1%} | FPS: {int(fps)}".ljust(width-1) + "|")
+    lines.append(f"| Step: {global_step:,} | Ep: {total_episodes:,} | Prog: {global_step/Config.TOTAL_TIMESTEPS:.1%} | FPS: {int(fps)}".ljust(width-1) + "|")
     lines.append("-" * width)
     
     lines.append(f"| Account Performance (Last {len(stats['profits'])} Episodes):".ljust(width-1) + "|")# Last {len(stats['profits'])} Episodes 是最後幾集的平均收益
@@ -133,7 +133,7 @@ def format_dashboard(global_step, fps, stats, metrics, costs, num_constraints):
     lines.append("| Termination Reasons:".ljust(width-1) + "|")
     for reason in sorted(known_reasons):
         count = reason_counts.get(reason, 0)
-        pct = (count / total_eps * 100) if total_eps > 0 else 0
+        pct = (count / total_eps_in_window * 100) if total_eps_in_window > 0 else 0
         lines.append(f"|   {reason.ljust(15)}: {pct:.1f}%".ljust(width-1) + "|")
     lines.append("|".ljust(width-1) + "|")
 
@@ -263,6 +263,7 @@ def train():
     logger.info("Starting training loop...")
     
     global_step = 0
+    total_episodes = 0
     last_summary_step = 0
     summary_interval = Config.LOG_INTERVAL # Print dashboard every N steps
     start_time = time.time()
@@ -294,6 +295,7 @@ def train():
             real_next_obs = {k: v.copy() for k, v in next_obs.items()}
             # Handle Dones (Logging & Term Obs Injection)
             done_indices = np.where(dones)[0]
+            total_episodes += len(done_indices)
             for idx in done_indices:
                 info = infos[idx]
                 
@@ -403,7 +405,7 @@ def train():
         if global_step - last_summary_step >= summary_interval: #每隔N步更新一次dashboard
             elapsed = time.time() - start_time
             fps = global_step / elapsed
-            dashboard = format_dashboard(global_step, fps, stats, metrics, episode_costs[0], len(Config.COST_LIMITS))
+            dashboard = format_dashboard(global_step, total_episodes, fps, stats, metrics, episode_costs[0], len(Config.COST_LIMITS))
             
             # Clear pbar, print dashboard, then refresh pbar
             pbar.clear()

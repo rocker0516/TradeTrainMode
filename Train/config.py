@@ -31,12 +31,12 @@ class Config:
     # 強制清算閾值（初始資金 1%）： 
     # 餘額低於此值立即結束該輪實驗（模擬破產）。
 
-    MIN_EPISODE_STEPS = 105_120
+    MIN_EPISODE_STEPS = 105_120 / 12
     # 每回合最小步數（保護期）：
     # 防止因軟性規則（如手續費限制）太早終止，  
     # 迫使 agent 經歷長期後果。
 
-    MAX_EPISODE_STEPS = 105_120     # 105,120 steps = 1 year
+    MAX_EPISODE_STEPS = 105_120 / 12     # 105,120 steps = 1 year
     # 每回合最大步數（約 1 年）：
     # 超過此步數視為自然存活（資料耗盡），不給予死亡懲罰。
     
@@ -47,8 +47,8 @@ class Config:
     # 槓桿倍數：
     # 放大盈虧風險，影響爆倉價。
 
-    TRANSACTION_FEE = 0.04       
-    # 交易手續費率（0.04%=Taker費率）：
+    TRANSACTION_FEE = 0.005       
+    # 交易手續費率（0.005%=Taker費率）：
     # 任意開倉／平倉需支付（倉位*價格*費率）
 
     MAINTENANCE_MARGIN_RATE = 0.005   
@@ -99,6 +99,8 @@ class Config:
     FLIP_RECOVERY_RATE = 0.01 # 0.01 = 1%
     FLIP_PROFIT_RECOVERY_RATE = 0.1 # 0.1 = 10%
     
+    # 是否啟用手續費上限約束（若關閉，相關檢查與終止條件無效化）
+    FEE_LIMIT_ENABLED = False
     FEE_LIMIT_RATIO = 0.20
     # 手續費滾動上限（30%）： 0.30 = 30%
     # 滾動窗口內收費累計超過權益50%則強制結束該回合。
@@ -125,7 +127,7 @@ class Config:
     TOTAL_TIMESTEPS = 10_000_000    
     # 訓練總步數（環境互動數）
 
-    BATCH_SIZE = 128
+    BATCH_SIZE = 64
     # 單次 mini-batch 訓練樣本數
 
     BUFFER_SIZE = 300_000                
@@ -185,7 +187,7 @@ class Config:
     NUM_ENVS = 32
     # 並行環境數（開啟多進程）
 
-    LOG_INTERVAL = MAX_EPISODE_STEPS
+    LOG_INTERVAL = MAX_EPISODE_STEPS * 10
     # Dashboard 印出間隔（步數）
 
     STEP_LOG_ENABLED = False           

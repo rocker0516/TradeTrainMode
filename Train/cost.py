@@ -64,15 +64,16 @@ class TurnoverCost(BaseCostCalculator):
 class DeathCost(BaseCostCalculator):
     """
     成本線2：爆倉/強平死亡成本
-    - 若 episode 因「爆倉/強平/資金不足/費用上限」提前結束：c_t = 1
+    - 若 episode 因「爆倉/強平/資金不足」提前結束：c_t = 1
     - 自然結束（data_exhausted）或尚未結束：c_t = 0
     - 採「終局給 1」的實作，簡化回填。
     """
 
     def __init__(self, death_reasons: Optional[List[str]] = None):
+        # fee_limit 不再列入死亡原因，避免將手續費上限當作硬性成本線
         self.death_reasons = set(
             death_reasons
-            or ["liq_triggered", "balance_insufficient", "fee_limit"]
+            or ["liq_triggered", "balance_insufficient"]
         )
 
     def calculate_cost(self, signal: CostSignal) -> float:

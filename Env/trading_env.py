@@ -44,6 +44,7 @@ class TradingEnvironment(gym.Env):
         self.min_episode_steps = Config.MIN_EPISODE_STEPS
         self.min_position_change = Config.MIN_POSITION_CHANGE
         self.max_step_pos_change_pct = Config.MAX_STEP_POS_CHANGE_PCT
+        self.fee_limit_enabled = getattr(Config, "FEE_LIMIT_ENABLED", True)
         self.fee_limit_ratio = Config.FEE_LIMIT_RATIO
         self.fee_rolling_window = Config.FEE_ROLLING_WINDOW
         self.stop_loss_atr = Config.STOP_LOSS_ATR
@@ -456,10 +457,13 @@ class TradingEnvironment(gym.Env):
             rolling_fee_ratio = self.rolling_fee_sum / equity
         rolling_fee_ratio = np.clip(rolling_fee_ratio, 0.0, 1.0)
         # Remaining fee budget ratio (1 means full budget; 0 means exceeded)
-        safe_equity = max(equity, self.initial_balance * 0.5)
-        limit_amount = max(1e-8, safe_equity * self.fee_limit_ratio)
-        remaining_fee_budget_ratio = 1.0 - (self.rolling_fee_sum / limit_amount)
-        remaining_fee_budget_ratio = float(np.clip(remaining_fee_budget_ratio, 0.0, 1.0))
+        if self.fee_limit_enabled:
+            safe_equity = max(equity, self.initial_balance * 0.5)
+            limit_amount = max(1e-8, safe_equity * self.fee_limit_ratio)
+            remaining_fee_budget_ratio = 1.0 - (self.rolling_fee_sum / limit_amount)
+            remaining_fee_budget_ratio = float(np.clip(remaining_fee_budget_ratio, 0.0, 1.0))
+        else:
+            remaining_fee_budget_ratio = 1.0
 
         cost_state[0] = step_fee_ratio_stable
         cost_state[1] = rolling_fee_ratio
@@ -639,15 +643,14 @@ class TradingEnvironment(gym.Env):
             _, old_fee = self.fee_history.popleft()
             self.rolling_fee_sum -= old_fee
             
-        # Check Fee Limit against Current Equity
-        # Use max(equity, initial_balance) to avoid instant death if equity drops slightly, 
-        # or just equity to enforce survival? 
-        # Let's use current equity to prevent churning when broke.
-        # FIX #4: Use Floor to prevent fee limit trap at low equity
-        safe_equity = max(self.executor.equity(current_price), self.initial_balance * 0.5)
-        limit_amount = safe_equity * self.fee_limit_ratio
-        
-        self.fee_limit_hit = self.rolling_fee_sum >= limit_amount
+        # Fee limit can be disabled; when disabled, fee_limit_hit remains False
+        if self.fee_limit_enabled:
+            # Check Fee Limit against Current Equity
+            safe_equity = max(self.executor.equity(current_price), self.initial_balance * 0.5)
+            limit_amount = safe_equity * self.fee_limit_ratio
+            self.fee_limit_hit = self.rolling_fee_sum >= limit_amount
+        else:
+            self.fee_limit_hit = False
 
         # 同步帳戶狀態
         new_equity = self.executor.equity(current_price)
@@ -785,10 +788,13 @@ class TradingEnvironment(gym.Env):
             termination_reason = 'balance_insufficient'
 
         # Remaining fee budget ratio for reward shaping
-        safe_equity_for_limit = max(new_equity, self.initial_balance * 0.5)
-        limit_amount = max(1e-8, safe_equity_for_limit * self.fee_limit_ratio)
-        remaining_fee_budget_ratio = 1.0 - (self.rolling_fee_sum / limit_amount)
-        remaining_fee_budget_ratio = float(np.clip(remaining_fee_budget_ratio, 0.0, 1.0))
+        if self.fee_limit_enabled:
+            safe_equity_for_limit = max(new_equity, self.initial_balance * 0.5)
+            limit_amount = max(1e-8, safe_equity_for_limit * self.fee_limit_ratio)
+            remaining_fee_budget_ratio = 1.0 - (self.rolling_fee_sum / limit_amount)
+            remaining_fee_budget_ratio = float(np.clip(remaining_fee_budget_ratio, 0.0, 1.0))
+        else:
+            remaining_fee_budget_ratio = 1.0
 
         step_fee_ratio = step_fee / self.initial_balance if self.initial_balance > 0 else 0.0
 
