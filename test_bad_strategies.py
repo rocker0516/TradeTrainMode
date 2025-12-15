@@ -7,6 +7,36 @@ import math
 from Env.trading_env import TradingEnvironment
 
 # -----------------------------------------------------------------------------
+# Observation compatibility helpers
+# -----------------------------------------------------------------------------
+def _get_equity_ratio(obs: dict) -> float:
+    """
+    兼容舊/新 observation 格式：
+    - 新版 env 回傳 Dict observation（account_state/time_state/...）。
+    - 舊版策略腳本曾使用 obs['state_vector']。
+
+    Returns:
+        equity_ratio（以 initial_balance 正規化）。
+    """
+    if isinstance(obs, dict) and "account_state" in obs:
+        return float(obs["account_state"][2])
+    return float(obs["state_vector"][3])
+
+
+def _get_unreal_pnl_ratio(obs: dict) -> float:
+    """回傳未實現損益比例（normalized）。"""
+    if isinstance(obs, dict) and "account_state" in obs:
+        return float(obs["account_state"][1])
+    return float(obs["state_vector"][2])
+
+
+def _get_pos_size_norm(obs: dict) -> float:
+    """回傳倉位大小正規化值（normalized）。"""
+    if isinstance(obs, dict) and "account_state" in obs:
+        return float(obs["account_state"][0])
+    return float(obs["state_vector"][1])
+
+# -----------------------------------------------------------------------------
 # Helper: Create Synthetic Data
 # -----------------------------------------------------------------------------
 def create_test_data(n_samples=5000):
@@ -93,7 +123,7 @@ def strat_martingale(obs, ctx):
     # Needs to track equity. If loss, double pos.
     # Env doesn't easily give "last trade result" in obs directly without tracking.
     # We approximate: if equity drops, increase leverage.
-    equity_ratio = obs['state_vector'][3] # equity_ratio
+    equity_ratio = _get_equity_ratio(obs)
     # If equity < initial (ratio < 1), increase leverage.
     base_lev = 0.1
     if equity_ratio < 1.0:
@@ -106,7 +136,7 @@ def strat_martingale(obs, ctx):
 # 7. Reverse Martingale Fail
 def strat_reverse_martingale_fail(obs, ctx):
     # Earn -> cut (small pos), Lose -> add (large pos)
-    equity_ratio = obs['state_vector'][3]
+    equity_ratio = _get_equity_ratio(obs)
     if equity_ratio > 1.0:
         return 0.1 # Winning -> reduce
     else:
@@ -223,8 +253,8 @@ def strat_pointless_flipping(obs, ctx):
 # 20. Micro-profit Taker
 def strat_micro_profit_taker(obs, ctx):
     # If profit > 0, close. If loss, hold.
-    unreal_pnl = obs['state_vector'][2] # unreal_pnl_ratio
-    current_pos = obs['state_vector'][1] # size norm (approx)
+    unreal_pnl = _get_unreal_pnl_ratio(obs)
+    current_pos = _get_pos_size_norm(obs)
     
     # We need direction.
     # If we have pnl > small positive, close (0.0).
@@ -432,7 +462,7 @@ def strat_data_loss(obs, ctx):
 # 48. Tilt
 def strat_tilt(obs, ctx):
     # If loss, random large moves
-    equity_ratio = obs['state_vector'][3]
+    equity_ratio = _get_equity_ratio(obs)
     if equity_ratio < 0.9:
         return np.random.choice([-1.0, 1.0]) # TILT!
     return 0.5

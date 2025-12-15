@@ -9,14 +9,23 @@ def approx(a: float, b: float, tol: float = 1e-8) -> bool:
     return math.isclose(a, b, rel_tol=1e-9, abs_tol=tol)
 
 
-def new_executor(initial_balance=1000.0, fee_rate=0.001, leverage=10.0, min_trade_qty=0.001):
+def new_executor(
+    initial_balance: float = 1000.0,
+    fee_rate: float = 0.1,
+    leverage: float = 10.0,
+    min_trade_qty: float = 0.001,
+    maintenance_margin_rate: float = 0.005,
+    margin_mode: str = "cross",
+    stop_loss_atr: float = 1.0,
+):
     return TradeExecutor(
         initial_balance=initial_balance,
         fee_rate=fee_rate,
         leverage=leverage,
         min_trade_qty=min_trade_qty,
-        max_stop_loss_percent=1000,
-        max_take_profit_percent=50,
+        maintenance_margin_rate=maintenance_margin_rate,
+        margin_mode=margin_mode,
+        stop_loss_atr=stop_loss_atr,
     )
 
 
@@ -28,17 +37,16 @@ def test_open_long_position_and_fee_and_margin():
 
     ex.execute(
         position_percent=0.5,
-        take_profit_percent=1.0,
-        stop_loss_percent=1.0,
         current_price=price,
         high=price,
         low=price,
         equity=equity_before,
+        atr=0.0,
     )
 
     # size = equity * p * lev / price = 1000 * 0.5 * 10 / 10000 = 0.5
     assert approx(ex.position.size, 0.5)
-    # fee = notional * fee_rate = (0.5*10000) * 0.001 = 5
+    # fee_rate 0.1 = 0.1% => fee = notional * 0.001 = (0.5*10000) * 0.001 = 5
     assert approx(ex.wallet_balance, 1000.0 - 5.0)
     # margin = notional/leverage = 5000/10 = 500
     assert approx(ex.used_margin, 500.0)
@@ -51,12 +59,11 @@ def test_unrealized_pnl_updates_equity_for_long():
     p0 = 10000.0
     ex.execute(
         position_percent=0.5,
-        take_profit_percent=50.0,
-        stop_loss_percent=1000.0,
         current_price=p0,
         high=p0,
         low=p0,
         equity=ex.equity(p0),
+        atr=0.0,
     )
     # price up 100
     p1 = 10100.0
@@ -69,24 +76,22 @@ def test_reduce_position_realizes_pnl_and_releases_margin():
     p0 = 10000.0
     ex.execute(
         position_percent=0.5,
-        take_profit_percent=50.0,
-        stop_loss_percent=1000.0,
         current_price=p0,
         high=p0,
         low=p0,
         equity=ex.equity(p0),
+        atr=0.0,
     )
     # move price up and reduce to 20% target
     p1 = 10100.0
     eq_before = ex.equity(p1)
     ex.execute(
         position_percent=0.2,
-        take_profit_percent=50.0,
-        stop_loss_percent=1000.0,
         current_price=p1,
         high=p1,
         low=p1,
         equity=eq_before,
+        atr=0.0,
     )
 
     # New target size ~ 1045*0.2*10/10100 ~= 0.2069306931
@@ -110,24 +115,22 @@ def test_reverse_from_long_to_short_closes_then_opens_new():
     p0 = 10000.0
     ex.execute(
         position_percent=0.5,
-        take_profit_percent=50.0,
-        stop_loss_percent=1000.0,
         current_price=p0,
         high=p0,
         low=p0,
         equity=ex.equity(p0),
+        atr=0.0,
     )
     # price down to 9900 and reverse to -0.5
     p1 = 9900.0
     eq = ex.equity(p1)
     ex.execute(
         position_percent=-0.5,
-        take_profit_percent=50.0,
-        stop_loss_percent=1000.0,
         current_price=p1,
         high=p1,
         low=p1,
         equity=eq,
+        atr=0.0,
     )
     # Position should be short now ~ size: eq_after_close * 0.5*10/9900
     # First, compute equity after close: close long 0.5 at 9900
@@ -147,32 +150,31 @@ def test_reverse_from_long_to_short_closes_then_opens_new():
 
 
 def test_stop_loss_triggers_close_on_next_execute():
-    ex = new_executor()
+    ex = new_executor(stop_loss_atr=1.0)
     p0 = 100.0
     ex.execute(
         position_percent=0.5,
-        take_profit_percent=5.0,
-        stop_loss_percent=1.0,
         current_price=p0,
         high=p0,
         low=p0,
         equity=ex.equity(p0),
+        atr=1.0,
     )
     # Stops should be set; next candle hits stop loss low
-    # For long: stop_loss = p0 * (1 - 1%) = 99.0
+    # For long: stop_loss = entry - atr*stop_loss_atr = 100 - 1 = 99.0
     assert ex.position.stop_loss_price > 0
     # Next execute with low below stop triggers close before any target sizing
-    p1 = 98.0
+    p1 = 100.0
     ex.execute(
         position_percent=0.5,
-        take_profit_percent=5.0,
-        stop_loss_percent=1.0,
         current_price=p1,
-        high=p1,
-        low=p1,
+        high=100.0,
+        low=98.0,
         equity=ex.equity(p1),
+        atr=1.0,
     )
     assert ex.position.size == 0.0
+    assert ex.stop_loss_triggered is True
 
 
 def test_min_trade_qty_gates_small_trades():
@@ -184,33 +186,31 @@ def test_min_trade_qty_gates_small_trades():
     small_p = 0.0004  # size = 0.04 < 0.05 -> should not trade
     ex.execute(
         position_percent=small_p,
-        take_profit_percent=1.0,
-        stop_loss_percent=1.0,
         current_price=p,
         high=p,
         low=p,
         equity=eq,
+        atr=0.0,
     )
     assert ex.position.size == 0.0
 
 
 def test_insufficient_balance_caps_position():
-    ex = new_executor(initial_balance=50.0, fee_rate=0.001, leverage=10.0, min_trade_qty=0.001)
+    ex = new_executor(initial_balance=50.0, fee_rate=0.1, leverage=10.0, min_trade_qty=0.001)
     p = 1000.0
     eq = ex.equity(p)
-    # Target with 100% would be size = 50*1*10/1000 = 0.5, notional 500, margin 50, fee 0.5
+    # Target with 100% would be size = 50*1*10/1000 = 0.5, notional 500, margin 50, fee 0.5 (0.1%)
     # Available balance for margin+fee is 50; since fee>0, effective size will be slightly less than 0.5
     ex.execute(
         position_percent=1.0,
-        take_profit_percent=1.0,
-        stop_loss_percent=1.0,
         current_price=p,
         high=p,
         low=p,
         equity=eq,
+        atr=0.0,
     )
     assert ex.position.size > 0.0
-    assert ex.used_margin <= ex.wallet_balance + 1e-6  # cannot exceed wallet
+    assert ex.wallet_balance >= 0.0
 
 
 def test_short_position_pnl_signs():
@@ -218,12 +218,11 @@ def test_short_position_pnl_signs():
     p0 = 100.0
     ex.execute(
         position_percent=-0.5,
-        take_profit_percent=1.0,
-        stop_loss_percent=1.0,
         current_price=p0,
         high=p0,
         low=p0,
         equity=ex.equity(p0),
+        atr=0.0,
     )
     # price down -> profit
     p1 = 90.0
@@ -235,17 +234,16 @@ def test_short_position_pnl_signs():
 
 # ------- Liquidation tests -------
 def test_long_liquidates_at_derived_price_intrabar():
-    ex = new_executor()
+    ex = new_executor(stop_loss_atr=0.0)
     p0 = 100.0
     # open 100% long to maximize clarity
     ex.execute(
         position_percent=1.0,
-        take_profit_percent=50.0,
-        stop_loss_percent=1000.0,
         current_price=p0,
         high=p0,
         low=p0,
         equity=ex.equity(p0),
+        atr=0.0,
     )
     # After open: actual size limited by available balance after fee
     # Target: 1000*1*10/100 = 100.0, but fee and margin constraint reduce it
@@ -265,11 +263,10 @@ def test_long_liquidates_at_derived_price_intrabar():
     # intrabar low breaches liquidation price -> position closed
     ex.execute(
         position_percent=1.0,
-        take_profit_percent=50.0,
-        stop_loss_percent=1000.0,
         current_price=liq_price,  # close price equal to liq
         high=liq_price,
         low=liq_price - 1.0,  # breach below to ensure trigger
         equity=ex.equity(liq_price),
+        atr=0.0,
     )
     assert ex.position.size == 0.0

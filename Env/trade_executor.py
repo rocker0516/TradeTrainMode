@@ -71,6 +71,12 @@ class TradeExecutor:
         self.short_entry_count: int = 0
         self.max_trade_loss_pct: float = 0.0  # Max single trade loss percentage (ROI %)
 
+        # --- Intrabar / trailing-stop helpers ---
+        # 為了避免同一根 K 線使用 high/low 推進 trailing stop 造成「前視偏差」：
+        # trailing stop 只使用「上一根已完成 K」的 high/low 來推進，並在本根以當前 low/high 判斷是否觸發。
+        self._prev_bar_high: float | None = None
+        self._prev_bar_low: float | None = None
+
     def reset(self, initial_balance: float) -> None:
         self.wallet_balance = float(initial_balance)# 錢包餘額
         self.position = PositionState()# 持倉狀態
@@ -84,6 +90,8 @@ class TradeExecutor:
         self.long_entry_count = 0
         self.short_entry_count = 0
         self.max_trade_loss_pct = 0.0
+        self._prev_bar_high = None
+        self._prev_bar_low = None
 
     def get_liquidation_price(self, current_price: float) -> float:
         """
@@ -95,9 +103,45 @@ class TradeExecutor:
         Returns:
             最新強平價，若無倉位則回傳 0.0。
         """
+        # 強平價為封閉式推導（依 wallet_balance/used_margin 與 entry/size/mmr），不依賴 close(current_price)。
+        # 保留 current_price 參數僅為接口兼容（供外部呼叫）。
         liq_price = self._calc_liquidation_price(current_price=current_price)
         self.position.liq_price = float(liq_price) if liq_price is not None else 0.0
         return self.position.liq_price
+
+    def _cache_prev_bar(self, *, high: float, low: float) -> None:
+        """快取本次輸入的 K 線 high/low，供下一步 trailing stop 更新使用。"""
+        self._prev_bar_high = float(high)
+        self._prev_bar_low = float(low)
+
+    def _maybe_update_trailing_stop_from_prev_bar(self, *, atr: float) -> None:
+        """
+        用「上一根已完成 K」的高低點更新 trailing stop，避免同 K 線前視。
+
+        Args:
+            atr: 用於計算 trailing 距離（atr * stop_loss_atr）。
+        """
+        if self.position.size == 0.0 or self.position.stop_loss_price <= 0.0:
+            return
+        if atr <= 0.0 or self.stop_loss_atr <= 0.0:
+            return
+        if self._prev_bar_high is None or self._prev_bar_low is None:
+            return
+
+        trail_dist = float(atr * self.stop_loss_atr)
+        if trail_dist <= 0.0:
+            return
+
+        if self.position.size > 0:
+            # 多單：用上一根 high 推進止損（只會變緊）
+            potential_new_sl = float(self._prev_bar_high - trail_dist)
+            if potential_new_sl > self.position.stop_loss_price:
+                self.position.stop_loss_price = potential_new_sl
+        else:
+            # 空單：用上一根 low 推進止損（只會變緊）
+            potential_new_sl = float(self._prev_bar_low + trail_dist)
+            if potential_new_sl < self.position.stop_loss_price:
+                self.position.stop_loss_price = potential_new_sl
 
     # ---------- 查詢輔助方法 ----------
     # 未實現損益
@@ -128,96 +172,79 @@ class TradeExecutor:
     ) -> None:
         # 重置本步觸發標記
         self.stop_loss_triggered = False
-        
-        # 1. 優先檢查止損（先於清算，保護倉位）
-        if self.position.size != 0.0 and self.position.stop_loss_price > 0.0:
-            # 移動止損檢查 (Trailing Stop)
-            # 邏輯：當價格朝有利方向移動，將止損價位移至 (CurrentPrice - ATR*Trail)
-            # 但為了簡單起見，這裡只做 "損益兩平後保護" 或 "跟隨價格"
-            # 這裡實作：標準移動止損 - 當價格創新高(多)/新低(空)，提升止損
-            # 需注意：若太敏感會被洗掉。
-            
-            # 參數：Trailing 距離同 StopLoss 距離
-            if atr > 0 and self.stop_loss_atr > 0:
-                trail_dist = atr * self.stop_loss_atr
-                if self.position.size > 0:
-                    # 多單：若 (CurrentHigh - Trail) > CurrentSL，則提升 SL
-                    # 使用 high 雖激進，但能鎖定利潤；保守可用 close
-                    potential_new_sl = high - trail_dist
-                    if potential_new_sl > self.position.stop_loss_price:
-                         self.position.stop_loss_price = potential_new_sl
-                else:
-                    # 空單：若 (CurrentLow + Trail) < CurrentSL，則下移 SL
-                    potential_new_sl = low + trail_dist
-                    if potential_new_sl < self.position.stop_loss_price:
-                         self.position.stop_loss_price = potential_new_sl
 
-            # 執行止損檢查
-            if (self.position.size > 0 and low <= self.position.stop_loss_price) or \
-               (self.position.size < 0 and high >= self.position.stop_loss_price):
-                # 觸發止損，強制平倉
-                self._close_position(self.position.stop_loss_price)
-                self.stop_loss_triggered = True
-                return  # 止損後不再執行其他邏輯
-        
-        # 2. 檢查清算（極端情況兜底）
-        liq_price = self._calc_liquidation_price(current_price=current_price)
-        if liq_price is not None and liq_price > 0.0:
-            if (self.position.size > 0 and low <= liq_price) or (self.position.size < 0 and high >= liq_price):
-                self._close_position(liq_price)
-                self.liq_triggered = True
-                return
+        # 不論本步是否因為 deadband/資金不足而提早 return，都要快取本根 K 線 high/low
+        # 供下一步 trailing stop 使用，避免 _prev_bar_* 停留在更舊的 K 線。
+        try:
+            # 0) 先用「上一根已完成 K」更新 trailing stop（避免同 K 線 high/low 前視）
+            self._maybe_update_trailing_stop_from_prev_bar(atr=atr)
 
-        # 以指定基準(risk_base)計算目標倉位數量
-        # 若未指定，預設使用 wallet_balance (舊邏輯)
-        # 但通常由外部 (Env) 傳入固定的基準金額 (例如每 288 步更新一次的餘額)
-        if risk_base is not None:
-            base_amount = risk_base
-        else:
-            # 使用可用資金與權益的保守基準，避免未實現虧損時放大倉位
-            base_amount = min(self.wallet_balance, self.equity(current_price))
-        
-        # 避免 base_amount 小於等於 0
-        base_amount = max(0.0, base_amount)
-        
-        target_size = (base_amount * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
+            # 1) 優先檢查止損（先於清算）
+            if self.position.size != 0.0 and self.position.stop_loss_price > 0.0:
+                if (self.position.size > 0 and low <= self.position.stop_loss_price) or \
+                   (self.position.size < 0 and high >= self.position.stop_loss_price):
+                    # 觸發止損，強制平倉（回測假設：以 stop_loss_price 成交）
+                    self._close_position(self.position.stop_loss_price)
+                    self.stop_loss_triggered = True
+                    return  # 止損後不再執行其他邏輯
 
-        # 檢查最小調倉幅度 (避免微小變動刷手續費)
-        # 計算最大可持倉數量 (Max Capacity) based on base_amount
-        max_capacity_size = (base_amount * self.leverage) / current_price if current_price > 0 else 1.0
-        # 計算變動比例 (相对于总容量)
-        change_ratio = abs(target_size - self.position.size) / max_capacity_size if max_capacity_size > 0 else 0.0
-        
-        if change_ratio < self.min_position_change:
-            # 變動幅度太小，檢查是否為反向交易或平倉，如果是反向/平倉通常還是允許，除非非常小
-            # 但如果只是微調 (例如 0.5 -> 0.51)，則忽略
-            # 這裡簡單處理：只要變動小於閾值且不是為了觸發平倉(target=0)，就忽略
-            if abs(target_size) > 1e-8: # 不是要全平
-                 return
+            # 2) 檢查清算（極端情況兜底）
+            liq_price = self._calc_liquidation_price(current_price=current_price)
+            if liq_price is not None and liq_price > 0.0:
+                if (self.position.size > 0 and low <= liq_price) or (self.position.size < 0 and high >= liq_price):
+                    self._close_position(liq_price)
+                    self.liq_triggered = True
+                    return
 
-        # 3. 若無持倉，則依目標倉位數量開倉
-        if self.position.size == 0.0:
-            if abs(target_size) >= self.min_trade_qty:
-                self._increase_position(delta_size=target_size, price=current_price, atr=atr)
-        else:
-            # 若方向反轉，先平舊倉再依新方向開倉
-            if self.position.size * target_size < 0:
-                self._close_position(price=current_price)
-                # 平倉後依基準金額重算目標數量
-                # 注意：這裡維持使用 base_amount，而非切換回 wallet_balance，保持基準一致性
-                target_size = (base_amount * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
-                # 新方向倉位若達最小交易量，才開倉
+            # 以指定基準(risk_base)計算目標倉位數量
+            # 若未指定，預設使用 wallet_balance (舊邏輯)
+            # 但通常由外部 (Env) 傳入固定的基準金額 (例如每 288 步更新一次的餘額)
+            if risk_base is not None:
+                base_amount = risk_base
+            else:
+                # 使用可用資金與權益的保守基準，避免未實現虧損時放大倉位
+                base_amount = min(self.wallet_balance, self.equity(current_price))
+
+            # 避免 base_amount 小於等於 0
+            base_amount = max(0.0, base_amount)
+
+            target_size = (base_amount * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
+
+            # 檢查最小調倉幅度 (避免微小變動刷手續費)
+            # 計算最大可持倉數量 (Max Capacity) based on base_amount
+            max_capacity_size = (base_amount * self.leverage) / current_price if current_price > 0 else 1.0
+            # 計算變動比例 (相对于总容量)
+            change_ratio = abs(target_size - self.position.size) / max_capacity_size if max_capacity_size > 0 else 0.0
+
+            if change_ratio < self.min_position_change:
+                # 變動幅度太小，這裡簡單處理：只要不是為了平倉(target=0)，就忽略
+                if abs(target_size) > 1e-8:  # 不是要全平
+                    return
+
+            # 3. 若無持倉，則依目標倉位數量開倉
+            if self.position.size == 0.0:
                 if abs(target_size) >= self.min_trade_qty:
                     self._increase_position(delta_size=target_size, price=current_price, atr=atr)
             else:
-                delta = target_size - self.position.size
-                if abs(delta) >= self.min_trade_qty:
-                    if (self.position.size > 0 and delta < 0) or (self.position.size < 0 and delta > 0):
-                        # 減倉
-                        self._reduce_position(delta_size=delta, price=current_price)
-                    else:
-                        # 加倉
-                        self._increase_position(delta_size=delta, price=current_price, atr=atr)
+                # 若方向反轉，先平舊倉再依新方向開倉
+                if self.position.size * target_size < 0:
+                    self._close_position(price=current_price)
+                    # 平倉後依基準金額重算目標數量
+                    target_size = (base_amount * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
+                    if abs(target_size) >= self.min_trade_qty:
+                        self._increase_position(delta_size=target_size, price=current_price, atr=atr)
+                else:
+                    delta = target_size - self.position.size
+                    if abs(delta) >= self.min_trade_qty:
+                        if (self.position.size > 0 and delta < 0) or (self.position.size < 0 and delta > 0):
+                            # 減倉
+                            self._reduce_position(delta_size=delta, price=current_price)
+                        else:
+                            # 加倉
+                            self._increase_position(delta_size=delta, price=current_price, atr=atr)
+        finally:
+            # 將本根 K 線 high/low 快取到下一步使用（trailing stop 只吃上一根）
+            self._cache_prev_bar(high=high, low=low)
 
        # # 根據最終倉位方向，從當前價格更新止盈/止損價格
         # if self.position.size > 0:
@@ -403,8 +430,16 @@ class TradeExecutor:
     # ---------- 風險控制與強平 ----------
     def _calc_liquidation_price(self, *, current_price: float) -> float | None:
         """
-        以「當前價格的權益」作為全倉抵押，避免只用 wallet_balance 導致過早/過晚觸發。
-        清算條件：equity(p) <= maintenance_margin(p)
+        以封閉式解推導強平價（避免「用 close 計算強平價、但用 high/low 觸發」的不一致）。
+
+        清算條件（簡化模型）：equity(p) <= maintenance_margin(p)
+        - equity(p) = collateral + unrealized_pnl(p)
+        - maintenance_margin(p) = abs(size) * p * maintenance_margin_rate
+
+        cross：collateral = wallet_balance
+        isolated：collateral = used_margin
+
+        注意：此處保留 current_price 參數僅為接口兼容，不作為計算輸入。
         """
         if self.position.size == 0.0 or self.position.entry_price == 0.0:
             return None
@@ -413,14 +448,10 @@ class TradeExecutor:
         s = self.position.size
         e = self.position.entry_price
 
-        # 使用當前價格計算權益，避免忽略未實現損益
-        equity_now = self.equity(current_price)
-
-        # Cross：用全部 equity 作抵押；Isolated：用已用保證金 + 正向的未實現盈餘
         if self.margin_mode == "cross":
-            collateral = equity_now
+            collateral = float(self.wallet_balance)
         else:
-            collateral = self.used_margin + max(self.unrealized_pnl(current_price), 0.0)
+            collateral = float(self.used_margin)
 
         collateral = max(0.0, collateral)
 

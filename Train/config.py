@@ -74,7 +74,7 @@ class Config:
     # 持倉上限（50%）： 0.5 = 50%
     # ActionSmoothClipWrapper 用此做 soft-clip。
 
-    STOP_LOSS_ATR = 5
+    STOP_LOSS_ATR = 3
     # 停損距離（以 ATR 倍數）： 5 = 5倍ATR
     # 動態停損 = 進場價 ± ATR×倍數
     # 觸及即強平（最近常用 6）
