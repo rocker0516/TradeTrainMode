@@ -71,7 +71,7 @@ def make_env(rank, df, seed=0):
         return env
     return _init
 
-def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, num_constraints):
+def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, cost_limits):
     """Generates a clean periodic dashboard string"""
     width = 60
     
@@ -95,6 +95,8 @@ def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, nu
     avg_longs = np.mean(stats['longs']) if stats['longs'] else 0.0
     avg_shorts = np.mean(stats['shorts']) if stats['shorts'] else 0.0
     avg_sl = np.mean(stats['sl_counts']) if stats['sl_counts'] else 0.0
+    avg_missing_sl_rate = np.mean(stats.get('missing_sl_rates', [])) if stats.get('missing_sl_rates') else 0.0
+    avg_abs_sl_gap = np.mean(stats.get('abs_sl_gap_means', [])) if stats.get('abs_sl_gap_means') else 0.0
     
     # New Metric: Avg Max Trade Loss
     avg_max_trade_loss = np.mean(stats['max_trade_losses']) if stats['max_trade_losses'] else 0.0
@@ -145,11 +147,20 @@ def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, nu
     lines.append("|".ljust(width-1) + "|")
     
     lines.append("| Safety Constraints:".ljust(width-1) + "|")
+    num_constraints = len(cost_limits)
     for i in range(num_constraints):
         avg_q_c = metrics.get(f'val/avg_cost_q_{i+1}', 0.0)
         lam = metrics.get(f'val/lambda_{i+1}', 0.0)
-        limit = Config.COST_LIMITS[i]
+        limit = float(cost_limits[i])
         lines.append(f"|   C{i+1}: Est={avg_q_c:.3f} | Lim={limit:.2f} | λ={lam:.2f}".ljust(width-1) + "|")
+    
+    # --- Extra diagnostics (console) ---
+    gate = metrics.get("val/lambda_gate", 0.0)
+    c4_ema = metrics.get("val/cost_ema_4", 0.0)
+    c4_viol_ema = metrics.get("val/cost_violation_ema_4", 0.0)
+    lines.append(f"|   Gate={gate:.3f} | C4_EMA={c4_ema:.3f} | C4_ViolEMA={c4_viol_ema:+.3f}".ljust(width-1) + "|")
+    # mean|sl_gap| uses only steps with position+has_stop; show 6 decimals to avoid rounding-to-zero confusion
+    lines.append(f"|   SL_missing_rate={avg_missing_sl_rate*100:.1f}% | mean|sl_gap|={avg_abs_sl_gap:.6f}".ljust(width-1) + "|")
         
     lines.append("-" * width)
     return "\n".join(lines)
@@ -186,7 +197,7 @@ def train():
         env = DummyVecEnv(env_fns)
     
     # Apply VecNormalize to stabilize inputs and reward (Running Mean/Var)
-    env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=Config.GAMMA)
+    env = VecNormalize(env, norm_obs=True, norm_reward=False, clip_obs=10.0, gamma=Config.GAMMA)
     
     # Get dimensions
     temp_env = make_env(0, df)()
@@ -219,8 +230,11 @@ def train():
         gamma=Config.GAMMA,
         tau=Config.TAU,
         lr=Config.LR,
-        use_lagrangian=True
+        use_lagrangian=True,
+        lagrangian_lr=getattr(Config, "LAGRANGIAN_LR", 0.05),
     )
+    # 保存 base limits（供退火使用）
+    base_cost_limits = np.array(Config.COST_LIMITS, dtype=np.float32)
     
     # 4. Initialize Buffer
     replay_buffer = ReplayBuffer(
@@ -243,6 +257,11 @@ def train():
     episode_rewards = np.zeros(num_envs)
     episode_costs = np.zeros((num_envs, len(Config.COST_LIMITS)))
     episode_lengths = np.zeros(num_envs)
+    # Risk diagnostics tracking (per-episode, per-env)
+    episode_pos_steps = np.zeros(num_envs, dtype=np.int64)
+    episode_missing_sl_steps = np.zeros(num_envs, dtype=np.int64)
+    episode_has_stop_steps = np.zeros(num_envs, dtype=np.int64)
+    episode_abs_sl_gap_sum = np.zeros(num_envs, dtype=np.float64)
     
     # Dashboard Stats (Rolling Window)
     stats_window = 100
@@ -257,7 +276,10 @@ def train():
         'longs': deque(maxlen=stats_window),
         'shorts': deque(maxlen=stats_window),
         'sl_counts': deque(maxlen=stats_window),
-        'max_trade_losses': deque(maxlen=stats_window)
+        'max_trade_losses': deque(maxlen=stats_window),
+        # risk diagnostics (only meaningful when has position)
+        'missing_sl_rates': deque(maxlen=stats_window),
+        'abs_sl_gap_means': deque(maxlen=stats_window),
     }
     
     logger.info("Starting training loop...")
@@ -288,6 +310,21 @@ def train():
         episode_rewards += rewards
         episode_costs += costs
         episode_lengths += 1
+        
+        # --- Risk diagnostics (from env infos) ---
+        # These are computed from raw env risk_signals (not from mixed C4 cost),
+        # so we can diagnose whether C4 is driven by missing SL or proximity.
+        # Env info may not include a reliable has_position flag; infer from maintenance_margin (>0 => has position)
+        maint_margins = np.array([float(info.get("maintenance_margin", 0.0)) for info in infos], dtype=np.float32)
+        has_pos = maint_margins > 1e-8
+        risks = [info.get("risk_signals") or {} for info in infos]
+        missing_sl = np.array([float(r.get("stop_loss_missing", 0.0)) for r in risks], dtype=np.float32) > 0.5
+        sl_gap = np.array([float(r.get("sl_gap_pct", 0.0)) for r in risks], dtype=np.float32)
+        episode_pos_steps += has_pos.astype(np.int64)
+        episode_missing_sl_steps += (has_pos & missing_sl).astype(np.int64)
+        has_stop = has_pos & (~missing_sl)
+        episode_has_stop_steps += has_stop.astype(np.int64)
+        episode_abs_sl_gap_sum += (np.abs(sl_gap) * has_stop.astype(np.float32))
         
         # Prepare next observations (Handle terminal states)
         # Conditional copy: Only deep copy if there are done envs that need patching
@@ -331,6 +368,15 @@ def train():
                 stats['sl_counts'].append(sl_count)
                 stats['max_trade_losses'].append(max_trade_loss_pct)
                 
+                # Risk diagnostics (per episode)
+                pos_steps = int(episode_pos_steps[idx])
+                missing_steps = int(episode_missing_sl_steps[idx])
+                has_stop_steps = int(episode_has_stop_steps[idx])
+                missing_rate = (missing_steps / max(1, pos_steps)) if pos_steps > 0 else 0.0
+                abs_sl_gap_mean = (float(episode_abs_sl_gap_sum[idx]) / max(1, has_stop_steps)) if has_stop_steps > 0 else 0.0
+                stats['missing_sl_rates'].append(float(missing_rate))
+                stats['abs_sl_gap_means'].append(float(abs_sl_gap_mean))
+                
                 # TensorBoard (Per Episode)
                 writer.add_scalar("rollout/episode_reward", episode_rewards[idx], global_step)
                 writer.add_scalar("rollout/episode_len", episode_lengths[idx], global_step)
@@ -339,11 +385,17 @@ def train():
                 writer.add_scalar("rollout/total_trades", total_trades, global_step)
                 writer.add_scalar("rollout/sl_count", sl_count, global_step)
                 writer.add_scalar("rollout/max_single_trade_loss", max_trade_loss_pct, global_step)
+                writer.add_scalar("rollout/missing_sl_rate", float(missing_rate), global_step)
+                writer.add_scalar("rollout/abs_sl_gap_mean", float(abs_sl_gap_mean), global_step)
                 
                 # Reset Trackers
                 episode_rewards[idx] = 0
                 episode_costs[idx] = np.zeros(len(Config.COST_LIMITS))
                 episode_lengths[idx] = 0
+                episode_pos_steps[idx] = 0
+                episode_missing_sl_steps[idx] = 0
+                episode_has_stop_steps[idx] = 0
+                episode_abs_sl_gap_sum[idx] = 0.0
                 cost_calculator.reset([idx], [Config.INITIAL_BALANCE])
         else:
              real_next_obs = next_obs
@@ -392,8 +444,17 @@ def train():
         
         # Update Agent
         if global_step >= Config.LEARNING_STARTS:
+            # --- Cost limit annealing (避免早期 λ 爆炸) ---
+            anneal_steps = float(getattr(Config, "COST_LIMIT_ANNEAL_STEPS", 0.0))
+            mult_start = float(getattr(Config, "COST_LIMIT_MULT_START", 1.0))
+            mult_end = float(getattr(Config, "COST_LIMIT_MULT_END", 1.0))
+            if anneal_steps > 0 and hasattr(agent, "set_cost_limits"):
+                frac = min(1.0, max(0.0, global_step / anneal_steps))
+                mult = mult_start + (mult_end - mult_start) * frac
+                agent.set_cost_limits((base_cost_limits * mult).tolist())
+
             # Update once per step (or adjust ratio)
-            metrics = agent.update(replay_buffer, Config.BATCH_SIZE)
+            metrics = agent.update(replay_buffer, Config.BATCH_SIZE, global_step=global_step)
             
             # Fix logging frequency bug: ensure we log roughly every 100 steps
             # Since global_step jumps by num_envs, strict modulo 100 might fail
@@ -405,7 +466,8 @@ def train():
         if global_step - last_summary_step >= summary_interval: #每隔N步更新一次dashboard
             elapsed = time.time() - start_time
             fps = global_step / elapsed
-            dashboard = format_dashboard(global_step, total_episodes, fps, stats, metrics, episode_costs[0], len(Config.COST_LIMITS))
+            current_limits = agent.get_cost_limits() if hasattr(agent, "get_cost_limits") else np.array(Config.COST_LIMITS, dtype=np.float32)
+            dashboard = format_dashboard(global_step, total_episodes, fps, stats, metrics, episode_costs[0], current_limits)
             
             # Clear pbar, print dashboard, then refresh pbar
             pbar.clear()

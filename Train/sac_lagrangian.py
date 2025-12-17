@@ -5,6 +5,7 @@ import numpy as np
 from typing import Dict, Tuple, Optional, List
 from .architectures import Actor, Critic
 from .buffer import ReplayBuffer
+from .config import Config
 
 class SACLagrangianAgent:
     """
@@ -33,6 +34,9 @@ class SACLagrangianAgent:
         self.action_dim = action_dim
         self.cost_limits = torch.tensor(cost_limits, device=device, dtype=torch.float32)
         self.num_constraints = len(cost_limits)
+        # EMA of cost estimates for stable lambda updates
+        self.cost_ema = torch.zeros(self.num_constraints, device=device, dtype=torch.float32)
+        self._update_step_count = 0
         
         # --- Actor & Critic ---
         # State Dim + Num Constraints (for lambda injection)
@@ -105,6 +109,33 @@ class SACLagrangianAgent:
         
         return torch.cat([state_vec, lam_batch], dim=1)
 
+    def set_cost_limits(self, cost_limits: List[float]) -> None:
+        """更新當前 cost limits（用於 annealing / curriculum）。"""
+        if len(cost_limits) != self.num_constraints:
+            raise ValueError(f"cost_limits length mismatch: expected {self.num_constraints}, got {len(cost_limits)}")
+        self.cost_limits = torch.tensor(cost_limits, device=self.device, dtype=torch.float32)
+
+    def get_cost_limits(self) -> np.ndarray:
+        """取得當前有效 cost limits（for dashboard）。"""
+        return self.cost_limits.detach().cpu().numpy()
+
+    def _lambda_gate(self, *, global_step: Optional[int] = None) -> float:
+        """
+        λ 啟用門檻：
+        - 前 warmup：gate=0（λ=0，不更新）
+        - ramp：gate 線性從 0 -> 1
+        - 之後：gate=1
+        """
+        step = int(global_step) if global_step is not None else int(self._update_step_count)
+        warmup = int(getattr(Config, "LAGRANGIAN_WARMUP_STEPS", 0))
+        ramp = int(getattr(Config, "LAGRANGIAN_RAMP_STEPS", 0))
+        if step < warmup:
+            return 0.0
+        if ramp <= 0:
+            return 1.0
+        frac = (step - warmup) / max(1, ramp)
+        return float(min(1.0, max(0.0, frac)))
+
     def select_action(self, obs: Dict[str, np.ndarray], evaluate: bool = False) -> np.ndarray:
         # Single observation handling
         # Add batch dimension
@@ -176,8 +207,9 @@ class SACLagrangianAgent:
         self.actor.train()
         return action.cpu().numpy()
 
-    def update(self, replay_buffer: ReplayBuffer, batch_size: int) -> Dict[str, float]:
+    def update(self, replay_buffer: ReplayBuffer, batch_size: int, *, global_step: Optional[int] = None) -> Dict[str, float]:
         batch = replay_buffer.sample(batch_size)
+        self._update_step_count += 1
         
         price_seq = batch['price_seq']
         state_vec = batch['state_vec']
@@ -253,7 +285,10 @@ class SACLagrangianAgent:
         if self.use_lagrangian:
             qc_pi = self.cost_critic_1(price_seq, state_vec_aug, current_action)
             
-            lam = self.lagrangian_lambda.detach() # (num_constraints,)
+            gate = self._lambda_gate(global_step=global_step)
+            lam_base = self.log_lambda.exp().detach()  # base λ (>=0)
+            lam = lam_base * gate  # effective λ
+            self.lagrangian_lambda = lam  # for logging/conditioning
             # Sum over constraints: sum(lambda_i * Q_Ci)
             # qc_pi is (Batch, num_constraints)
             # lam is (num_constraints) -> broadcast
@@ -279,29 +314,42 @@ class SACLagrangianAgent:
             
         # 5. Update Lambda
         if self.use_lagrangian:
-            qc_pi_detached = qc_pi.detach()
-            # Violation: (QC - limit)
-            # We want lambda to increase if QC > limit
-            violation = qc_pi_detached - self.cost_limits
-            
-            # Use exp(log_lambda) to keep lambda >= 0 and apply correct ascent direction
-            lambda_vals = self.log_lambda.exp()
-            # Loss to minimize: - lambda * violation (gradient ascent on lambda)
-            lambda_loss = - (lambda_vals * violation).mean()
-            
-            self.lambda_optimizer.zero_grad()
-            lambda_loss.backward()
-            # Gradient Clipping for Lambda
-            torch.nn.utils.clip_grad_norm_([self.log_lambda], 1.0)
-            self.lambda_optimizer.step()
+            gate = self._lambda_gate(global_step=global_step)
+            if gate <= 0.0:
+                # warm-up：不更新 λ，並保持 effective λ = 0
+                lambda_loss = torch.tensor(0.0, device=self.device)
+                violation = torch.zeros_like(qc_pi, device=self.device)
+                self.lagrangian_lambda = torch.zeros(self.num_constraints, device=self.device)
+            else:
+                # --- EMA of cost estimate for stable λ updates ---
+                beta = float(getattr(Config, "LAGRANGIAN_COST_EMA_BETA", 0.99))
+                beta = float(np.clip(beta, 0.0, 0.9999))
+                with torch.no_grad():
+                    self.cost_ema = beta * self.cost_ema + (1.0 - beta) * current_cost_estimate.detach()
+
+                # Violation uses EMA (not per-batch noise)
+                violation_vec = self.cost_ema - self.cost_limits
+                # Broadcast to (B, num_constraints) for logging compatibility
+                violation = violation_vec.unsqueeze(0).repeat(qc_pi.shape[0], 1)
+
+                # Use exp(log_lambda) to keep lambda >= 0 and apply correct ascent direction
+                lambda_vals = self.log_lambda.exp() * gate  # ramp affects update strength too
+                # Loss to minimize: - lambda * violation (gradient ascent on lambda)
+                lambda_loss = - (lambda_vals * violation_vec).mean()
+
+                self.lambda_optimizer.zero_grad()
+                lambda_loss.backward()
+                torch.nn.utils.clip_grad_norm_([self.log_lambda], 1.0)
+                self.lambda_optimizer.step()
             
             with torch.no_grad():
-                # Clamp Lambda to a reasonable range to avoid numerical issues
-                # min ~ exp(-5) ~= 0.0067 (not exactly zero, keeps gradient alive)
-                # max ~ exp(5.0) ~= 148
-                self.log_lambda.data.clamp_(min=-5.0, max=5.0)
-            
-            self.lagrangian_lambda = self.log_lambda.exp()
+                # Clamp Lambda (log-space) for numerical stability only
+                lam_min = float(getattr(Config, "LAMBDA_LOG_CLAMP_MIN", -5.0))
+                lam_max = float(getattr(Config, "LAMBDA_LOG_CLAMP_MAX", 5.0))
+                if lam_max < lam_min:
+                    lam_max = lam_min
+                self.log_lambda.data.clamp_(min=lam_min, max=lam_max)
+            # effective λ already handled by gate above
 
         # 6. Soft Updates
         self._soft_update(self.critic_1, self.critic_1_target)
@@ -324,6 +372,11 @@ class SACLagrangianAgent:
                 metrics[f"val/lambda_{i+1}"] = self.lagrangian_lambda[i].item()
                 metrics[f"val/avg_cost_q_{i+1}"] = current_cost_estimate[i].item()
                 metrics[f"val/cost_violation_{i+1}"] = violation[:, i].mean().item()
+                # EMA-based diagnostics (the values actually driving lambda updates)
+                metrics[f"val/cost_ema_{i+1}"] = self.cost_ema[i].detach().item()
+                # violation is broadcasted for logging; use vector form for clarity
+                metrics[f"val/cost_violation_ema_{i+1}"] = (self.cost_ema[i] - self.cost_limits[i]).detach().item()
+            metrics["val/lambda_gate"] = float(self._lambda_gate(global_step=global_step))
             
         return metrics
 

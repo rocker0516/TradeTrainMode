@@ -40,7 +40,8 @@ class TestNewCosts:
             "termination_reason": None,
         }
         costs = calculator.calculate_costs([info])
-        assert costs[0][0] == 1.0  # clipped
+        # clip 已移除：成本應為 200%
+        assert np.isclose(costs[0][0], 2.0)
 
     def test_death_cost_not_done(self, calculator):
         info = {

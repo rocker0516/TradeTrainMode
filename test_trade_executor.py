@@ -85,6 +85,7 @@ def test_reduce_position_realizes_pnl_and_releases_margin():
     # move price up and reduce to 20% target
     p1 = 10100.0
     eq_before = ex.equity(p1)
+    wallet_before = ex.wallet_balance
     ex.execute(
         position_percent=0.2,
         current_price=p1,
@@ -94,8 +95,10 @@ def test_reduce_position_realizes_pnl_and_releases_margin():
         atr=0.0,
     )
 
-    # New target size ~ 1045*0.2*10/10100 ~= 0.2069306931
-    target_size = (eq_before * 0.2 * 10.0) / p1
+    # Execute 在 risk_base=None 時會用保守基準（以「下單當下」為準）：
+    # base_amount = min(wallet_before, equity_before)
+    base_amount = min(wallet_before, eq_before)
+    target_size = (base_amount * 0.2 * 10.0) / p1
     assert approx(ex.position.size, target_size, tol=1e-6)
 
     # Realized pnl on closed ~ (10100-10000)*(0.5 - target)
@@ -132,14 +135,17 @@ def test_reverse_from_long_to_short_closes_then_opens_new():
         equity=eq,
         atr=0.0,
     )
-    # Position should be short now ~ size: eq_after_close * 0.5*10/9900
-    # First, compute equity after close: close long 0.5 at 9900
+    # Position should be short now.
+    # 注意：execute 反轉時，會先用「反轉前」的 base_amount 計算 target_size，
+    # close 後再用同一個 base_amount 重算 target（不會用 close 後 wallet 重新計算）。
     realized_close = (p1 - p0) * 0.5
     fee_close = 0.5 * p1 * 0.001
     wallet_after_close = 1000.0 - 5.0 + realized_close - fee_close
-    eq_after_close = wallet_after_close  # no position between close and open
-
-    target_short = (eq_after_close * 0.5 * 10.0) / p1
+    # base_amount = min(wallet_before_close, equity_before_close)
+    # wallet_before_close = 995
+    # equity_before_close = 995 + (9900-10000)*0.5 = 945
+    base_amount = min(995.0, 945.0)
+    target_short = (base_amount * 0.5 * 10.0) / p1
     # Opening fee
     fee_open = target_short * p1 * 0.001
     # Wallet after open

@@ -35,19 +35,19 @@ class TradingEnvironment(gym.Env):
     def __init__(self, df, env_id: int = 0, **kwargs):
         super(TradingEnvironment, self).__init__()
         
-        # Override with Config to ensure consistency
-        self.initial_balance = Config.INITIAL_BALANCE
-        self.transaction_fee = Config.TRANSACTION_FEE
-        self.window_size = Config.WINDOW_SIZE
-        self.leverage = Config.LEVERAGE
-        self.min_balance = Config.MIN_BALANCE
-        self.min_episode_steps = Config.MIN_EPISODE_STEPS
-        self.min_position_change = Config.MIN_POSITION_CHANGE
-        self.max_step_pos_change_pct = Config.MAX_STEP_POS_CHANGE_PCT
+        # 使用 Config 作為預設，但允許 kwargs 覆寫（讓測試/實驗更可控，避免全域 Config 汙染）
+        self.initial_balance = float(kwargs.get("initial_balance", Config.INITIAL_BALANCE))
+        self.transaction_fee = float(kwargs.get("transaction_fee", Config.TRANSACTION_FEE))
+        self.window_size = int(kwargs.get("window_size", Config.WINDOW_SIZE))
+        self.leverage = float(kwargs.get("leverage", Config.LEVERAGE))
+        self.min_balance = float(kwargs.get("min_balance", Config.MIN_BALANCE))
+        self.min_episode_steps = int(kwargs.get("min_episode_steps", Config.MIN_EPISODE_STEPS))
+        self.min_position_change = float(kwargs.get("min_position_change", Config.MIN_POSITION_CHANGE))
+        self.max_step_pos_change_pct = float(kwargs.get("max_step_pos_change_pct", Config.MAX_STEP_POS_CHANGE_PCT))
         self.fee_limit_enabled = getattr(Config, "FEE_LIMIT_ENABLED", True)
-        self.fee_limit_ratio = Config.FEE_LIMIT_RATIO
-        self.fee_rolling_window = Config.FEE_ROLLING_WINDOW
-        self.stop_loss_atr = Config.STOP_LOSS_ATR
+        self.fee_limit_ratio = float(kwargs.get("fee_limit_ratio", Config.FEE_LIMIT_RATIO))
+        self.fee_rolling_window = int(kwargs.get("fee_rolling_window", Config.FEE_ROLLING_WINDOW))
+        self.stop_loss_atr = float(kwargs.get("stop_loss_atr", Config.STOP_LOSS_ATR))
         self.liq_warn_pct = getattr(Config, "LIQUIDATION_WARN_PCT", 0.005)
         self.stop_loss_warn_pct = getattr(Config, "STOP_LOSS_WARN_PCT", 0.002)
         
@@ -842,6 +842,15 @@ class TradingEnvironment(gym.Env):
              mmr = self.executor.maintenance_margin_rate
              pos_val = abs(self.executor.position.size * current_price)
              info['maintenance_margin'] = pos_val * mmr
+             # 額外提供 C6（止損接近度/無止損動態懲罰）所需輔助量
+             info['maintenance_margin_rate'] = float(mmr)
+             info['leverage_ratio'] = float(pos_val / new_equity) if new_equity > 0 else 0.0
+             info['maint_margin_ratio'] = float((pos_val * mmr) / new_equity) if new_equity > 0 else 0.0
+        else:
+             # 無倉位時給 0，避免 cost 計算誤判
+             info['maintenance_margin_rate'] = 0.0
+             info['leverage_ratio'] = 0.0
+             info['maint_margin_ratio'] = 0.0
         info['liq_triggered'] = liq_triggered
         
         # Cost 3 Info: Fee Risk
