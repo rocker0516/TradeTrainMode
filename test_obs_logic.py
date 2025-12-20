@@ -81,7 +81,7 @@ class TestObsLogic(unittest.TestCase):
                    and obs["time_state"].shape == (2,)
                    and obs["rhythm_state"].shape == (2,)
                    and obs["cost_state"].shape == (14,)
-                   and obs["market_state"].shape == (6,),
+                   and obs["market_state"].shape == (len(getattr(self.env, "market_state_cols", [])),),
                    actual_val=(obs["account_state"].shape, obs["time_state"].shape, obs["rhythm_state"].shape, obs["cost_state"].shape, obs["market_state"].shape))
 
         # --- Case 4: 初始狀態（空倉） ---

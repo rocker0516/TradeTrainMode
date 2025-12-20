@@ -23,6 +23,7 @@ from Train.sac_lagrangian import SACLagrangianAgent
 from Train.buffer import ReplayBuffer
 from Train.cost import CombinedCostCalculator
 from Train.config import Config
+from Train.curriculum import WinRateFeeCurriculum
 
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
 
@@ -71,7 +72,7 @@ def make_env(rank, df, seed=0):
         return env
     return _init
 
-def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, cost_limits):
+def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, cost_limits, *, current_fee_rate: float):
     """Generates a clean periodic dashboard string"""
     width = 60
     
@@ -124,7 +125,8 @@ def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, co
     lines.append(f"| Account Performance (Last {len(stats['profits'])} Episodes):".ljust(width-1) + "|")# Last {len(stats['profits'])} Episodes 是最後幾集的平均收益
     lines.append(f"|   Avg Profit:      {avg_profit:+.2f}%  (± {std_profit:.1f}%)".ljust(width-1) + "|")
     lines.append(f"|   Avg Balance:     {avg_bal:,.2f}".ljust(width-1) + "|")
-    lines.append(f"|   Avg Fees:        {avg_fees:.2f}".ljust(width-1) + "|")
+    # fee_rate 單位沿用專案既有：0.005 代表 0.005%（taker fee）
+    lines.append(f"|   Avg Fees:        {avg_fees:.2f} | FeeRate: {float(current_fee_rate):.6f}%".ljust(width-1) + "|")
     lines.append(f"|   Avg Ep Length:   {avg_len:.0f} steps (min {min_len:.0f}, max {max_len:.0f})".ljust(width-1) + "|")
     lines.append(f"|   Avg Trades:      {avg_trades:.1f} (L:{avg_longs:.1f}/S:{avg_shorts:.1f})".ljust(width-1) + "|")
     lines.append(f"|   Avg StopLoss:    {avg_sl:.1f}".ljust(width-1) + "|")
@@ -198,6 +200,31 @@ def train():
     
     # Apply VecNormalize to stabilize inputs and reward (Running Mean/Var)
     env = VecNormalize(env, norm_obs=True, norm_reward=False, clip_obs=10.0, gamma=Config.GAMMA)
+
+    # --- Fee Curriculum (stage-based by win rate) ---
+    fee_curriculum = None
+    if bool(getattr(Config, "FEE_CURRICULUM_ENABLED", False)):
+        fee_curriculum = WinRateFeeCurriculum(
+            base_fee_rate=float(getattr(Config, "TRANSACTION_FEE", 0.0)),
+            initial_mult=float(getattr(Config, "FEE_CURRICULUM_INITIAL_MULT", 0.0)),
+            step_mult=float(getattr(Config, "FEE_CURRICULUM_STEP_MULT", 0.1)),
+            threshold=float(getattr(Config, "FEE_CURRICULUM_WINRATE_THRESHOLD", 0.5)),
+            avg_profit_threshold_pct=(
+                None
+                if getattr(Config, "FEE_CURRICULUM_AVG_PROFIT_THRESHOLD_PCT", None) is None
+                else float(getattr(Config, "FEE_CURRICULUM_AVG_PROFIT_THRESHOLD_PCT"))
+            ),
+            min_episodes=int(getattr(Config, "FEE_CURRICULUM_MIN_EPISODES", 50)),
+            min_episodes_between_advances=int(getattr(Config, "FEE_CURRICULUM_MIN_EPISODES_BETWEEN_ADVANCES", 50)),
+        )
+        try:
+            # VecNormalize 會 forward env_method 到 underlying VecEnv（含 Subproc/Dummy）
+            env.env_method("set_fee_rate", float(fee_curriculum.fee_rate))
+            logger.info(
+                f"Fee curriculum initialized: fee_mult={fee_curriculum.fee_mult:.2f}, fee_rate={fee_curriculum.fee_rate:.6f}"
+            )
+        except (AttributeError, TypeError, ValueError) as e:
+            logger.warning(f"Fee curriculum enabled but failed to set initial fee_rate: {e}")
     
     # Get dimensions
     temp_env = make_env(0, df)()
@@ -467,7 +494,29 @@ def train():
             elapsed = time.time() - start_time
             fps = global_step / elapsed
             current_limits = agent.get_cost_limits() if hasattr(agent, "get_cost_limits") else np.array(Config.COST_LIMITS, dtype=np.float32)
-            dashboard = format_dashboard(global_step, total_episodes, fps, stats, metrics, episode_costs[0], current_limits)
+
+            # Current fee_rate for dashboard (prefer curriculum; else try env; else fallback to Config)
+            current_fee_rate = float(getattr(Config, "TRANSACTION_FEE", 0.0))
+            if fee_curriculum is not None:
+                current_fee_rate = float(fee_curriculum.fee_rate)
+            else:
+                try:
+                    fee_rates = env.env_method("get_fee_rate")
+                    if isinstance(fee_rates, (list, tuple)) and len(fee_rates) > 0:
+                        current_fee_rate = float(np.mean([float(x) for x in fee_rates]))
+                except (AttributeError, TypeError, ValueError):
+                    pass
+
+            dashboard = format_dashboard(
+                global_step,
+                total_episodes,
+                fps,
+                stats,
+                metrics,
+                episode_costs[0],
+                current_limits,
+                current_fee_rate=current_fee_rate,
+            )
             
             # Clear pbar, print dashboard, then refresh pbar
             pbar.clear()
@@ -475,6 +524,37 @@ def train():
             pbar.refresh()
             
             last_summary_step = global_step
+
+            # --- Fee Curriculum evaluation (advance stage by win rate) ---
+            if fee_curriculum is not None:
+                # Align with dashboard: prefer survived_profits if available, else use all profits.
+                profits_all = list(stats.get("profits", []))
+                profits_for_eval = list(stats.get("survived_profits", [])) or profits_all
+
+                if profits_for_eval:
+                    wins = [p for p in profits_for_eval if p > 0]
+                    win_rate = len(wins) / len(profits_for_eval)
+                    avg_profit_pct = float(np.mean(profits_for_eval))
+                else:
+                    win_rate = 0.0
+                    avg_profit_pct = 0.0
+
+                new_fee_rate = fee_curriculum.maybe_advance(
+                    win_rate=win_rate,
+                    avg_profit_pct=avg_profit_pct,
+                    total_episodes=total_episodes,
+                )
+                if new_fee_rate is not None:
+                    try:
+                        env.env_method("set_fee_rate", float(new_fee_rate))
+                        writer.add_scalar("curriculum/fee_mult", float(fee_curriculum.fee_mult), global_step)
+                        writer.add_scalar("curriculum/fee_rate", float(new_fee_rate), global_step)
+                        logger.info(
+                            f"Fee curriculum advanced: win_rate={win_rate:.3f}, avg_profit_pct={avg_profit_pct:.2f}%, "
+                            f"fee_mult={fee_curriculum.fee_mult:.2f}, fee_rate={float(new_fee_rate):.6f}"
+                        )
+                    except (AttributeError, TypeError, ValueError) as e:
+                        logger.warning(f"Fee curriculum advanced but failed to set fee_rate: {e}")
         
         # Save Model
         if global_step % 1_000_000 < num_envs: 

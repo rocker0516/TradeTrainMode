@@ -93,6 +93,25 @@ class TradeExecutor:
         self._prev_bar_high = None
         self._prev_bar_low = None
 
+    def set_fee_rate(self, fee_rate: float) -> None:
+        """
+        動態更新手續費率（供訓練課程式學習使用）。
+
+        注意：本專案 fee_rate 單位沿用既有設計：
+        - fee_rate=0.005 代表 0.005%（在 _fee() 會除以 100）
+
+        Args:
+            fee_rate: 新的 fee_rate（必須 >= 0）
+        """
+        fee_rate = float(fee_rate)
+        if fee_rate < 0.0:
+            raise ValueError("fee_rate must be >= 0")
+        self.fee_rate = fee_rate
+
+    def get_fee_rate(self) -> float:
+        """取得目前手續費率（fee_rate）。"""
+        return float(self.fee_rate)
+
     def get_liquidation_price(self, current_price: float) -> float:
         """
         計算並快取當前持倉的強平價。

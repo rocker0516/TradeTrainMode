@@ -141,13 +141,18 @@ class TradingEnvironment(gym.Env):
         self._market_shape_arr = self.market_shape_df.values.astype(np.float32)
         
         # Internal Features -> NumPy
-        # Required columns for market state:
-        market_cols = ['dollar_volume_log_z', 'amihud_z', 'parkinson_vol_z', 'kyle_lambda_z', 'vpin_z', 'trade_entropy_z']
+        # market_state columns are configurable via Config.MARKET_STATE_COLS
+        default_market_cols = [
+            'dollar_volume_log_z', 'amihud_z', 'parkinson_vol_z', 'kyle_lambda_z', 'vpin_z', 'trade_entropy_z'
+        ]
+        market_cols = list(getattr(Config, "MARKET_STATE_COLS", default_market_cols))
+        self.market_state_cols = market_cols
+
         # Ensure they exist in internal_features, fill 0 if missing
         for c in market_cols:
             if c not in self.internal_features.columns:
                 self.internal_features[c] = 0.0
-        
+
         self._market_state_features_arr = self.internal_features[market_cols].values.astype(np.float32)
         self._atr_ratio_arr = self.internal_features['atr_ratio'].values.astype(np.float32)
         # -----------------------------------------------------
@@ -159,8 +164,9 @@ class TradingEnvironment(gym.Env):
         # 2. Time Features (2)
         # 3. Market Rhythm (2)
         # 4. Cost/Risk State (14)
-        # 5. Market State (6) -> Total 37
-        state_dim = 37
+        # 5. Market State (len(market_cols)) -> Total dynamic
+        market_dim = int(self._market_state_features_arr.shape[1])
+        state_dim = 13 + 2 + 2 + 14 + market_dim
         
         self.observation_space = spaces.Dict({
             'price_seq': spaces.Box(low=-np.inf, high=np.inf, shape=(self.window_size, self.price_seq_features), dtype=np.float32),
@@ -168,7 +174,7 @@ class TradingEnvironment(gym.Env):
             'time_state': spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
             'rhythm_state': spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
             'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
-            'market_state': spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32)
+            'market_state': spaces.Box(low=-np.inf, high=np.inf, shape=(market_dim,), dtype=np.float32)
         })
         
         self.executor = TradeExecutor(
@@ -195,6 +201,30 @@ class TradingEnvironment(gym.Env):
         }
         
         self.reset()
+
+    def set_fee_rate(self, fee_rate: float) -> None:
+        """
+        動態更新手續費率（供訓練課程式學習使用）。
+
+        會同步更新：
+        - self.transaction_fee
+        - self.executor.fee_rate
+
+        Args:
+            fee_rate: 新的 fee_rate（必須 >= 0）
+        """
+        fee_rate = float(fee_rate)
+        if fee_rate < 0.0:
+            raise ValueError("fee_rate must be >= 0")
+        self.transaction_fee = fee_rate
+        if hasattr(self, "executor") and self.executor is not None:
+            self.executor.set_fee_rate(fee_rate)
+
+    def get_fee_rate(self) -> float:
+        """取得目前手續費率（fee_rate）。"""
+        if hasattr(self, "executor") and self.executor is not None:
+            return float(self.executor.get_fee_rate())
+        return float(self.transaction_fee)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)

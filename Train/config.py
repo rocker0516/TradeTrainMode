@@ -51,13 +51,75 @@ class Config:
     # 交易手續費率（0.005%=Taker費率）：
     # 任意開倉／平倉需支付（倉位*價格*費率）
 
-    # 手續費課程式（Fee Curriculum）
-    # - 前 N steps 手續費倍率=0（等同零手續費，讓策略先學結構）
-    # - 接著用 M steps 線性拉到 1（回到真實 TRANSACTION_FEE）
-    # 注意：這裡的 steps 指 Train/train.py 的 global_step（累加 num_envs）。
+    # 手續費課程式（Fee Curriculum, stage-based by condition）
+    # 目標：達標就升階，每次增加 10% 的 TRANSACTION_FEE，直到回到 TRANSACTION_FEE
+    # 觸發條件（目前預設）：rolling win rate > 50%
+    #
+    # 注意：
+    # - fee_rate 單位沿用專案既有設計：0.005 代表 0.005%（交易執行器內會 /100）
+    # - 升階頻率用「episode 間隔」控制，避免同一段 win rate 長時間高於門檻時狂升
+    FEE_CURRICULUM_ENABLED = True
+    FEE_CURRICULUM_INITIAL_MULT = 0.0
+    FEE_CURRICULUM_STEP_MULT = 0.1
+    FEE_CURRICULUM_WINRATE_THRESHOLD = 0.60 #30%勝率開始升階
+    FEE_CURRICULUM_AVG_PROFIT_THRESHOLD_PCT = 50.0 #平均 Profit(%) 達到 50% 才升階（與 dashboard 顯示一致）
+    FEE_CURRICULUM_MIN_EPISODES = 50 #50步開始啟用
+    FEE_CURRICULUM_MIN_EPISODES_BETWEEN_ADVANCES = 50 #50步之間至少間隔50步才升階
+
+    # （舊版、未接線）時間式 fee warmup/ramp 設定：保留以免舊文件/實驗引用
     FEE_MULT_WARMUP_STEPS = 500_000
-    # 若為 None，訓練端會自動用 TOTAL_TIMESTEPS/20 推導
     FEE_MULT_RAMP_STEPS = None
+
+    # =========================
+    # 2.1 Observation 設計（State Branch）
+    # =========================
+    # market_state：提供「較慢、更像 regime/結構」的訊號給 MLP state branch。
+    # 注意：這些欄位來自 Env/features.build_all_features()（已做 NaN-safe & float32）
+    # 若欄位不存在，環境會自動補 0.0（避免因資料集缺欄位而炸掉）。
+    #
+    # 若你「確定沒 edge」，擴充 market_state 不能憑空創造 edge；
+    # 但常見用途是讓 agent 更容易學到「什麼時候應該少交易/不交易」，用於降低尾端損失。
+    MARKET_STATE_COLS = [
+        # Liquidity / microstructure proxies
+        "dollar_volume_log_z",
+        "amihud_z",
+        "parkinson_vol_z",
+        "kyle_lambda_z",
+        "vpin_z",
+        "trade_entropy_z",
+        "vol_imbalance_z",
+        "trades_z",
+        "hl_spread_z",
+
+        # Trend / momentum (normalized)
+        "macd_z",
+        "macd_hist_z",
+
+        # SMC proxies (normalized)
+        "smc_structure_trend",
+        "smc_sweep_up",
+        "smc_sweep_down",
+        "smc_dist_to_swing_high",
+        "smc_dist_to_swing_low",
+        "smc_displacement_z",
+
+        # Volume-profile density (longer window in build_all_features)
+        "profile_density",
+
+        # Long-term regime
+        "lt_ret_5d_z",
+        "lt_vol_regime",
+        "lt_vol_5d_z",
+
+        # Multi-timeframe bias
+        "bias_15m",
+        "bias_1h",
+        "bias_1d",
+
+        # Price position / ATR z
+        "price_pos_in_range",
+        "atr_z_score",
+    ]
 
     MAINTENANCE_MARGIN_RATE = 0.005   
     # 維持保證金比率（0.5%）： 0.005 = 0.5%
@@ -192,7 +254,7 @@ class Config:
 
     # STOPLOSS_PROX_VIOLATION_MAX：允許的止損帶違規每步平均上限（cost budget），
     # 作用同上，值越低則允許越少次數或幅度違規。
-    STOPLOSS_PROX_VIOLATION_MAX = 0.10  # 允許的平均違規程度 (per-step cost budget)
+    STOPLOSS_PROX_VIOLATION_MAX = 0.2  # 允許的平均違規程度 (per-step cost budget)
 
     # COST_SL_MISSING_ALPHA：當 position 沒有設置止損時，懲罰如何計算。
     # 該參數決定 missing stop loss 成本更偏向 maint_margin_ratio（權重 alpha 越高）或是槓桿率（1-alpha 越高）。
@@ -217,7 +279,7 @@ class Config:
     # 7.1 Lagrangian 訓練穩定化（不靠 penalty 上限，改用限制退火與數值穩定）
     # =========================
     # λ 的學習率：偏小避免早期因 cost critic 未收斂而讓 λ 飆升
-    LAGRANGIAN_LR = 0.05
+    LAGRANGIAN_LR = 0.001
     # log(λ) clamp：僅做數值穩定（避免 NaN/爆炸），不是用來「調教策略」
     LAMBDA_LOG_CLAMP_MIN = -5.0
     LAMBDA_LOG_CLAMP_MAX = 5.0
@@ -264,5 +326,5 @@ class Config:
     FILTER_SMALL_REWARD_THRESHOLD = 0.005 # 0.005 = 0.5%
     # 獎勵回饋閾值：絕對值小於此值視為"無顯著後果"
     
-    FILTER_DROP_PROBABILITY = 0.70 # 0.90 = 90%
-    # 丟棄機率：對於無效動作樣本，有 90% 機率不寫入 Buffer
+    FILTER_DROP_PROBABILITY = 0.00 # 0.00 = 0%
+    # 丟棄機率：對於無效動作樣本，有 0% 機率不寫入 Buffer
