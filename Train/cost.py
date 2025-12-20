@@ -28,6 +28,13 @@ class CostSignal(TypedDict, total=False):
     leverage_ratio: float
     maint_margin_ratio: float
     maintenance_margin_rate: float
+    # inventory / behavior diagnostics
+    position_pct: float
+    abs_position_pct: float
+    is_flip: bool
+    is_risk_reducing: bool
+    # directional proxy (e.g., macd_z)
+    trend_score: float
 
 
 class BaseCostCalculator(ABC):
@@ -63,6 +70,18 @@ class TurnoverCost(BaseCostCalculator):
             scale = max(equity * getattr(Config, "LEVERAGE", 1.0), 1e-8)
 
         cost = change / max(scale, 1e-8)
+
+        # --- Optimization: discourage churn flips; relax when reducing risk ---
+        # This does NOT try to "predict direction"; it only reduces wasteful switching.
+        is_flip = bool(signal.get("is_flip", False))
+        is_risk_reducing = bool(signal.get("is_risk_reducing", False))
+        flip_mult = float(getattr(Config, "COST_TURNOVER_FLIP_MULT", 0.0))
+        rr_mult = float(getattr(Config, "COST_TURNOVER_RISK_REDUCING_MULT", 1.0))
+        if is_flip and flip_mult > 0.0:
+            cost *= (1.0 + flip_mult)
+        if is_risk_reducing and rr_mult < 1.0:
+            cost *= max(0.0, rr_mult)
+
         if self.clip is not None:
             cost = min(self.clip, cost)
         return float(cost)
@@ -139,6 +158,7 @@ class StopLossProximityCost(BaseCostCalculator):
         self.alpha = float(getattr(Config, "COST_SL_MISSING_ALPHA", 0.8))
         self.lcap = float(getattr(Config, "COST_SL_MISSING_LCAP", 10.0))
         self.clip_max = float(getattr(Config, "COST_SL_CLIP", 1.0))
+        self.trend_w = float(getattr(Config, "COST_SL_TREND_WEIGHT", 0.0))
 
     def calculate_cost(self, signal: CostSignal) -> float:
         mm = float(signal.get("maintenance_margin", 0.0))
@@ -175,7 +195,20 @@ class StopLossProximityCost(BaseCostCalculator):
         risk_mix = float(np.clip(risk_mix, 0.0, 1.0))
         c_missing = (1.0 if stop_loss_missing > 0.5 else 0.0) * risk_mix
 
-        c_total = c_slprox + c_missing
+        # -- 3) directional guidance (optional) --
+        # Penalize being heavily exposed against the trend proxy.
+        # trend_dir in [-1,1] via tanh; misalign in [0,1] approximately.
+        c_trend = 0.0
+        if self.trend_w > 1e-12:
+            pos_pct = float(signal.get("position_pct", 0.0))
+            trend_score = float(signal.get("trend_score", 0.0))
+            trend_dir = float(np.tanh(np.clip(trend_score, -5.0, 5.0)))
+            misalign = max(0.0, -pos_pct * trend_dir)
+            # Scale by risk intensity so tiny positions don't get over-penalized.
+            risk_scale = float(np.clip(leverage_ratio / max(self.lcap, 1e-8), 0.0, 1.0))
+            c_trend = float(self.trend_w * misalign * risk_scale)
+
+        c_total = c_slprox + c_missing + c_trend
         c_total = float(np.clip(c_total, 0.0, self.clip_max))
         return c_total
 
@@ -225,6 +258,13 @@ class CombinedCostCalculator:
                 "leverage_ratio": float(info.get("leverage_ratio", 0.0)),
                 "maint_margin_ratio": float(info.get("maint_margin_ratio", 0.0)),
                 "maintenance_margin_rate": float(info.get("maintenance_margin_rate", 0.0)),
+                # inventory + behavior
+                "position_pct": float(info.get("position_pct", 0.0)),
+                "abs_position_pct": float(info.get("abs_position_pct", 0.0)),
+                "is_flip": bool(info.get("is_flip", False)),
+                "is_risk_reducing": bool(info.get("is_risk_reducing", False)),
+                # directional proxy
+                "trend_score": float(info.get("trend_score", 0.0)),
             }
 
             c_turnover = self.turnover_cost.calculate_cost(signal)

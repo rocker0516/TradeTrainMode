@@ -539,6 +539,8 @@ class TradingEnvironment(gym.Env):
             self.stop_loss_cooldown -= 1
         
         # 取得當前市場數據 (USE NUMPY)
+        # 注意：reward 應該反映「持倉穿越到下一根 K 的 mark-to-market 收益」。
+        # 因此我們在本步仍以 current_price 執行交易/觸發止損/強平，但 reward 會使用下一根 close 作為 mark price。
         current_price = float(self._close_arr[self.current_step])
         current_high = float(self._high_arr[self.current_step])
         current_low = float(self._low_arr[self.current_step])
@@ -546,7 +548,7 @@ class TradingEnvironment(gym.Env):
         # 更新 risk_base（每日/每一定期間更新一次基準，用於動態風控）
         risk_base = self.daily_risk_base
 
-        # 計算當前權益
+        # 計算當前權益（本步決策前的 equity_t）
         last_equity = self.executor.equity(current_price)
         
         # Flip Strategy Check (反手限制邏輯)
@@ -682,8 +684,16 @@ class TradingEnvironment(gym.Env):
         else:
             self.fee_limit_hit = False
 
-        # 同步帳戶狀態
-        new_equity = self.executor.equity(current_price)
+        # -----------------------------
+        # Mark-to-market (path reward)
+        # -----------------------------
+        # 本步 reward 使用下一根 close 進行 mark-to-market，讓「持倉跨時間的盈虧」進入主線 reward。
+        # 若已到資料尾端，則退化為 current_price（避免越界）。
+        next_step_idx = min(int(self.current_step) + 1, len(self._close_arr) - 1)
+        mark_price = float(self._close_arr[next_step_idx])
+
+        # 同步帳戶狀態（new_equity = equity_{t+1} at mark_price）
+        new_equity = self.executor.equity(mark_price)
         self.balance = self.executor.wallet_balance
         self.btc_held = self.executor.position.size
         self.total_value = new_equity
@@ -711,7 +721,8 @@ class TradingEnvironment(gym.Env):
         margin_buffer = 1.0
         leverage_ratio = 0.0
         try:
-            position_value = abs(float(self.executor.position.size * current_price))
+            # 使用 mark_price 對齊下一狀態風險度量
+            position_value = abs(float(self.executor.position.size * mark_price))
             if new_equity > 0:
                 leverage_ratio = position_value / new_equity
                 safe_leverage = float(self.leverage) * 0.8
@@ -754,8 +765,8 @@ class TradingEnvironment(gym.Env):
             
         self._last_position_size = float(self.executor.position.size)
 
-        # 計算未實現損益
-        unrealized_pnl = float(self.executor.unrealized_pnl(current_price))
+        # 計算未實現損益（mark-to-market）
+        unrealized_pnl = float(self.executor.unrealized_pnl(mark_price))
         has_position = abs(self.executor.position.size) > 1e-8
         
         stop_loss_triggered = self.executor.stop_loss_triggered
@@ -853,12 +864,16 @@ class TradingEnvironment(gym.Env):
             fee_budget_ratio=remaining_fee_budget_ratio
         )
 
-        # 更新帳戶狀態時間序列
-        self._update_account_series(current_price)
-
         # 更新步驟
         self.current_step += 1
         self.episode_steps += 1
+
+        # 更新帳戶狀態時間序列（對齊新的 current_step/mark_price）
+        # 若 current_step 已被 clamp 到尾端，_get_observation 內也會再次 clamp，這裡保持安全即可。
+        try:
+            self._update_account_series(mark_price)
+        except Exception:
+            pass
 
         risk_signals = self._compute_risk_signals(current_price)
         info = {}
@@ -868,9 +883,23 @@ class TradingEnvironment(gym.Env):
         # Cost Calculation Helper Info
         info['equity'] = float(new_equity)
         info['maintenance_margin'] = 0.0
-        if abs(self.executor.position.size) > 0:
+        # Inventory / exposure diagnostics:
+        # Provide normalized position exposure to diagnose "avg inventory vs avg profit" divergence.
+        # - position_pct: signed exposure in [-1, 1] relative to (equity * leverage) at mark_price.
+        # - abs_position_pct: absolute exposure intensity.
+        # Note: we use mark_price to align with mark-to-market equity in this step.
+        pos_size = float(self.executor.position.size)
+        pos_notional = pos_size * float(mark_price)
+        info["position_notional"] = float(pos_notional)
+        max_cap_notional = float(max(new_equity, 1e-12) * float(self.leverage))
+        pos_pct = float(pos_notional / max_cap_notional) if max_cap_notional > 0 else 0.0
+        pos_pct = float(np.clip(pos_pct, -1.0, 1.0))
+        info["position_pct"] = pos_pct
+        info["abs_position_pct"] = float(abs(pos_pct))
+
+        if abs(pos_size) > 0:
              mmr = self.executor.maintenance_margin_rate
-             pos_val = abs(self.executor.position.size * current_price)
+             pos_val = abs(pos_size * float(mark_price))
              info['maintenance_margin'] = pos_val * mmr
              # 額外提供 C6（止損接近度/無止損動態懲罰）所需輔助量
              info['maintenance_margin_rate'] = float(mmr)
@@ -890,6 +919,8 @@ class TradingEnvironment(gym.Env):
         info['position_change_norm'] = position_change_norm
         info['is_risk_reducing'] = is_risk_reducing
         info['fee_limit_hit'] = bool(self.fee_limit_hit)
+        # expose flip decision so C1 can penalize churn (frequent long<->short flips)
+        info['is_flip'] = bool(is_flip)
         info['flip_blocked'] = flip_blocked
         info['flip_budget_spent'] = flip_budget_spent
         info['risk_budget'] = float(self.risk_budget)
@@ -898,6 +929,15 @@ class TradingEnvironment(gym.Env):
         info['turnover_notional_change'] = turnover_notional_change
         info['turnover_notional_scale'] = turnover_notional_scale
         info['done'] = bool(self.done)
+        # Trend proxy for directional cost shaping (C4).
+        # Use macd_z if available (already computed in features); fallback to 0.
+        try:
+            if "macd_z" in self.internal_features.columns and self.current_step < len(self.internal_features):
+                info["trend_score"] = float(np.clip(float(self.internal_features["macd_z"].iat[self.current_step]), -5.0, 5.0))
+            else:
+                info["trend_score"] = 0.0
+        except Exception:
+            info["trend_score"] = 0.0
         info['risk_signals'] = {
             'liq_price': float(risk_signals['liq_price']),
             'price_gap': float(risk_signals['price_gap']),
@@ -930,6 +970,7 @@ class TradingEnvironment(gym.Env):
                 "global_step": int(self.current_step),
                 "episode_step": int(self.episode_steps),
                 "price": current_price,
+                "mark_price": mark_price,
                 "action_raw": float(action[0]),
                 "target_pos_pct": float(target_pos_pct),
                 "final_pos_pct": float(position_percent),

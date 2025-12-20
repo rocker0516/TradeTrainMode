@@ -31,12 +31,12 @@ class Config:
     # 強制清算閾值（初始資金 1%）： 
     # 餘額低於此值立即結束該輪實驗（模擬破產）。
 
-    MIN_EPISODE_STEPS = 105_120 / 12
+    MIN_EPISODE_STEPS = 105_120 / 12 * 4
     # 每回合最小步數（保護期）：
     # 防止因軟性規則（如手續費限制）太早終止，  
     # 迫使 agent 經歷長期後果。
 
-    MAX_EPISODE_STEPS = 105_120 / 12     # 105,120 steps = 1 year
+    MAX_EPISODE_STEPS = 105_120 / 12 * 4     # 105,120 steps = 1 year
     # 每回合最大步數（約 1 年）：
     # 超過此步數視為自然存活（資料耗盡），不給予死亡懲罰。
     
@@ -62,7 +62,7 @@ class Config:
     FEE_CURRICULUM_INITIAL_MULT = 0.0
     FEE_CURRICULUM_STEP_MULT = 0.1
     FEE_CURRICULUM_WINRATE_THRESHOLD = 0.60 #30%勝率開始升階
-    FEE_CURRICULUM_AVG_PROFIT_THRESHOLD_PCT = 50.0 #平均 Profit(%) 達到 50% 才升階（與 dashboard 顯示一致）
+    FEE_CURRICULUM_AVG_PROFIT_THRESHOLD_PCT = 20.0 #平均 Profit(%) 達到 50% 才升階（與 dashboard 顯示一致）
     FEE_CURRICULUM_MIN_EPISODES = 50 #50步開始啟用
     FEE_CURRICULUM_MIN_EPISODES_BETWEEN_ADVANCES = 50 #50步之間至少間隔50步才升階
 
@@ -234,6 +234,12 @@ class Config:
     # TURNOVER_TAU_MAX：允許的期望換手率（每步最大可接受的平均換手率），例如 0.003 代表「每步手續費相當於倉位規模的 0.3%」。此參數主要用於控制 agent 不要過度頻繁交易。
     TURNOVER_TAU_MAX = 0.5   # 允許的期望換手率（每步最大 50%）
 
+    # C1 優化：針對「反覆翻多空 / churn」提高換手成本，避免策略靠 flip 賺到短期 reward 但長期不穩定。
+    # - 當 is_flip=True 時，C1 會乘上 (1 + COST_TURNOVER_FLIP_MULT)。
+    # - 當 is_risk_reducing=True（明顯減倉/去風險）時，C1 會乘上 COST_TURNOVER_RISK_REDUCING_MULT（<1 代表放寬）。
+    COST_TURNOVER_FLIP_MULT = 1.0
+    COST_TURNOVER_RISK_REDUCING_MULT = 0.25
+
     # DEATH_P_MAX：允許的爆倉（強平/資金耗盡）概率。這個值決定每一輪中爆倉事件的期望出現頻率（0.0005 代表千步僅允許 0.5 次），可用於約束風險管理，讓策略有強烈誘因避免爆倉。
     DEATH_P_MAX = 0.001       # 允許的爆倉概率（每步不超過 0.1%）
     
@@ -267,6 +273,12 @@ class Config:
 
     # COST_SL_CLIP：單步止損違規成本的最大值，用於防止 cost Q function 發散或極端值影響學習穩定性。
     COST_SL_CLIP = 1.0  # 單步 C6 上限裁剪，避免 Qc 發散
+
+    # C4 優化（方向引導）：逆勢曝險成本（可控、保守）。
+    # 定義：trend_dir = tanh(trend_score)，misalign = max(0, -position_pct * trend_dir)
+    # 直覺：上升趨勢時做空、下降趨勢時做多，且曝險越大 => 成本越高。
+    # 注意：這是「引導」而非硬規則，建議先用小權重觀察行為改變。
+    COST_SL_TREND_WEIGHT = 0.10
 
     COST_LIMITS = [
         TURNOVER_TAU_MAX / (1 - GAMMA),

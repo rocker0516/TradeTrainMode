@@ -79,6 +79,7 @@ def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, co
     # Calculate Statistics
     # Avg Profit 僅計算「成功存活至資料結束」的回合
     survived_profits = stats.get('survived_profits', [])
+    survived_balances = stats.get('survived_balances', [])
     if survived_profits:
         avg_profit = np.mean(survived_profits)
         std_profit = np.std(survived_profits)
@@ -86,7 +87,12 @@ def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, co
         # 若目前沒有任何存活回合，退而使用全部回合做參考（避免顯示全 0 誤導）
         avg_profit = np.mean(stats['profits']) if stats['profits'] else 0.0
         std_profit = np.std(stats['profits']) if stats['profits'] else 0.0
-    avg_bal = np.mean(stats['balances']) if stats['balances'] else 0.0
+    # Balance 也必須對齊同一套樣本集合，否則 Avg Profit(存活) 與 Avg Balance(全部) 會數學上對不起來。
+    avg_bal_all = np.mean(stats['balances']) if stats['balances'] else 0.0
+    if survived_profits and survived_balances:
+        avg_bal = np.mean(survived_balances)
+    else:
+        avg_bal = avg_bal_all
     # 透過 ActionRepeatWrapper，環境實際步數 = 記錄的決策步數 * ACTION_REPEAT
     avg_len = (np.mean(stats['lengths']) * Config.ACTION_REPEAT) if stats['lengths'] else 0.0
     min_len = (np.min(stats['lengths']) * Config.ACTION_REPEAT) if stats['lengths'] else 0.0
@@ -98,6 +104,9 @@ def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, co
     avg_sl = np.mean(stats['sl_counts']) if stats['sl_counts'] else 0.0
     avg_missing_sl_rate = np.mean(stats.get('missing_sl_rates', [])) if stats.get('missing_sl_rates') else 0.0
     avg_abs_sl_gap = np.mean(stats.get('abs_sl_gap_means', [])) if stats.get('abs_sl_gap_means') else 0.0
+    avg_pos_pct = np.mean(stats.get('pos_pct_means', [])) if stats.get('pos_pct_means') else 0.0
+    avg_abs_pos_pct = np.mean(stats.get('abs_pos_pct_means', [])) if stats.get('abs_pos_pct_means') else 0.0
+    avg_pos_time = np.mean(stats.get('pos_time_rates', [])) if stats.get('pos_time_rates') else 0.0
     
     # New Metric: Avg Max Trade Loss
     avg_max_trade_loss = np.mean(stats['max_trade_losses']) if stats['max_trade_losses'] else 0.0
@@ -124,11 +133,15 @@ def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, co
     
     lines.append(f"| Account Performance (Last {len(stats['profits'])} Episodes):".ljust(width-1) + "|")# Last {len(stats['profits'])} Episodes 是最後幾集的平均收益
     lines.append(f"|   Avg Profit:      {avg_profit:+.2f}%  (± {std_profit:.1f}%)".ljust(width-1) + "|")
-    lines.append(f"|   Avg Balance:     {avg_bal:,.2f}".ljust(width-1) + "|")
+    if survived_profits and survived_balances:
+        lines.append(f"|   Avg Balance:     {avg_bal:,.2f}  (All: {avg_bal_all:,.2f})".ljust(width-1) + "|")
+    else:
+        lines.append(f"|   Avg Balance:     {avg_bal_all:,.2f}".ljust(width-1) + "|")
     # fee_rate 單位沿用專案既有：0.005 代表 0.005%（taker fee）
     lines.append(f"|   Avg Fees:        {avg_fees:.2f} | FeeRate: {float(current_fee_rate):.6f}%".ljust(width-1) + "|")
     lines.append(f"|   Avg Ep Length:   {avg_len:.0f} steps (min {min_len:.0f}, max {max_len:.0f})".ljust(width-1) + "|")
     lines.append(f"|   Avg Trades:      {avg_trades:.1f} (L:{avg_longs:.1f}/S:{avg_shorts:.1f})".ljust(width-1) + "|")
+    lines.append(f"|   Avg Position:    {avg_pos_pct*100:+.1f}% | Avg |Pos|: {avg_abs_pos_pct*100:.1f}% | PosTime: {avg_pos_time*100:.1f}%".ljust(width-1) + "|")
     lines.append(f"|   Avg StopLoss:    {avg_sl:.1f}".ljust(width-1) + "|")
     lines.append(f"|   Max Trade Loss:  {avg_max_trade_loss:+.2f}%".ljust(width-1) + "|")
     lines.append(f"|   Win Rate:        {win_rate:.1f}%".ljust(width-1) + "|")
@@ -289,12 +302,16 @@ def train():
     episode_missing_sl_steps = np.zeros(num_envs, dtype=np.int64)
     episode_has_stop_steps = np.zeros(num_envs, dtype=np.int64)
     episode_abs_sl_gap_sum = np.zeros(num_envs, dtype=np.float64)
+    # Inventory diagnostics tracking (per-episode, per-env)
+    episode_pos_pct_sum = np.zeros(num_envs, dtype=np.float64)
+    episode_abs_pos_pct_sum = np.zeros(num_envs, dtype=np.float64)
     
     # Dashboard Stats (Rolling Window)
     stats_window = 100
     stats = {
         'profits': deque(maxlen=stats_window),  # 所有回合的收益（含爆倉/死亡）
         'survived_profits': deque(maxlen=stats_window),  # 僅「存活至資料結束」回合的收益
+        'survived_balances': deque(maxlen=stats_window),  # 僅「存活至資料結束」回合的期末資金
         'balances': deque(maxlen=stats_window),
         'lengths': deque(maxlen=stats_window),
         'reasons': deque(maxlen=stats_window),
@@ -307,6 +324,10 @@ def train():
         # risk diagnostics (only meaningful when has position)
         'missing_sl_rates': deque(maxlen=stats_window),
         'abs_sl_gap_means': deque(maxlen=stats_window),
+        # inventory diagnostics
+        'pos_pct_means': deque(maxlen=stats_window),
+        'abs_pos_pct_means': deque(maxlen=stats_window),
+        'pos_time_rates': deque(maxlen=stats_window),
     }
     
     logger.info("Starting training loop...")
@@ -352,6 +373,12 @@ def train():
         has_stop = has_pos & (~missing_sl)
         episode_has_stop_steps += has_stop.astype(np.int64)
         episode_abs_sl_gap_sum += (np.abs(sl_gap) * has_stop.astype(np.float32))
+
+        # --- Inventory diagnostics (from env infos) ---
+        pos_pct_arr = np.array([float(info.get("position_pct", 0.0)) for info in infos], dtype=np.float32)
+        abs_pos_pct_arr = np.array([float(info.get("abs_position_pct", abs(p))) for info, p in zip(infos, pos_pct_arr)], dtype=np.float32)
+        episode_pos_pct_sum += pos_pct_arr.astype(np.float64)
+        episode_abs_pos_pct_sum += abs_pos_pct_arr.astype(np.float64)
         
         # Prepare next observations (Handle terminal states)
         # Conditional copy: Only deep copy if there are done envs that need patching
@@ -385,6 +412,7 @@ def train():
                 # 僅將「成功走完資料」的回合收益，記錄到 survived_profits
                 if term_reason == 'data_exhausted':
                     stats['survived_profits'].append(profit_pct)
+                    stats['survived_balances'].append(final_bal)
                 stats['balances'].append(final_bal)
                 stats['lengths'].append(episode_lengths[idx])
                 stats['reasons'].append(term_reason)
@@ -403,6 +431,15 @@ def train():
                 abs_sl_gap_mean = (float(episode_abs_sl_gap_sum[idx]) / max(1, has_stop_steps)) if has_stop_steps > 0 else 0.0
                 stats['missing_sl_rates'].append(float(missing_rate))
                 stats['abs_sl_gap_means'].append(float(abs_sl_gap_mean))
+
+                # Inventory diagnostics (per episode)
+                ep_len = float(max(1.0, episode_lengths[idx]))
+                pos_pct_mean = float(episode_pos_pct_sum[idx] / ep_len)
+                abs_pos_pct_mean = float(episode_abs_pos_pct_sum[idx] / ep_len)
+                pos_time_rate = float(pos_steps / max(1, int(episode_lengths[idx])))  # uses has_pos from maint_margin>0
+                stats['pos_pct_means'].append(pos_pct_mean)
+                stats['abs_pos_pct_means'].append(abs_pos_pct_mean)
+                stats['pos_time_rates'].append(pos_time_rate)
                 
                 # TensorBoard (Per Episode)
                 writer.add_scalar("rollout/episode_reward", episode_rewards[idx], global_step)
@@ -414,6 +451,9 @@ def train():
                 writer.add_scalar("rollout/max_single_trade_loss", max_trade_loss_pct, global_step)
                 writer.add_scalar("rollout/missing_sl_rate", float(missing_rate), global_step)
                 writer.add_scalar("rollout/abs_sl_gap_mean", float(abs_sl_gap_mean), global_step)
+                writer.add_scalar("rollout/pos_pct_mean", float(pos_pct_mean), global_step)
+                writer.add_scalar("rollout/abs_pos_pct_mean", float(abs_pos_pct_mean), global_step)
+                writer.add_scalar("rollout/pos_time_rate", float(pos_time_rate), global_step)
                 
                 # Reset Trackers
                 episode_rewards[idx] = 0
@@ -423,6 +463,8 @@ def train():
                 episode_missing_sl_steps[idx] = 0
                 episode_has_stop_steps[idx] = 0
                 episode_abs_sl_gap_sum[idx] = 0.0
+                episode_pos_pct_sum[idx] = 0.0
+                episode_abs_pos_pct_sum[idx] = 0.0
                 cost_calculator.reset([idx], [Config.INITIAL_BALANCE])
         else:
              real_next_obs = next_obs
