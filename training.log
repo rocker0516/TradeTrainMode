@@ -1,0 +1,54 @@
+2025-11-29 12:27:22,686 [INFO] Initializing Training...
+2025-11-29 12:27:22,687 [INFO] TensorBoard: runs/sac_lagrangian_cnn/20251129_122722
+2025-11-29 12:27:22,687 [INFO] Models: models/20251129_122722
+2025-11-29 12:27:22,687 [INFO] Config: {'__module__': 'Train.config', 'DATA_PATH': 'Data/BTCUSDT_futures_volume_5years_5min.csv', 'WINDOW_SIZE': 288, 'LEVERAGE': 10, 'TRANSACTION_FEE': 0.04, 'INITIAL_BALANCE': 10000, 'MIN_EPISODE_STEPS': 10000, 'MAINTENANCE_MARGIN_RATE': 0.005, 'TOTAL_TIMESTEPS': 1000000000, 'BATCH_SIZE': 1024, 'BUFFER_SIZE': 100000, 'LEARNING_STARTS': 5000, 'GAMMA': 0.99, 'TAU': 0.005, 'LR': 0.0003, 'SEED': 42, 'DEVICE': 'cuda', 'NUM_ENVS': 32, 'LOG_INTERVAL': 10000, 'COST_LIMITS': [0.1, 0.1], 'MARGIN_SAFE': 1.5, 'COST_LIQ_PENALTY': 5.0, 'DD_SOFT': 0.2, 'DD_MAX_PENALTY': 5.0, '__dict__': <attribute '__dict__' of 'Config' objects>, '__weakref__': <attribute '__weakref__' of 'Config' objects>, '__doc__': None}
+2025-11-29 12:27:22,688 [INFO] Loading data from Data/BTCUSDT_futures_volume_5years_5min.csv...
+2025-11-29 12:28:30,709 [INFO] Obs Space: PriceSeq (288, 6), StateVec 20
+2025-11-29 12:28:30,709 [INFO] Action Space: 1
+2025-11-29 12:28:31,712 [INFO] Starting training loop...
+2025-11-29 12:28:46,238 [INFO] Model saved at step 10016
+2025-11-29 12:29:14,075 [INFO] Model saved at step 20000
+2025-11-29 12:29:43,459 [INFO] Model saved at step 30016
+2025-11-29 12:30:12,760 [INFO] Model saved at step 40000
+2025-11-29 12:30:43,656 [INFO] Model saved at step 50016
+2025-11-29 12:31:10,259 [INFO] Initializing Training...
+2025-11-29 12:31:10,261 [INFO] TensorBoard: runs/sac_lagrangian_cnn/20251129_123110
+2025-11-29 12:31:10,261 [INFO] Models: models/20251129_123110
+2025-11-29 12:31:10,261 [INFO] Config: {'__module__': 'Train.config', 'DATA_PATH': 'Data/BTCUSDT_futures_volume_5years_5min.csv', 'WINDOW_SIZE': 288, 'LEVERAGE': 10, 'TRANSACTION_FEE': 0.04, 'INITIAL_BALANCE': 10000, 'MIN_EPISODE_STEPS': 10000, 'MAINTENANCE_MARGIN_RATE': 0.005, 'TOTAL_TIMESTEPS': 1000000000, 'BATCH_SIZE': 1024, 'BUFFER_SIZE': 100000, 'LEARNING_STARTS': 5000, 'GAMMA': 0.99, 'TAU': 0.005, 'LR': 0.0003, 'SEED': 42, 'DEVICE': 'cuda', 'NUM_ENVS': 32, 'LOG_INTERVAL': 10000, 'COST_LIMITS': [0.1, 0.1], 'MARGIN_SAFE': 1.5, 'COST_LIQ_PENALTY': 5.0, 'DD_SOFT': 0.2, 'DD_MAX_PENALTY': 5.0, '__dict__': <attribute '__dict__' of 'Config' objects>, '__weakref__': <attribute '__weakref__' of 'Config' objects>, '__doc__': None}
+2025-11-29 12:31:10,261 [INFO] Loading data from Data/BTCUSDT_futures_volume_5years_5min.csv...
+2025-11-29 12:32:11,653 [INFO] Obs Space: PriceSeq (288, 6), StateVec 20
+2025-11-29 12:32:11,653 [INFO] Action Space: 1
+2025-11-29 12:32:12,513 [INFO] Starting training loop...
+2025-11-29 12:32:26,748 [INFO] Model saved at step 10016
+2025-11-29 12:32:54,482 [INFO] Model saved at step 20000
+2025-11-29 12:33:22,392 [INFO] Model saved at step 30016
+2025-11-29 12:33:50,283 [INFO] Model saved at step 40000
+2025-11-29 12:34:18,203 [INFO] Model saved at step 50016
+2025-11-29 12:34:45,980 [INFO] Model saved at step 60000
+2025-11-29 12:35:14,018 [INFO] Model saved at step 70016
+2025-11-29 12:35:42,184 [INFO] Model saved at step 80000
+2025-11-29 12:36:10,404 [INFO] Model saved at step 90016
+2025-11-29 12:36:38,494 [INFO] Model saved at step 100000
+2025-11-29 12:37:06,425 [INFO] Model saved at step 110016
+2025-11-29 12:37:34,424 [INFO] Model saved at step 120000
+2025-11-29 12:38:02,623 [INFO] Model saved at step 130016
+2025-11-29 12:38:30,627 [INFO] Model saved at step 140000
+2025-11-29 12:38:58,783 [INFO] Model saved at step 150016
+2025-11-29 12:39:27,009 [INFO] Model saved at step 160000
+2025-11-29 12:39:55,388 [INFO] Model saved at step 170016
+2025-11-29 12:40:23,524 [INFO] Model saved at step 180000
+2025-11-29 12:40:51,924 [INFO] Model saved at step 190016
+2025-11-29 12:41:20,181 [INFO] Model saved at step 200000
+2025-11-29 12:41:48,536 [INFO] Model saved at step 210016
+2025-11-29 12:42:16,721 [INFO] Model saved at step 220000
+2025-11-29 12:42:45,034 [INFO] Model saved at step 230016
+2025-11-29 12:43:13,036 [INFO] Model saved at step 240000
+2025-11-29 12:43:41,343 [INFO] Model saved at step 250016
+2025-11-29 12:44:09,605 [INFO] Model saved at step 260000
+2025-11-29 12:44:37,750 [INFO] Model saved at step 270016
+2025-11-29 12:45:05,789 [INFO] Model saved at step 280000
+2025-11-29 12:45:33,355 [INFO] Model saved at step 290016
+2025-11-29 12:46:02,729 [INFO] Model saved at step 300000
+2025-11-29 12:46:31,617 [INFO] Model saved at step 310016
+2025-11-29 12:46:59,319 [INFO] Model saved at step 320000
+2025-11-29 12:47:27,382 [INFO] Model saved at step 330016
