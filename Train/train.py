@@ -102,6 +102,11 @@ def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, co
     avg_longs = np.mean(stats['longs']) if stats['longs'] else 0.0
     avg_shorts = np.mean(stats['shorts']) if stats['shorts'] else 0.0
     avg_sl = np.mean(stats['sl_counts']) if stats['sl_counts'] else 0.0
+    # Stop-loss metrics:
+    # - max_stop_loss_dist_pct: max distance between entry and stop price (unleveraged), printed as percent.
+    # - max_sl_hit_rate: max stop-loss hit rate per episode (= sl_count / total_trades), printed as percent.
+    max_stop_loss_dist_pct = np.max(stats.get('max_stop_loss_dists', [])) if stats.get('max_stop_loss_dists') else 0.0
+    max_sl_hit_rate = np.max(stats.get('sl_rates', [])) if stats.get('sl_rates') else 0.0
     avg_missing_sl_rate = np.mean(stats.get('missing_sl_rates', [])) if stats.get('missing_sl_rates') else 0.0
     avg_abs_sl_gap = np.mean(stats.get('abs_sl_gap_means', [])) if stats.get('abs_sl_gap_means') else 0.0
     avg_pos_pct = np.mean(stats.get('pos_pct_means', [])) if stats.get('pos_pct_means') else 0.0
@@ -143,6 +148,8 @@ def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, co
     lines.append(f"|   Avg Trades:      {avg_trades:.1f} (L:{avg_longs:.1f}/S:{avg_shorts:.1f})".ljust(width-1) + "|")
     lines.append(f"|   Avg Position:    {avg_pos_pct*100:+.1f}% | Avg |Pos|: {avg_abs_pos_pct*100:.1f}% | PosTime: {avg_pos_time*100:.1f}%".ljust(width-1) + "|")
     lines.append(f"|   Avg StopLoss:    {avg_sl:.1f}".ljust(width-1) + "|")
+    lines.append(f"|   Max StopLoss%:   {max_stop_loss_dist_pct*100:.1f}%".ljust(width-1) + "|")
+    lines.append(f"|   Max SL HitRate:  {max_sl_hit_rate*100:.1f}%".ljust(width-1) + "|")
     lines.append(f"|   Max Trade Loss:  {avg_max_trade_loss:+.2f}%".ljust(width-1) + "|")
     lines.append(f"|   Win Rate:        {win_rate:.1f}%".ljust(width-1) + "|")
     lines.append("|".ljust(width-1) + "|")
@@ -320,6 +327,11 @@ def train():
         'longs': deque(maxlen=stats_window),
         'shorts': deque(maxlen=stats_window),
         'sl_counts': deque(maxlen=stats_window),
+        # stop-loss diagnostics
+        # max_stop_loss_dists: per-episode max(|entry - stop| / entry) in [0, +inf), printed as percent.
+        'max_stop_loss_dists': deque(maxlen=stats_window),
+        # sl_rates: per-episode ratio = episode_stop_loss_count / total_trades (0..1). Printed as percent in dashboard.
+        'sl_rates': deque(maxlen=stats_window),
         'max_trade_losses': deque(maxlen=stats_window),
         # risk diagnostics (only meaningful when has position)
         'missing_sl_rates': deque(maxlen=stats_window),
@@ -407,6 +419,8 @@ def train():
                 sl_count = info.get('episode_stop_loss_count', 0)
                 total_trades = long_entries + short_entries
                 max_trade_loss_pct = info.get('max_single_trade_loss_pct', 0.0)
+                sl_rate = (float(sl_count) / float(total_trades)) if int(total_trades) > 0 else 0.0
+                max_stop_loss_dist_pct = float(info.get("max_stop_loss_distance_pct", 0.0))
 
                 stats['profits'].append(profit_pct)
                 # 僅將「成功走完資料」的回合收益，記錄到 survived_profits
@@ -421,6 +435,8 @@ def train():
                 stats['longs'].append(long_entries)
                 stats['shorts'].append(short_entries)
                 stats['sl_counts'].append(sl_count)
+                stats['max_stop_loss_dists'].append(max_stop_loss_dist_pct)
+                stats['sl_rates'].append(float(sl_rate))
                 stats['max_trade_losses'].append(max_trade_loss_pct)
                 
                 # Risk diagnostics (per episode)
@@ -448,6 +464,8 @@ def train():
                 writer.add_scalar("rollout/total_fees", total_fees, global_step)
                 writer.add_scalar("rollout/total_trades", total_trades, global_step)
                 writer.add_scalar("rollout/sl_count", sl_count, global_step)
+                writer.add_scalar("rollout/max_stop_loss_distance_pct", max_stop_loss_dist_pct, global_step)
+                writer.add_scalar("rollout/sl_rate", float(sl_rate), global_step)
                 writer.add_scalar("rollout/max_single_trade_loss", max_trade_loss_pct, global_step)
                 writer.add_scalar("rollout/missing_sl_rate", float(missing_rate), global_step)
                 writer.add_scalar("rollout/abs_sl_gap_mean", float(abs_sl_gap_mean), global_step)

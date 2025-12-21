@@ -302,13 +302,18 @@ def compute_market_shape_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Compute shape features for CNN input (price_seq), fully normalized.
     
-    Included Features (F=6):
+    Included Features (base F=7, plus lightweight multi-scale returns):
     1. ret_t: log(close_t / close_{t-1}) / rolling_std
     2. range_t: ((high_t - low_t) / close_{t-1}) / rolling_mean_range
     3. body_t: ((close_t - open_t) / close_{t-1}) / rolling_mean_range
     4. vol_t: log(volume_t / vol_mean_recent)
     5. vol_regime_t: Percentile rank of current range.
     6. spread_t: (ask-bid)/mid / mean_spread
+    7. density_t: rolling profile density (short window)
+
+    Extra (low-cost multi-scale, avoids duplicating all channels):
+    8. ret_15m_t: rolling-sum log return over 3 bars (approx 15m) / rolling std
+    9. ret_1h_t: rolling-sum log return over 12 bars (approx 1h) / rolling std
     """
     close = df['close'].astype(float)
     open_ = df.get('open', close).astype(float)
@@ -333,6 +338,16 @@ def compute_market_shape_features(df: pd.DataFrame) -> pd.DataFrame:
     # 1. Normalized Log Return (Z-score)
     ret_norm = raw_ret / ret_std
     ret_norm = ret_norm.clip(-5, 5)
+
+    # 1b. Multi-scale returns (lightweight channels)
+    # Use rolling sum of log-returns to approximate higher timeframe returns.
+    # Normalize by rolling std (same norm_window) to keep scale stable.
+    raw_ret_15m = raw_ret.rolling(window=3, min_periods=1).sum()
+    raw_ret_1h = raw_ret.rolling(window=12, min_periods=1).sum()
+    ret_15m_std = _rolling_std(raw_ret_15m, norm_window).replace(0.0, 1.0)
+    ret_1h_std = _rolling_std(raw_ret_1h, norm_window).replace(0.0, 1.0)
+    ret_15m_norm = (raw_ret_15m / ret_15m_std).clip(-5, 5)
+    ret_1h_norm = (raw_ret_1h / ret_1h_std).clip(-5, 5)
     
     # 2. Relative Range
     range_norm = raw_range_pct / range_mean
@@ -365,6 +380,8 @@ def compute_market_shape_features(df: pd.DataFrame) -> pd.DataFrame:
     
     features_dict = {
         'ret': ret_norm,
+        'ret_15m': ret_15m_norm,
+        'ret_1h': ret_1h_norm,
         'range': range_norm,
         'body': body_norm,
         'vol': vol_val,

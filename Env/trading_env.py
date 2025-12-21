@@ -134,8 +134,30 @@ class TradingEnvironment(gym.Env):
         if 'timestamp' in self.df.columns:
             ts = self.df['timestamp']
             self._hour_arr = ts.dt.hour.values.astype(np.float32)
+            self._dow_arr = ts.dt.dayofweek.values.astype(np.float32)  # 0=Mon..6=Sun
+            self._is_weekend_arr = (ts.dt.dayofweek.values >= 5).astype(np.float32)
         else:
             self._hour_arr = np.zeros(len(self.df), dtype=np.float32)
+            self._dow_arr = np.zeros(len(self.df), dtype=np.float32)
+            self._is_weekend_arr = np.zeros(len(self.df), dtype=np.float32)
+
+        # Short-term realized vol (rhythm feature): std(log_ret, 20) normalized by std(log_ret, 288)
+        try:
+            close_series = self.df['close'].astype(np.float64)
+            log_close = np.log(np.clip(close_series, 1e-12, None))
+            log_ret = log_close.diff().fillna(0.0)
+            rv_20 = log_ret.rolling(20, min_periods=5).std().fillna(0.0)
+            rv_288 = (
+                log_ret.rolling(288, min_periods=20)
+                .std()
+                .replace(0.0, np.nan)
+                .bfill()
+                .fillna(1e-8)
+            )
+            rv_ratio = (rv_20 / rv_288).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            self._rv_ratio_arr = rv_ratio.values.astype(np.float32)
+        except Exception:
+            self._rv_ratio_arr = np.zeros(len(self.df), dtype=np.float32)
 
         # Market Shape DF -> NumPy
         self._market_shape_arr = self.market_shape_df.values.astype(np.float32)
@@ -152,6 +174,24 @@ class TradingEnvironment(gym.Env):
         for c in market_cols:
             if c not in self.internal_features.columns:
                 self.internal_features[c] = 0.0
+
+        # Tradability score (no-trade / reduce-trade gating) computed from existing proxies.
+        # Higher => more tradable. Keeps logic stable even if some columns are missing.
+        try:
+            amihud = self.internal_features.get("amihud_z", 0.0)
+            spread = self.internal_features.get("hl_spread_z", 0.0)
+            atr_z = self.internal_features.get("atr_z_score", 0.0)
+            # Simple bounded heuristic: combine "illiquidity + spread + extreme vol"
+            raw = (
+                np.abs(np.asarray(amihud, dtype=np.float64))
+                + np.abs(np.asarray(spread, dtype=np.float64))
+                + np.maximum(0.0, np.asarray(atr_z, dtype=np.float64))
+            )
+            # Map to [0,1] with a soft clamp.
+            score = 1.0 - np.clip(raw / 6.0, 0.0, 1.0)
+            self.internal_features["tradability_score"] = pd.Series(score, index=self.internal_features.index).astype(np.float32)
+        except Exception:
+            self.internal_features["tradability_score"] = 0.0
 
         self._market_state_features_arr = self.internal_features[market_cols].values.astype(np.float32)
         self._atr_ratio_arr = self.internal_features['atr_ratio'].values.astype(np.float32)
@@ -170,10 +210,14 @@ class TradingEnvironment(gym.Env):
         
         self.observation_space = spaces.Dict({
             'price_seq': spaces.Box(low=-np.inf, high=np.inf, shape=(self.window_size, self.price_seq_features), dtype=np.float32),
-            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(13,), dtype=np.float32), # Updated shape to 13
-            'time_state': spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
+            # account_state keeps the original first 13 dims for backward compatibility, and appends new semantic dims.
+            # NOTE: keep the first 20 dims stable; append additional accounting dims after them.
+            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(27,), dtype=np.float32),
+            # time_state extended: hour sin/cos + dow sin/cos + funding-cycle sin/cos + weekend flag
+            'time_state': spaces.Box(low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32),
             'rhythm_state': spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
-            'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(14,), dtype=np.float32),
+            # NOTE: keep the first 14 dims stable; append action-conditioned cost proxies after them.
+            'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(19,), dtype=np.float32),
             'market_state': spaces.Box(low=-np.inf, high=np.inf, shape=(market_dim,), dtype=np.float32)
         })
         
@@ -185,8 +229,19 @@ class TradingEnvironment(gym.Env):
             maintenance_margin_rate=Config.MAINTENANCE_MARGIN_RATE,
             margin_mode=self.margin_mode,
             min_position_change=self.min_position_change,
-            stop_loss_atr=self.stop_loss_atr
+            stop_loss_atr=self.stop_loss_atr,
+            stop_loss_liq_buffer_pct=getattr(Config, "STOP_LOSS_LIQ_BUFFER_PCT", 0.0),
         )
+
+        # Action-conditioned accounting/risk effects (exposed in the *next* observation).
+        # Filled in step(); read in _get_observation().
+        self._last_action_effects: dict[str, float] = {
+            "expected_fee_if_trade": 0.0,
+            "predicted_used_margin_after_action": 0.0,
+            "predicted_available_balance_after_action": 0.0,
+            "predicted_liq_distance_after_action": 0.0,
+            "predicted_stop_distance_after_action": 0.0,
+        }
         
         self.reward_calculator = create_default_calculator(
             c_liq=getattr(Config, "COST_LIQ_PENALTY", 10.0),
@@ -241,11 +296,21 @@ class TradingEnvironment(gym.Env):
             self.current_step = self.window_size 
 
         self.executor.reset(self.initial_balance)
+        # Clear action-conditioned effects at episode reset so the first observation is deterministic.
+        if hasattr(self, "_last_action_effects") and isinstance(self._last_action_effects, dict):
+            self._last_action_effects.update({
+                "expected_fee_if_trade": 0.0,
+                "predicted_used_margin_after_action": 0.0,
+                "predicted_available_balance_after_action": 0.0,
+                "predicted_liq_distance_after_action": 0.0,
+                "predicted_stop_distance_after_action": 0.0,
+            })
         self.balance = self.initial_balance
         self.btc_held = 0.0
         self.total_value = self.balance
         self.done = False
         self.position_holding_time = 0
+        self.position_entry_step = None
         self._last_position_size = 0.0
         self.last_total_value = self.initial_balance
         self.episode_steps = 0
@@ -450,6 +515,68 @@ class TradingEnvironment(gym.Env):
                 # Scale up so 1% distance = 0.1, 10% = 1.0 (Approx)
                 dist_to_sl_norm = np.clip(dist_ratio * 10.0, 0.0, 5.0)
 
+        # --- Accounting / execution awareness (append-only) ---
+        wallet_balance = float(self.executor.wallet_balance)
+        used_margin = float(getattr(self.executor, "used_margin", 0.0))
+        available_balance = float(self.executor.available_balance()) if hasattr(self.executor, "available_balance") else float(wallet_balance - used_margin)
+        fee_rate_pct = float(self.executor.get_fee_rate()) if hasattr(self.executor, "get_fee_rate") else float(self.transaction_fee)
+
+        wallet_balance_ratio = float(wallet_balance / self.initial_balance) if self.initial_balance > 0 else 0.0
+        used_margin_ratio = float(used_margin / max(1e-8, equity)) if equity > 0 else 0.0
+        available_balance_ratio = float(available_balance / max(1e-8, equity)) if equity > 0 else 0.0
+
+        # More intuitive than leverage_ratio: equity / position_notional (0..inf). 0 if no position.
+        equity_to_position_notional = 0.0
+        if pos_notional > 0:
+            equity_to_position_notional = float(equity / max(1e-8, pos_notional))
+
+        liq_price = float(risk_signals.get("liq_price", 0.0))
+        liq_distance_pct = float(abs(current_price - liq_price) / current_price) if (current_price > 0 and liq_price > 0) else 0.0
+
+        entry_price = float(self.executor.position.entry_price)
+        stop_price = float(self.executor.position.stop_loss_price)
+        stop_distance_pct = float(abs(entry_price - stop_price) / entry_price) if (abs(size) > 1e-12 and entry_price > 0 and stop_price > 0) else 0.0
+
+        # Clip for numerical stability (keep ranges modest for NN training).
+        wallet_balance_ratio = float(np.clip(wallet_balance_ratio, 0.0, 5.0))
+        used_margin_ratio = float(np.clip(used_margin_ratio, 0.0, 5.0))
+        available_balance_ratio = float(np.clip(available_balance_ratio, -5.0, 5.0))
+        equity_to_position_notional = float(np.clip(equity_to_position_notional, 0.0, 5.0))
+        liq_distance_pct = float(np.clip(liq_distance_pct, 0.0, 5.0))
+        stop_distance_pct = float(np.clip(stop_distance_pct, 0.0, 5.0))
+        fee_rate_pct = float(np.clip(fee_rate_pct, 0.0, 1.0))
+
+        # --- Entry/Breakeven relative features (normalized by ATR) ---
+        atr_ratio = float(self._atr_ratio_arr[self.current_step])
+        atr_est = max(1e-8, atr_ratio * max(current_price, 1e-8))
+        entry_price = float(self.executor.position.entry_price)
+        fee_frac = float(getattr(self.executor, "fee_rate", self.transaction_fee)) / 100.0  # fee_rate is in % units
+        fee_frac = float(np.clip(fee_frac, 0.0, 0.05))
+
+        entry_gap_atr = 0.0
+        breakeven_gap_atr = 0.0
+        if abs(size) > 1e-12 and entry_price > 0.0:
+            # Signed so that positive means "favorable" for both long & short.
+            signed = 1.0 if size > 0 else -1.0
+            entry_gap_atr = signed * ((current_price - entry_price) / atr_est)
+            # Approx breakeven: include round-trip fees (open+close) as a price shift.
+            if size > 0:
+                breakeven_price = entry_price * (1.0 + 2.0 * fee_frac)
+            else:
+                breakeven_price = entry_price * (1.0 - 2.0 * fee_frac)
+            breakeven_gap_atr = signed * ((current_price - breakeven_price) / atr_est)
+        entry_gap_atr = float(np.clip(entry_gap_atr, -10.0, 10.0))
+        breakeven_gap_atr = float(np.clip(breakeven_gap_atr, -10.0, 10.0))
+
+        # --- Holding time / recency features ---
+        steps_since_trade = float(self.current_step - int(self.last_trade_step)) if self.last_trade_step > -1e8 else float(self.window_size)
+        steps_since_trade_norm = float(np.clip(steps_since_trade / max(1.0, float(self.window_size)), 0.0, 5.0))
+
+        holding_steps = 0.0
+        if abs(size) > 1e-12 and self.position_entry_step is not None:
+            holding_steps = float(self.current_step - int(self.position_entry_step))
+        holding_time_norm = float(np.clip(holding_steps / max(1.0, float(self.window_size)), 0.0, 5.0))
+
         account_state = np.array([
             pos_size_norm,
             unreal_pnl_ratio,
@@ -464,22 +591,51 @@ class TradingEnvironment(gym.Env):
             self.episode_liq_count * 1.0,
             dist_to_sl_norm,
             float(self.risk_budget) # Add Risk Budget to Observation
+            ,
+            # --- appended semantic dims (keep first 13 stable) ---
+            pos_side_oh[0],
+            pos_side_oh[1],
+            pos_side_oh[2],
+            entry_gap_atr,
+            breakeven_gap_atr,
+            steps_since_trade_norm,
+            holding_time_norm,
+            # --- appended accounting dims (action->accounting awareness) ---
+            wallet_balance_ratio,
+            used_margin_ratio,
+            available_balance_ratio,
+            equity_to_position_notional,
+            liq_distance_pct,
+            stop_distance_pct,
+            fee_rate_pct,
         ], dtype=np.float32)
         
-        # --- Time Features (2) ---
-        time_state = np.zeros(2, dtype=np.float32)
-        # USE NUMPY ACCESS
-        hour = self._hour_arr[self.current_step]
+        # --- Time Features (7) ---
+        time_state = np.zeros(7, dtype=np.float32)
+        hour = float(self._hour_arr[self.current_step])
+        dow = float(self._dow_arr[self.current_step])
+        is_weekend = float(self._is_weekend_arr[self.current_step])
+        # hour-of-day
         time_state[0] = np.sin(2 * np.pi * hour / 24.0)
         time_state[1] = np.cos(2 * np.pi * hour / 24.0)
+        # day-of-week
+        time_state[2] = np.sin(2 * np.pi * dow / 7.0)
+        time_state[3] = np.cos(2 * np.pi * dow / 7.0)
+        # funding cycle proxy (8h)
+        phase = (hour % 8.0) / 8.0
+        time_state[4] = np.sin(2 * np.pi * phase)
+        time_state[5] = np.cos(2 * np.pi * phase)
+        # weekend flag (0/1)
+        time_state[6] = is_weekend
             
         # --- Market Rhythm (2) ---
-        # USE NUMPY ACCESS
         rhythm_state = np.zeros(2, dtype=np.float32)
-        rhythm_state[0] = self._atr_ratio_arr[self.current_step]
+        rhythm_state[0] = float(self._atr_ratio_arr[self.current_step])
+        rhythm_state[1] = float(np.clip(self._rv_ratio_arr[self.current_step], 0.0, 10.0))
             
-        # --- Cost/Risk State (2) ---
-        cost_state = np.zeros(14, dtype=np.float32)
+        # --- Cost/Risk State ---
+        # Keep first 14 dims stable; append action-conditioned proxies at the end.
+        cost_state = np.zeros(19, dtype=np.float32)
         step_fee_ratio_stable = np.clip((self.last_step_fee / self.initial_balance if self.initial_balance > 0 else 0.0), 0.0, 0.1)
         # Use rolling fee ratio instead of cumulative
         rolling_fee_ratio = 0.0
@@ -514,6 +670,14 @@ class TradingEnvironment(gym.Env):
         cost_state[11] = float(risk_signals['near_liq'])
         cost_state[12] = float(risk_signals['near_margin'])
         cost_state[13] = float(risk_signals['near_stop'])
+
+        # --- Action-conditioned "predicted after action" effects (from previous step) ---
+        effects = getattr(self, "_last_action_effects", {}) or {}
+        cost_state[14] = float(effects.get("expected_fee_if_trade", 0.0))
+        cost_state[15] = float(effects.get("predicted_used_margin_after_action", 0.0))
+        cost_state[16] = float(effects.get("predicted_available_balance_after_action", 0.0))
+        cost_state[17] = float(effects.get("predicted_liq_distance_after_action", 0.0))
+        cost_state[18] = float(effects.get("predicted_stop_distance_after_action", 0.0))
         
         # --- Market State (6) ---
         # USE NUMPY ACCESS
@@ -597,6 +761,12 @@ class TradingEnvironment(gym.Env):
         desired_size = desired_notional / current_price if current_price > 0 else 0.0
         
         current_size = float(self.executor.position.size)
+
+        # --- Action cost preview (before executing) ---
+        # expected_fee_if_trade is expressed in account currency (USDT).
+        # fee_rate unit follows project convention: 0.005 means 0.005% (executor divides by 100).
+        fee_rate_pct = float(self.executor.get_fee_rate()) if hasattr(self.executor, "get_fee_rate") else float(self.transaction_fee)
+        expected_fee_if_trade = float(abs(desired_size - current_size) * current_price * (fee_rate_pct / 100.0)) if current_price > 0 else 0.0
         
         # 2. Apply Step Change Limit
         # Max change in BTC
@@ -647,6 +817,7 @@ class TradingEnvironment(gym.Env):
             self.last_risk_base_update_step = self.current_step
 
         # 執行交易
+        prev_size = float(self.executor.position.size)
         prev_wallet_balance = float(self.executor.wallet_balance)
         prev_fees = float(self.executor.total_fees)
         
@@ -659,6 +830,45 @@ class TradingEnvironment(gym.Env):
             atr=atr_est,
             risk_base=self.daily_risk_base
         )
+
+        # --- Action-conditioned "predicted after action" effects (deterministic simulator => post-action = predicted) ---
+        # Store them for the *next* observation so the agent learns the accounting impact of its last action.
+        try:
+            used_margin_after = float(getattr(self.executor, "used_margin", 0.0))
+            available_after = float(self.executor.available_balance()) if hasattr(self.executor, "available_balance") else float(self.executor.wallet_balance - used_margin_after)
+            liq_after = float(self.executor.get_liquidation_price(current_price)) if hasattr(self.executor, "get_liquidation_price") else 0.0
+            liq_dist_after = float(abs(current_price - liq_after) / current_price) if (current_price > 0 and liq_after > 0) else 0.0
+
+            entry_after = float(getattr(self.executor.position, "entry_price", 0.0))
+            stop_after = float(getattr(self.executor.position, "stop_loss_price", 0.0))
+            stop_dist_after = float(abs(entry_after - stop_after) / entry_after) if (entry_after > 0 and stop_after > 0 and abs(float(getattr(self.executor.position, "size", 0.0))) > 1e-12) else 0.0
+
+            self._last_action_effects = {
+                "expected_fee_if_trade": float(expected_fee_if_trade),
+                "predicted_used_margin_after_action": used_margin_after,
+                "predicted_available_balance_after_action": available_after,
+                "predicted_liq_distance_after_action": float(np.clip(liq_dist_after, 0.0, 5.0)),
+                "predicted_stop_distance_after_action": float(np.clip(stop_dist_after, 0.0, 5.0)),
+            }
+        except Exception:
+            # If anything goes wrong, fail-safe to zeros (do not break training loop).
+            self._last_action_effects = {
+                "expected_fee_if_trade": float(expected_fee_if_trade),
+                "predicted_used_margin_after_action": 0.0,
+                "predicted_available_balance_after_action": 0.0,
+                "predicted_liq_distance_after_action": 0.0,
+                "predicted_stop_distance_after_action": 0.0,
+            }
+
+        # Track position entry step for holding-time semantics (env-level, no impact on execution).
+        new_size = float(self.executor.position.size)
+        if abs(new_size) <= 1e-12:
+            self.position_entry_step = None
+        else:
+            was_flat = abs(prev_size) <= 1e-12
+            flipped = (prev_size * new_size) < 0.0
+            if was_flat or flipped or (self.position_entry_step is None):
+                self.position_entry_step = int(self.current_step)
 
         # Update fee tracking (Rolling Window)
         current_fees = float(self.executor.total_fees)
@@ -1022,6 +1232,7 @@ class TradingEnvironment(gym.Env):
                 info['episode_stop_loss_count'] = int(self.episode_stop_loss_count)
                 info['episode_liq_count'] = int(self.episode_liq_count)
                 info['max_single_trade_loss_pct'] = float(self.executor.max_trade_loss_pct)
+                info['max_stop_loss_distance_pct'] = float(getattr(self.executor, "max_stop_loss_distance_pct", 0.0))
             except Exception:
                 pass
             

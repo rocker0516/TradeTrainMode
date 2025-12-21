@@ -137,3 +137,70 @@ def test_stop_loss_has_priority_over_liquidation_when_both_hit_same_bar():
     assert ex.position.size == 0.0
 
 
+def test_stop_loss_is_clamped_to_trigger_before_liquidation_long_and_short() -> None:
+    """
+    驗證：若 ATR 止損距離過大導致 SL 可能落在強平價之外，執行器會自動收斂止損，
+    讓 SL 一定會先於 LIQ 觸發（避免「止損看起來有設，但永遠來不及觸發就爆倉」）。
+    """
+    # Long case
+    ex_long = new_executor(leverage=10.0, min_trade_qty=0.001, stop_loss_atr=10_000.0, margin_mode="cross")
+    p0 = 100.0
+    ex_long.execute(
+        position_percent=1.0,
+        current_price=p0,
+        high=p0,
+        low=p0,
+        equity=ex_long.equity(p0),
+        atr=1.0,
+    )
+    liq_long = ex_long.get_liquidation_price(p0)
+    assert liq_long > 0.0
+    assert ex_long.position.stop_loss_price > 0.0
+    assert ex_long.position.stop_loss_price >= liq_long
+
+    # Short case
+    ex_short = new_executor(leverage=10.0, min_trade_qty=0.001, stop_loss_atr=10_000.0, margin_mode="cross")
+    ex_short.execute(
+        position_percent=-1.0,
+        current_price=p0,
+        high=p0,
+        low=p0,
+        equity=ex_short.equity(p0),
+        atr=1.0,
+    )
+    liq_short = ex_short.get_liquidation_price(p0)
+    assert liq_short > 0.0
+    assert ex_short.position.stop_loss_price > 0.0
+    assert ex_short.position.stop_loss_price <= liq_short
+
+
+def test_max_stop_loss_distance_pct_tracks_entry_to_stop_distance() -> None:
+    """Max StopLoss%（幅度）應該是 |entry-stop|/entry，且取最大值。"""
+    # Long: entry=100, atr=1, stop_loss_atr=2 => stop=98 => 2% => 0.02
+    ex_long = new_executor(leverage=10.0, min_trade_qty=0.001, stop_loss_atr=2.0, margin_mode="cross")
+    p0 = 100.0
+    ex_long.execute(
+        position_percent=1.0,
+        current_price=p0,
+        high=p0,
+        low=p0,
+        equity=ex_long.equity(p0),
+        atr=1.0,
+    )
+    assert ex_long.position.stop_loss_price == pytest.approx(98.0)
+    assert ex_long.max_stop_loss_distance_pct == pytest.approx(0.02)
+
+    # Short: entry=100, atr=1, stop_loss_atr=2 => stop=102 => 2% => 0.02
+    ex_short = new_executor(leverage=10.0, min_trade_qty=0.001, stop_loss_atr=2.0, margin_mode="cross")
+    ex_short.execute(
+        position_percent=-1.0,
+        current_price=p0,
+        high=p0,
+        low=p0,
+        equity=ex_short.equity(p0),
+        atr=1.0,
+    )
+    assert ex_short.position.stop_loss_price == pytest.approx(102.0)
+    assert ex_short.max_stop_loss_distance_pct == pytest.approx(0.02)
+
+

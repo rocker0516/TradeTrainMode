@@ -77,8 +77,8 @@ class TestObsLogic(unittest.TestCase):
 
         self.check(2, "Price Seq 第 0 維為 window_size", obs["price_seq"].shape[0] == 50, actual_val=obs["price_seq"].shape)
         self.check(3, "Account/Time/Rhythm/Cost/Market 維度正確",
-                   obs["account_state"].shape == (13,)
-                   and obs["time_state"].shape == (2,)
+                   obs["account_state"].shape == (20,)
+                   and obs["time_state"].shape == (7,)
                    and obs["rhythm_state"].shape == (2,)
                    and obs["cost_state"].shape == (14,)
                    and obs["market_state"].shape == (len(getattr(self.env, "market_state_cols", [])),),

@@ -43,6 +43,7 @@ class TradeExecutor:
         maintenance_margin_rate: float = 0.005, # 維持保證金率
         margin_mode: str = 'cross', # 保證金模式：'cross' 或 'isolated'
         stop_loss_atr: float = 2.5, # 止損距離（ATR 倍數）
+        stop_loss_liq_buffer_pct: float = 0.0, # 止損相對強平價的安全緩衝（比例）
         min_position_change: float = 0.0, # 最小調倉幅度 (0.0 ~ 1.0)
     ) -> None:
         self.fee_rate = float(fee_rate)# 交易手續費
@@ -52,6 +53,7 @@ class TradeExecutor:
         self.liq_triggered = False# 強平觸發
         self.stop_loss_triggered = False# 止損觸發
         self.stop_loss_atr = float(stop_loss_atr)# 止損距離（ATR 倍數）
+        self.stop_loss_liq_buffer_pct = float(stop_loss_liq_buffer_pct)
         self.maintenance_margin_rate = float(maintenance_margin_rate)# 維持保證金率
         self.initial_balance = float(initial_balance)# 初始資金
         mode = str(margin_mode).lower()
@@ -70,12 +72,52 @@ class TradeExecutor:
         self.long_entry_count: int = 0
         self.short_entry_count: int = 0
         self.max_trade_loss_pct: float = 0.0  # Max single trade loss percentage (ROI %)
+        # Max stop-loss distance percentage (unleveraged price distance relative to entry).
+        # Example (long): entry=100, stop=95 => 5% => 0.05
+        self.max_stop_loss_distance_pct: float = 0.0
 
         # --- Intrabar / trailing-stop helpers ---
         # 為了避免同一根 K 線使用 high/low 推進 trailing stop 造成「前視偏差」：
         # trailing stop 只使用「上一根已完成 K」的 high/low 來推進，並在本根以當前 low/high 判斷是否觸發。
         self._prev_bar_high: float | None = None
         self._prev_bar_low: float | None = None
+
+    def _clamp_stop_loss_before_liquidation(self, *, current_price: float) -> None:
+        """
+        確保止損價一定「先於強平價」觸發，避免 stop_loss_price 設得比強平更遠。
+
+        為了保留既有 ATR-stop 的語義，本函式只在「止損比強平更遠」時才進行收斂(clamp)。
+
+        Args:
+            current_price: 當前價格（僅用於數值穩定與極端情況保護）。
+        """
+        if self.position.size == 0.0 or self.position.entry_price <= 0.0:
+            return
+        if self.position.stop_loss_price <= 0.0:
+            return
+
+        liq_price = self._calc_liquidation_price(current_price=current_price)
+        if liq_price is None or liq_price <= 0.0:
+            return
+
+        buffer_pct = max(0.0, float(self.stop_loss_liq_buffer_pct))
+        eps = max(1e-8, float(abs(current_price)) * 1e-9)
+
+        if self.position.size > 0.0:
+            # 多單：止損必須在強平價之上（較早觸發）
+            min_sl = float(liq_price) * (1.0 + buffer_pct) + eps
+            if self.position.stop_loss_price < min_sl:
+                # 避免 stop 反而高於現價造成立即「邏輯不一致」；若接近爆倉，讓止損貼近現價即可。
+                cap = float(current_price) - eps
+                self.position.stop_loss_price = float(min(min_sl, cap)) if cap > 0.0 else float(min_sl)
+                self._update_max_stop_loss_distance_metric()
+        else:
+            # 空單：止損必須在強平價之下（較早觸發）
+            max_sl = float(liq_price) * (1.0 - buffer_pct) - eps
+            if self.position.stop_loss_price > max_sl:
+                cap = float(current_price) + eps
+                self.position.stop_loss_price = float(max(max_sl, cap))
+                self._update_max_stop_loss_distance_metric()
 
     def reset(self, initial_balance: float) -> None:
         self.wallet_balance = float(initial_balance)# 錢包餘額
@@ -90,6 +132,7 @@ class TradeExecutor:
         self.long_entry_count = 0
         self.short_entry_count = 0
         self.max_trade_loss_pct = 0.0
+        self.max_stop_loss_distance_pct = 0.0
         self._prev_bar_high = None
         self._prev_bar_low = None
 
@@ -133,6 +176,22 @@ class TradeExecutor:
         self._prev_bar_high = float(high)
         self._prev_bar_low = float(low)
 
+    def _update_max_stop_loss_distance_metric(self) -> None:
+        """
+        Update max stop-loss distance percentage (relative to entry price).
+
+        Uses current position entry and stop_loss_price. No-op if data missing.
+        """
+        if self.position.size == 0.0:
+            return
+        entry = float(self.position.entry_price)
+        stop = float(self.position.stop_loss_price)
+        if entry <= 0.0 or stop <= 0.0:
+            return
+        dist_pct = abs(entry - stop) / entry
+        if dist_pct > self.max_stop_loss_distance_pct:
+            self.max_stop_loss_distance_pct = float(dist_pct)
+
     def _maybe_update_trailing_stop_from_prev_bar(self, *, atr: float) -> None:
         """
         用「上一根已完成 K」的高低點更新 trailing stop，避免同 K 線前視。
@@ -156,11 +215,13 @@ class TradeExecutor:
             potential_new_sl = float(self._prev_bar_high - trail_dist)
             if potential_new_sl > self.position.stop_loss_price:
                 self.position.stop_loss_price = potential_new_sl
+                self._update_max_stop_loss_distance_metric()
         else:
             # 空單：用上一根 low 推進止損（只會變緊）
             potential_new_sl = float(self._prev_bar_low + trail_dist)
             if potential_new_sl < self.position.stop_loss_price:
                 self.position.stop_loss_price = potential_new_sl
+                self._update_max_stop_loss_distance_metric()
 
     # ---------- 查詢輔助方法 ----------
     # 未實現損益
@@ -342,9 +403,14 @@ class TradeExecutor:
                 # 空單止損 = 新均價 + ATR距離
                 new_sl = self.position.entry_price + stop_distance
                 self.position.stop_loss_price = new_sl
+            self._update_max_stop_loss_distance_metric()
         else:
             if self.position.stop_loss_price == 0.0: # 只有未設定時才歸零，否則保留舊值？不，若無 ATR 則無法計算
                  self.position.stop_loss_price = 0.0
+
+        # 保證止損一定先於強平（避免 SL 比 LIQ 更遠而永遠觸發不到）
+        if self.position.size != 0.0 and self.position.stop_loss_price > 0.0:
+            self._clamp_stop_loss_before_liquidation(current_price=price)
 
         # 若原先為空倉，視為進場（記一次）
         if was_flat and abs(delta_size) > 0.0:
@@ -390,6 +456,10 @@ class TradeExecutor:
         self.position.size = new_size
         if self.position.size == 0.0:
             self.position.entry_price = 0.0
+            self.position.stop_loss_price = 0.0
+        else:
+            if self.position.stop_loss_price > 0.0:
+                self._clamp_stop_loss_before_liquidation(current_price=price)
         # 統計
         self.total_fees += fee
         if close_size > 0:

@@ -31,12 +31,12 @@ class Config:
     # 強制清算閾值（初始資金 1%）： 
     # 餘額低於此值立即結束該輪實驗（模擬破產）。
 
-    MIN_EPISODE_STEPS = 105_120 / 12 * 4
+    MIN_EPISODE_STEPS = 105_120 / 12
     # 每回合最小步數（保護期）：
     # 防止因軟性規則（如手續費限制）太早終止，  
     # 迫使 agent 經歷長期後果。
 
-    MAX_EPISODE_STEPS = 105_120 / 12 * 4     # 105,120 steps = 1 year
+    MAX_EPISODE_STEPS = 105_120 / 12      # 105,120 steps = 1 year
     # 每回合最大步數（約 1 年）：
     # 超過此步數視為自然存活（資料耗盡），不給予死亡懲罰。
     
@@ -59,8 +59,8 @@ class Config:
     # - fee_rate 單位沿用專案既有設計：0.005 代表 0.005%（交易執行器內會 /100）
     # - 升階頻率用「episode 間隔」控制，避免同一段 win rate 長時間高於門檻時狂升
     FEE_CURRICULUM_ENABLED = True
-    FEE_CURRICULUM_INITIAL_MULT = 0.0
-    FEE_CURRICULUM_STEP_MULT = 0.1
+    FEE_CURRICULUM_INITIAL_MULT = 0.05 #初始手續費倍數 0.05%
+    FEE_CURRICULUM_STEP_MULT = 0.05 #每次升階增加的手續費倍數 5%
     FEE_CURRICULUM_WINRATE_THRESHOLD = 0.60 #30%勝率開始升階
     FEE_CURRICULUM_AVG_PROFIT_THRESHOLD_PCT = 20.0 #平均 Profit(%) 達到 50% 才升階（與 dashboard 顯示一致）
     FEE_CURRICULUM_MIN_EPISODES = 50 #50步開始啟用
@@ -119,6 +119,9 @@ class Config:
         # Price position / ATR z
         "price_pos_in_range",
         "atr_z_score",
+
+        # Tradability / no-trade gating (computed in Env; NaN-safe)
+        "tradability_score",
     ]
 
     MAINTENANCE_MARGIN_RATE = 0.005   
@@ -132,29 +135,35 @@ class Config:
     # =========================
     # 3. 策略限制（硬／軟約束）
     # =========================
-    MIN_POSITION_CHANGE = 0.1
+    MIN_POSITION_CHANGE = 0.3
     # 最小動作死區（10%）： 0.1 = 10%
     # 小於 10% 倉位變動直接忽略（降低雜訊）。
     # (排除減倉平倉動作)
 
-    MAX_STEP_POS_CHANGE_PCT = 0.5
-    # 每步最大倉位變動（30%）： 0.3 = 30%
+    MAX_STEP_POS_CHANGE_PCT = 0.75
+    # 每步最大倉位變動（75%）： 0.75 = 75%
     # 除風險降低動作外，單步限最大增減30%倉位，防止瞬間滿倉。
 
-    MAX_POSITION_PCT = 0.5
-    # 持倉上限（50%）： 0.5 = 50%
+    MAX_POSITION_PCT = 0.75
+    # 持倉上限（75%）： 0.75 = 75%
     # ActionSmoothClipWrapper 用此做 soft-clip。
 
-    STOP_LOSS_ATR = 11
+    STOP_LOSS_ATR = 4
     # 停損距離（以 ATR 倍數）： 5 = 5倍ATR
     # 動態停損 = 進場價 ± ATR×倍數
     # 觸及即強平（最近常用 6）
+
+    STOP_LOSS_LIQ_BUFFER_PCT = 0.002
+    # 止損相對強平的安全緩衝（百分比，0.002=0.2%）：
+    # 目的：避免 stop_loss_price 設得比強平價更遠，導致「先被強平、止損永遠觸發不到」。
+    # 多單：要求 stop_loss_price >= liq_price * (1 + buffer)
+    # 空單：要求 stop_loss_price <= liq_price * (1 - buffer)
 
     STOP_LOSS_COOLDOWN_STEPS = 6
     # 停損後冷卻步數： 1 = 1步
     # 強迫 N 步內動作為 0，防止報復性交易。
 
-    ACTION_SMOOTHING_ALPHA = 0.5
+    ACTION_SMOOTHING_ALPHA = 0.8
     # 動作 EMA 平滑係數： 0.3 = 30%
     # 0.2=極平滑, 0.3=平滑, 0.5=不平滑, 0.7=極不平滑, 1.0=極不平滑
     # 降低高頻振盪。
@@ -201,9 +210,9 @@ class Config:
     BATCH_SIZE = 64
     # 單次 mini-batch 訓練樣本數
 
-    BUFFER_SIZE = 300_000                
+    BUFFER_SIZE = 500_000                
     # Replay Buffer 最大容量
-    # 更新比率 Batch_Size / Buffer_Size = 128 / 300,000 = 0.0004266666666666667 = 0.04266666666666667%
+    # 更新比率 Batch_Size / Buffer_Size = 64 / 500,000 = 0.000256 = 0.0256%
 
     LEARNING_STARTS = int(BUFFER_SIZE / 5)       #  BUFFER_SIZE / 5 = 60,000
     # 預熱步數：前 N 步完全隨機探索
@@ -238,7 +247,7 @@ class Config:
     # - 當 is_flip=True 時，C1 會乘上 (1 + COST_TURNOVER_FLIP_MULT)。
     # - 當 is_risk_reducing=True（明顯減倉/去風險）時，C1 會乘上 COST_TURNOVER_RISK_REDUCING_MULT（<1 代表放寬）。
     COST_TURNOVER_FLIP_MULT = 1.0
-    COST_TURNOVER_RISK_REDUCING_MULT = 0.25
+    COST_TURNOVER_RISK_REDUCING_MULT = 0.1
 
     # DEATH_P_MAX：允許的爆倉（強平/資金耗盡）概率。這個值決定每一輪中爆倉事件的期望出現頻率（0.0005 代表千步僅允許 0.5 次），可用於約束風險管理，讓策略有強烈誘因避免爆倉。
     DEATH_P_MAX = 0.001       # 允許的爆倉概率（每步不超過 0.1%）
@@ -319,7 +328,7 @@ class Config:
     NUM_ENVS = 64
     # 並行環境數（開啟多進程）
 
-    LOG_INTERVAL = MAX_EPISODE_STEPS * 10
+    LOG_INTERVAL = MAX_EPISODE_STEPS * 25
     # Dashboard 印出間隔（步數）
 
     STEP_LOG_ENABLED = False           
