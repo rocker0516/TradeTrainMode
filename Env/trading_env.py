@@ -245,7 +245,10 @@ class TradingEnvironment(gym.Env):
         
         self.reward_calculator = create_default_calculator(
             c_liq=getattr(Config, "COST_LIQ_PENALTY", 10.0),
-            base_log_ret_weight=getattr(Config, "REWARD_LOG_RET_WEIGHT", 1.0)
+            base_log_ret_weight=getattr(Config, "REWARD_LOG_RET_WEIGHT", 1.0),
+            conviction_trend_bonus_weight=getattr(Config, "REWARD_CONVICTION_TREND_BONUS_WEIGHT", 0.0),
+            conviction_trend_min_strength=getattr(Config, "REWARD_CONVICTION_TREND_MIN_STRENGTH", 0.8),
+            conviction_min_abs_pos=getattr(Config, "REWARD_CONVICTION_MIN_ABS_POS", 0.15),
         )
         
         self.account_series = {
@@ -1050,6 +1053,24 @@ class TradingEnvironment(gym.Env):
         step_fee_ratio = step_fee / self.initial_balance if self.initial_balance > 0 else 0.0
 
         # 回饋
+        # --- Conviction/Trend shaping inputs (optional) ---
+        # Provide normalized exposure + trend proxy to reward calculator.
+        # This allows "only when signal is strong AND position is large" bonuses (if enabled),
+        # without encouraging tiny-position bonus farming.
+        pos_size_for_reward = float(self.executor.position.size)
+        pos_notional_for_reward = pos_size_for_reward * float(mark_price)
+        max_cap_notional_for_reward = float(max(new_equity, 1e-12) * float(self.leverage))
+        position_pct_for_reward = float(pos_notional_for_reward / max_cap_notional_for_reward) if max_cap_notional_for_reward > 0 else 0.0
+        position_pct_for_reward = float(np.clip(position_pct_for_reward, -1.0, 1.0))
+        abs_position_pct_for_reward = float(abs(position_pct_for_reward))
+        try:
+            if "macd_z" in self.internal_features.columns and self.current_step < len(self.internal_features):
+                trend_score_for_reward = float(np.clip(float(self.internal_features["macd_z"].iat[self.current_step]), -5.0, 5.0))
+            else:
+                trend_score_for_reward = 0.0
+        except Exception:
+            trend_score_for_reward = 0.0
+
         reward = self.reward_calculator.compute(
             last_equity=last_equity,
             new_equity=new_equity,
@@ -1071,7 +1092,10 @@ class TradingEnvironment(gym.Env):
             termination_reason=termination_reason,
             step_fee_ratio=step_fee_ratio,
             current_dd=current_dd,
-            fee_budget_ratio=remaining_fee_budget_ratio
+            fee_budget_ratio=remaining_fee_budget_ratio,
+            position_pct=position_pct_for_reward,
+            abs_position_pct=abs_position_pct_for_reward,
+            trend_score=trend_score_for_reward,
         )
 
         # 更新步驟
@@ -1139,6 +1163,13 @@ class TradingEnvironment(gym.Env):
         info['turnover_notional_change'] = turnover_notional_change
         info['turnover_notional_scale'] = turnover_notional_scale
         info['done'] = bool(self.done)
+        # Reward shaping diagnostics (if enabled)
+        try:
+            info["conviction_bonus"] = float(getattr(self.reward_calculator, "last_conviction_bonus", 0.0))
+            info["conviction_active"] = bool(getattr(self.reward_calculator, "last_conviction_active", False))
+        except Exception:
+            info["conviction_bonus"] = 0.0
+            info["conviction_active"] = False
         # Trend proxy for directional cost shaping (C4).
         # Use macd_z if available (already computed in features); fallback to 0.
         try:

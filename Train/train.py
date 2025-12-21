@@ -112,6 +112,8 @@ def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, co
     avg_pos_pct = np.mean(stats.get('pos_pct_means', [])) if stats.get('pos_pct_means') else 0.0
     avg_abs_pos_pct = np.mean(stats.get('abs_pos_pct_means', [])) if stats.get('abs_pos_pct_means') else 0.0
     avg_pos_time = np.mean(stats.get('pos_time_rates', [])) if stats.get('pos_time_rates') else 0.0
+    avg_conv_bonus = np.mean(stats.get('conviction_bonus_means', [])) if stats.get('conviction_bonus_means') else 0.0
+    avg_conv_active = np.mean(stats.get('conviction_active_rates', [])) if stats.get('conviction_active_rates') else 0.0
     
     # New Metric: Avg Max Trade Loss
     avg_max_trade_loss = np.mean(stats['max_trade_losses']) if stats['max_trade_losses'] else 0.0
@@ -147,6 +149,7 @@ def format_dashboard(global_step, total_episodes, fps, stats, metrics, costs, co
     lines.append(f"|   Avg Ep Length:   {avg_len:.0f} steps (min {min_len:.0f}, max {max_len:.0f})".ljust(width-1) + "|")
     lines.append(f"|   Avg Trades:      {avg_trades:.1f} (L:{avg_longs:.1f}/S:{avg_shorts:.1f})".ljust(width-1) + "|")
     lines.append(f"|   Avg Position:    {avg_pos_pct*100:+.1f}% | Avg |Pos|: {avg_abs_pos_pct*100:.1f}% | PosTime: {avg_pos_time*100:.1f}%".ljust(width-1) + "|")
+    lines.append(f"|   ConvBonus:      {avg_conv_bonus:.4f} | ActiveRate: {avg_conv_active*100:.1f}%".ljust(width-1) + "|")
     lines.append(f"|   Avg StopLoss:    {avg_sl:.1f}".ljust(width-1) + "|")
     lines.append(f"|   Max StopLoss%:   {max_stop_loss_dist_pct*100:.1f}%".ljust(width-1) + "|")
     lines.append(f"|   Max SL HitRate:  {max_sl_hit_rate*100:.1f}%".ljust(width-1) + "|")
@@ -312,6 +315,9 @@ def train():
     # Inventory diagnostics tracking (per-episode, per-env)
     episode_pos_pct_sum = np.zeros(num_envs, dtype=np.float64)
     episode_abs_pos_pct_sum = np.zeros(num_envs, dtype=np.float64)
+    # Conviction bonus diagnostics (per-episode, per-env)
+    episode_conv_bonus_sum = np.zeros(num_envs, dtype=np.float64)
+    episode_conv_active_steps = np.zeros(num_envs, dtype=np.int64)
     
     # Dashboard Stats (Rolling Window)
     stats_window = 100
@@ -340,6 +346,9 @@ def train():
         'pos_pct_means': deque(maxlen=stats_window),
         'abs_pos_pct_means': deque(maxlen=stats_window),
         'pos_time_rates': deque(maxlen=stats_window),
+        # conviction bonus diagnostics
+        'conviction_bonus_means': deque(maxlen=stats_window),
+        'conviction_active_rates': deque(maxlen=stats_window),
     }
     
     logger.info("Starting training loop...")
@@ -391,6 +400,12 @@ def train():
         abs_pos_pct_arr = np.array([float(info.get("abs_position_pct", abs(p))) for info, p in zip(infos, pos_pct_arr)], dtype=np.float32)
         episode_pos_pct_sum += pos_pct_arr.astype(np.float64)
         episode_abs_pos_pct_sum += abs_pos_pct_arr.astype(np.float64)
+
+        # --- Conviction bonus diagnostics (from env infos) ---
+        conv_bonus_arr = np.array([float(info.get("conviction_bonus", 0.0)) for info in infos], dtype=np.float32)
+        conv_active_arr = np.array([bool(info.get("conviction_active", False)) for info in infos], dtype=np.bool_)
+        episode_conv_bonus_sum += conv_bonus_arr.astype(np.float64)
+        episode_conv_active_steps += conv_active_arr.astype(np.int64)
         
         # Prepare next observations (Handle terminal states)
         # Conditional copy: Only deep copy if there are done envs that need patching
@@ -456,6 +471,12 @@ def train():
                 stats['pos_pct_means'].append(pos_pct_mean)
                 stats['abs_pos_pct_means'].append(abs_pos_pct_mean)
                 stats['pos_time_rates'].append(pos_time_rate)
+
+                # Conviction bonus diagnostics (per episode)
+                conv_bonus_mean = float(episode_conv_bonus_sum[idx] / ep_len)
+                conv_active_rate = float(episode_conv_active_steps[idx] / max(1.0, ep_len))
+                stats['conviction_bonus_means'].append(conv_bonus_mean)
+                stats['conviction_active_rates'].append(conv_active_rate)
                 
                 # TensorBoard (Per Episode)
                 writer.add_scalar("rollout/episode_reward", episode_rewards[idx], global_step)
@@ -472,6 +493,8 @@ def train():
                 writer.add_scalar("rollout/pos_pct_mean", float(pos_pct_mean), global_step)
                 writer.add_scalar("rollout/abs_pos_pct_mean", float(abs_pos_pct_mean), global_step)
                 writer.add_scalar("rollout/pos_time_rate", float(pos_time_rate), global_step)
+                writer.add_scalar("rollout/conviction_bonus_mean", float(conv_bonus_mean), global_step)
+                writer.add_scalar("rollout/conviction_active_rate", float(conv_active_rate), global_step)
                 
                 # Reset Trackers
                 episode_rewards[idx] = 0
@@ -483,6 +506,8 @@ def train():
                 episode_abs_sl_gap_sum[idx] = 0.0
                 episode_pos_pct_sum[idx] = 0.0
                 episode_abs_pos_pct_sum[idx] = 0.0
+                episode_conv_bonus_sum[idx] = 0.0
+                episode_conv_active_steps[idx] = 0
                 cost_calculator.reset([idx], [Config.INITIAL_BALANCE])
         else:
              real_next_obs = next_obs

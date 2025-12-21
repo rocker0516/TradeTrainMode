@@ -196,6 +196,18 @@ class Config:
     # 主線獎勵僅保留 log return；其他塑形移至成本線
     REWARD_LOG_RET_WEIGHT = 1  # 方案B：放大 log-return 影響力（預設 2x）
 
+    # --- Optional: Conviction + Trend Alignment bonus (reward shaping) ---
+    # 目的：鼓勵 agent 在「訊號夠強」時敢於用「較大倉位」承擔風險，而不是收斂到 0 倉位。
+    # 設計：只加分、不扣分；且必須同時滿足
+    # - |trend_dir| >= REWARD_CONVICTION_TREND_MIN_STRENGTH（trend_dir = tanh(macd_z)）
+    # - abs_position_pct >= REWARD_CONVICTION_MIN_ABS_POS（以 equity*leverage 正規化）
+    # 並且曝險方向需與 trend_dir 同向才給 bonus。
+    #
+    # 建議：先從 0.0 開始（維持純 log-return），若想要更「有信心壓大」再逐步調高。
+    REWARD_CONVICTION_TREND_BONUS_WEIGHT = 0.3
+    REWARD_CONVICTION_TREND_MIN_STRENGTH = 0.8
+    REWARD_CONVICTION_MIN_ABS_POS = 0.3
+
     # =========================
     # 6. 強化學習訓練超參數（SAC）
     # =========================
