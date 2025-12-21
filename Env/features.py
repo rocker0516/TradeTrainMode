@@ -20,6 +20,16 @@ def _rolling_z(series: pd.Series, window: int, min_periods: int = 20) -> pd.Seri
     return z.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
+def _rolling_mean(series: pd.Series, window: int, min_periods: int = 20) -> pd.Series:
+    """Return rolling mean."""
+    return series.rolling(window, min_periods=min_periods).mean()
+
+
+def _rolling_std(series: pd.Series, window: int, min_periods: int = 20) -> pd.Series:
+    """Return rolling std."""
+    return series.rolling(window, min_periods=min_periods).std()
+
+
 def _ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False, min_periods=1).mean()
 
@@ -151,6 +161,268 @@ def compute_smc_features(df: pd.DataFrame, lookback: int = 288) -> pd.DataFrame:
     return feats
 
 
+def compute_rolling_profile_features(df: pd.DataFrame, window: int = 288) -> pd.DataFrame:
+    """Compute Rolling Volume Profile (Market Profile Proxy) Features."""
+    close = df['close']
+    volume = df['volume']
+    typical_price = (df['high'] + df['low'] + df['close']) / 3.0
+    
+    # 1. Rolling VWAP
+    pv = typical_price * volume
+    roll_pv = pv.rolling(window=window, min_periods=1).sum()
+    roll_vol = volume.rolling(window=window, min_periods=1).sum()
+    vwap = roll_pv / roll_vol.replace(0.0, np.nan)
+    
+    # 2. Rolling VWSD (Volume Weighted Standard Deviation)
+    p2v = (typical_price ** 2) * volume
+    roll_p2v = p2v.rolling(window=window, min_periods=1).sum()
+    mean_p2 = roll_p2v / roll_vol.replace(0.0, np.nan)
+    
+    variance = mean_p2 - vwap ** 2
+    variance = variance.clip(lower=0.0)
+    vwsd = np.sqrt(variance)
+    
+    poc = vwap
+    vah = vwap + vwsd
+    val = vwap - vwsd
+    
+    z_score = (close - vwap) / vwsd.replace(0.0, 1.0)
+    density = np.exp(-0.5 * z_score**2) 
+    
+    poc = poc.fillna(close)
+    vah = vah.fillna(close * 1.01)
+    val = val.fillna(close * 0.99)
+    density = density.fillna(0.0)
+    
+    feats = pd.DataFrame({
+        'profile_poc': poc.astype(np.float32),
+        'profile_vah': vah.astype(np.float32),
+        'profile_val': val.astype(np.float32),
+        'profile_density': density.astype(np.float32)
+    }, index=df.index)
+    
+    return feats
+
+def compute_long_term_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute multi-timescale features for state vector (e.g. 5-day trend, 30-day vol regime)."""
+    close = df['close'].astype(float)
+    high = df['high'].astype(float)
+    low = df['low'].astype(float)
+    
+    # 5 days = 5 * 288 = 1440 steps (approx)
+    # 30 days = 30 * 288 = 8640 steps
+    
+    # 1. Long-term Returns (5 days)
+    # Log return over 5 days
+    log_close = np.log(np.clip(close, 1e-12, None))
+    ret_5d = log_close.diff(1440).fillna(0.0)
+    
+    # Normalize by long-term vol? Or just clip?
+    # Let's use a rolling z-score over 30 days
+    ret_5d_z = _rolling_z(ret_5d, window=8640)
+    
+    # 2. Volatility Regime (30 days)
+    # Calculate daily range or returns std
+    log_ret = log_close.diff().fillna(0.0)
+    vol_30d = log_ret.rolling(window=8640, min_periods=288).std()
+    
+    # Rank of current vol against last year (approx 100k steps)
+    # To save compute, we can use a shorter rank window or z-score
+    vol_regime_long = _rolling_z(vol_30d, window=8640 * 3) # 3 months context
+    
+    # 3. Realized Volatility (5 days)
+    vol_5d = log_ret.rolling(window=1440, min_periods=288).std()
+    vol_5d_z = _rolling_z(vol_5d, window=8640)
+    
+    feats = pd.DataFrame({
+        'lt_ret_5d_z': ret_5d_z.astype(np.float32),
+        'lt_vol_regime': vol_regime_long.astype(np.float32),
+        'lt_vol_5d_z': vol_5d_z.astype(np.float32)
+    }, index=df.index)
+    
+    return feats
+
+def compute_multi_timeframe_bias(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute market bias for multiple timeframes (15m, 1h, 1d).
+    
+    Returns:
+        DataFrame with columns 'bias_15m', 'bias_1h', 'bias_1d' (normalized z-scores or ratios).
+        Values are reindexed to match original df index (5m).
+    """
+    # Ensure index is DatetimeIndex
+    if not isinstance(df.index, pd.DatetimeIndex):
+        # Fallback if integer index: treat as 5min steps
+        # Create dummy datetime index starting from 2000-01-01
+        # This is just for resampling, won't replace original index
+        temp_index = pd.date_range(start='2000-01-01', periods=len(df), freq='5min')
+        series_close = pd.Series(df['close'].values, index=temp_index)
+    else:
+        series_close = df['close']
+
+    biases = {}
+    
+    # Define timeframes and their window sizes for bias calc (e.g. EMA 20)
+    # TF: frequency str
+    timeframes = {
+        '15m': '15min',
+        '1h': '1h',
+        '1d': '1d'
+    }
+    
+    for tf_name, freq in timeframes.items():
+        # Resample to higher TF
+        # label='right', closed='right' ensures we use data up to time T
+        resampled = series_close.resample(freq, label='right', closed='right').last().dropna()
+        
+        if len(resampled) < 20:
+            # Not enough data
+            bias = pd.Series(0.0, index=resampled.index)
+        else:
+            # Calculate Bias Indicator: (Close - EMA(20)) / ATR(20) approx
+            # Or simpler: (Close - EMA(20)) / EMA(20) normalized
+            ema = resampled.ewm(span=20, adjust=False).mean()
+            diff = (resampled - ema) / ema
+            
+            # Rolling Z-score of this diff to normalize to roughly [-2, 2]
+            # Use a window of say 50 bars of that TF
+            bias = _rolling_z(diff, window=50, min_periods=10)
+            
+            # Clip to reasonable range [-3, 3]
+            bias = bias.clip(-3, 3)
+            
+        # Reindex back to original 5m index with forward fill
+        # We use reindex with method='ffill' to propagate the last known bias
+        aligned_bias = bias.reindex(series_close.index, method='ffill').fillna(0.0)
+        biases[f'bias_{tf_name}'] = aligned_bias.values
+        
+    return pd.DataFrame(biases, index=df.index).astype(np.float32)
+
+
+def compute_market_shape_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute shape features for CNN input (price_seq), fully normalized.
+    
+    Included Features (base F=7, plus lightweight multi-scale returns):
+    1. ret_t: log(close_t / close_{t-1}) / rolling_std
+    2. range_t: ((high_t - low_t) / close_{t-1}) / rolling_mean_range
+    3. body_t: ((close_t - open_t) / close_{t-1}) / rolling_mean_range
+    4. vol_t: log(volume_t / vol_mean_recent)
+    5. vol_regime_t: Percentile rank of current range.
+    6. spread_t: (ask-bid)/mid / mean_spread
+    7. density_t: rolling profile density (short window)
+
+    Extra (low-cost multi-scale, avoids duplicating all channels):
+    8. ret_15m_t: rolling-sum log return over 3 bars (approx 15m) / rolling std
+    9. ret_1h_t: rolling-sum log return over 12 bars (approx 1h) / rolling std
+    """
+    close = df['close'].astype(float)
+    open_ = df.get('open', close).astype(float)
+    high = df['high'].astype(float)
+    low = df['low'].astype(float)
+    volume = df.get('volume', pd.Series(0.0, index=df.index)).astype(float)
+    
+    prev_close = close.shift(1).bfill().fillna(0.0)
+    
+    # 0. Base Components
+    log_close = np.log(np.clip(close, 1e-12, None))
+    raw_ret = log_close.diff().fillna(0.0)
+    
+    raw_range_pct = (high - low) / np.clip(prev_close, 1e-12, None)
+    raw_body_pct = (close - open_) / np.clip(prev_close, 1e-12, None)
+    
+    # Rolling Stats (Lookback 288 for robust normalization)
+    norm_window = 288
+    ret_std = _rolling_std(raw_ret, norm_window).replace(0.0, 1.0)
+    range_mean = _rolling_mean(raw_range_pct, norm_window).replace(0.0, 1e-4) # avoid div 0
+    
+    # 1. Normalized Log Return (Z-score)
+    ret_norm = raw_ret / ret_std
+    ret_norm = ret_norm.clip(-5, 5)
+
+    # 1b. Multi-scale returns (lightweight channels)
+    # Use rolling sum of log-returns to approximate higher timeframe returns.
+    # Normalize by rolling std (same norm_window) to keep scale stable.
+    raw_ret_15m = raw_ret.rolling(window=3, min_periods=1).sum()
+    raw_ret_1h = raw_ret.rolling(window=12, min_periods=1).sum()
+    ret_15m_std = _rolling_std(raw_ret_15m, norm_window).replace(0.0, 1.0)
+    ret_1h_std = _rolling_std(raw_ret_1h, norm_window).replace(0.0, 1.0)
+    ret_15m_norm = (raw_ret_15m / ret_15m_std).clip(-5, 5)
+    ret_1h_norm = (raw_ret_1h / ret_1h_std).clip(-5, 5)
+    
+    # 2. Relative Range
+    range_norm = raw_range_pct / range_mean
+    range_norm = range_norm.clip(0, 10)
+    
+    # 3. Relative Body
+    body_norm = raw_body_pct / range_mean
+    body_norm = body_norm.clip(-10, 10)
+    
+    # 4. Volume (already relative log-ratio)
+    vol_mean = volume.rolling(20, min_periods=1).mean().replace(0.0, 1.0)
+    vol_val = np.log(np.clip(volume / vol_mean, 1e-8, None))
+    vol_val = vol_val.clip(-5, 5)
+    
+    # 5. Volatility Regime (0-1)
+    vol_regime = raw_range_pct.rolling(window=288, min_periods=1).rank(pct=True).fillna(0.5)
+
+    # 6. Spread (Relative)
+    if 'ask1' in df.columns and 'bid1' in df.columns:
+         mid = (df['ask1'] + df['bid1']) / 2
+         spread_raw = (df['ask1'] - df['bid1']) / np.clip(mid, 1e-12, None)
+         spread_mean = spread_raw.rolling(288, min_periods=1).mean().replace(0.0, 1e-6)
+         spread_val = spread_raw / spread_mean
+         spread_val = spread_val.clip(0, 10)
+    else:
+         spread_val = pd.Series(0.0, index=df.index)
+    
+    # 7. Profile Density (from pre-calculated or simple calc here if light)
+    prof_feats = compute_rolling_profile_features(df, window=288) # 1 day window for short-term density
+    
+    features_dict = {
+        'ret': ret_norm,
+        'ret_15m': ret_15m_norm,
+        'ret_1h': ret_1h_norm,
+        'range': range_norm,
+        'body': body_norm,
+        'vol': vol_val,
+        'vol_regime': vol_regime,
+        'spread': spread_val,
+        'density': prof_feats['profile_density'] # Add density to CNN input
+    }
+    
+    features = pd.DataFrame(features_dict, index=df.index)
+    
+    return features.fillna(0.0).astype(np.float32)
+
+
+def compute_price_position_features(df: pd.DataFrame, window: int = 288) -> pd.DataFrame:
+    """Compute price position in range and ATR Z-score.
+    
+    Features:
+    - price_pos_in_range: (Close - Low_W) / (High_W - Low_W)
+    - atr_z: Rolling Z-score of ATR
+    """
+    close = df['close'].astype(float)
+    high = df['high'].astype(float)
+    low = df['low'].astype(float)
+    
+    # 1. Price Position in Range
+    roll_low = low.rolling(window=window, min_periods=1).min()
+    roll_high = high.rolling(window=window, min_periods=1).max()
+    den = (roll_high - roll_low).replace(0.0, 1.0)
+    price_pos = (close - roll_low) / den
+    price_pos = price_pos.clip(0.0, 1.0)
+    
+    # 2. ATR Z-Score
+    atr = _atr(high, low, close, period=14)
+    atr_z = _rolling_z(atr, window=window).clip(-3, 3)
+    
+    return pd.DataFrame({
+        'price_pos_in_range': price_pos.astype(np.float32),
+        'atr_z_score': atr_z.astype(np.float32)
+    }, index=df.index)
+
+
 def build_all_features(df: pd.DataFrame, lookback: int = 288) -> pd.DataFrame:
     """Build and return all additional feature columns aligned to df index.
 
@@ -161,10 +433,22 @@ def build_all_features(df: pd.DataFrame, lookback: int = 288) -> pd.DataFrame:
     Returns:
         DataFrame of engineered features (float32), NaN-safe.
     """
-    macd_df = compute_macd_features(df['close'], lookback=lookback)#MACD指標
-    liq_df = compute_liquidity_features(df, lookback=lookback)#流動性指標
-    smc_df = compute_smc_features(df, lookback=lookback)#SMC指標
-    extra = pd.concat([macd_df, liq_df, smc_df], axis=1)
+    macd_df = compute_macd_features(df['close'], lookback=lookback)
+    liq_df = compute_liquidity_features(df, lookback=lookback)
+    smc_df = compute_smc_features(df, lookback=lookback)
+    
+    # Add Profile Features (Longer window for macro context in state vector)
+    # 1440 = 5 days (approx)
+    prof_df = compute_rolling_profile_features(df, window=1440)
+    
+    # Add Long-term features
+    lt_df = compute_long_term_features(df)
+    
+    # Add Multi-timeframe Bias
+    mtf_df = compute_multi_timeframe_bias(df)
+    
+    # Add Price Position and ATR Z (New)
+    pos_df = compute_price_position_features(df, window=lookback)
+    
+    extra = pd.concat([macd_df, liq_df, smc_df, prof_df, lt_df, mtf_df, pos_df], axis=1)
     return extra.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(np.float32)
-
-

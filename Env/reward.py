@@ -1,13 +1,9 @@
 """
-統一正規化獎勵（依優先序）：
-1) 終局（terminal）  2) 收益（return）  3) 風險（risk）  4) 結構性風險（struct）
+Log Return Reward Calculator (純主線版本)
 
-原則：
-- 各子項先正規化到固定尺度（[-1, 1] 或 [-1, 0]），再乘權重線性組合。
-- 終局以 -1 表示失敗（非 data_exhausted），權重最大。
-- 收益使用對數報酬縮放。
-- 風險用 margin_buffer 的凸性懲罰（越接近強平懲罰越大）。
-- 結構性風險含 MAE/ATR 與極值鄰近（dist_to_extreme/ATR），權重最小。
+設計目標：
+- 主線只保留資產對數報酬與終局懲罰。
+- 行為/風險懲罰移至成本線 (Lagrangian) 處理。
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -17,23 +13,18 @@ import numpy as np
 @dataclass
 class RewardCalculator:
     """
-    分層懲罰：止損 > 清算/資金不足
-    目標：避免觸發止損，次要才是盈利
+    主線獎勵計算器：僅使用「淨」對數報酬，可調整權重。
+    - Equity 已內含手續費、滑點、利息。
+    - 終局懲罰改移至成本線（death cost）處理，不再在主線扣分。
+    - base_log_ret_weight：控制 log-return 影響力（方案 B）
     """
-    # 權重（以「避免止損 + 存活」為最優先目標）
-    w_stop_loss: float = 50.0     # 觸發止損懲罰（固定，清晰訊號）
-    w_terminal: float = 120.0     # 清算/資金不足（步數歸一化，極端失敗）
-    w_risk: float = 15.0          # 每步風險（降低，因有止損保護）
-    w_struct: float = 5.0         # 結構性風險（降低，止損已處理 MAE）
-    w_return: float = 12.0        # 收益（維持）
+    c_liq: float = 0.0
+    fee_limit_penalty: float = 0.0
+    base_log_ret_weight: float = 1.0
 
-    # 尺度參數
-    return_clip: float = 0.02         # ±2% log return → ±1
-    risk_threshold: float = 0.85      # 安全區上界
-    risk_danger: float = 0.25         # 危險區下界
-    mae_atr_scale: float = 3.0        # MAE 達 3 ATR → -1
-    extreme_safe_atr: float = 3.0     # 距極值 3 ATR 視為安全
-    terminal_steps_scale: float = 1000.0  # 終局步數歸一化基準
+    # --- Debug / diagnostics (set on every compute call) ---
+    last_conviction_bonus: float = 0.0
+    last_conviction_active: bool = False
     
     def compute(
         self,
@@ -42,88 +33,142 @@ class RewardCalculator:
         new_equity: float,
         done: bool = False,
         termination_reason: str | None = None,
-        margin_buffer: float | None = None,
-        turnover_ratio: float | None = None,
-        dist_to_extreme_atr: float | None = None,
-        mae_atr: float | None = None,
-        leverage_ratio: float | None = None,
-        realized_pnl_step: float | None = None,
-        has_position: bool = False,
-        unrealized_pnl: float | None = None,
-        traded: bool = False,
         episode_steps: int | None = None,
-        stop_loss_triggered: bool = False,
-        **kwargs  # 忽略其他舊參數以保持兼容
+        episode_max_steps: int | None = None,
+        **kwargs
     ) -> float:
-        """計算加權獎勵（分層：止損 > 終局 > 風險 > 結構性 > 收益）。"""
-        total = 0.0
+        """
+        計算主線獎勵：log return 乘以權重。
+        """
+        # Default (no shaping)
+        self.last_conviction_bonus = 0.0
+        self.last_conviction_active = False
 
-        # 0) 止損懲罰（固定 -50，清晰訊號，優先於終局）
-        if stop_loss_triggered:
-            total += -1.0 * self.w_stop_loss
-
-        # 1) 終局懲罰（步數歸一化，僅用於清算/資金不足）
-        if done and termination_reason not in (None, 'data_exhausted'):
-            # 步數歸一化：活越久懲罰「絕對值」越大，但「相對每步收益」仍可見
-            # 例：100 步清算 → -120 × 0.1 = -12
-            #     5000 步清算 → -120 × 5.0 = -600
-            steps_normalized = max(episode_steps or 100, 1) / self.terminal_steps_scale
-            terminal_penalty = -1.0 * self.w_terminal * steps_normalized
-            total += float(np.clip(terminal_penalty, -self.w_terminal * 10, 0.0))  # 上限 10x
-
-        # 2) 收益：log return 正規化到 [-1, 1]
-        if last_equity > 1e-8 and new_equity > 1e-8 and self.return_clip > 0:
-            log_ret = float(np.log(new_equity / last_equity))
-            ret_norm = float(np.clip(log_ret / self.return_clip, -1.0, 1.0))
-            total += ret_norm * self.w_return
-
-        # 3) 風險：margin_buffer 的凸性懲罰 [-1, 0]
-        if margin_buffer is not None and self.w_risk > 0:
-            risk_pen = 0.0
-            if margin_buffer < self.risk_threshold:
-                if margin_buffer >= self.risk_danger:
-                    # 線性區
-                    deficit = (self.risk_threshold - margin_buffer) / max(self.risk_threshold - self.risk_danger, 1e-6)
-                    risk_pen = -float(np.clip(deficit, 0.0, 1.0))
-                else:
-                    # 危險區：二次懲罰
-                    deficit2 = (self.risk_danger - margin_buffer) / max(self.risk_danger, 1e-6)
-                    risk_pen = -float(np.clip(deficit2, 0.0, 1.0) ** 2)
-            total += risk_pen * self.w_risk
-
-        # 4) 結構性：MAE/ATR 與 極值鄰近，合成後 clip 到 [-1, 0]
-        struct_pen = 0.0
-        if mae_atr is not None and self.mae_atr_scale > 0:
-            mae_norm = float(np.clip(mae_atr / self.mae_atr_scale, 0.0, 1.0))
-            struct_pen -= mae_norm
-        if dist_to_extreme_atr is not None and self.extreme_safe_atr > 0:
-            proximity = 1.0 - float(np.clip(dist_to_extreme_atr / self.extreme_safe_atr, 0.0, 1.0))
-            struct_pen -= float(np.clip(proximity, 0.0, 1.0))
-        struct_pen = float(np.clip(struct_pen, -1.0, 0.0))
-        total += struct_pen * self.w_struct
-
-        return float(total)
+        safe_last = max(last_equity, 1e-8)
+        safe_new = max(new_equity, 1e-8)
+        
+        log_ret = np.log(safe_new / safe_last)
+        
+        reward = float(self.base_log_ret_weight * log_ret)
+        return reward
     
     def get_info(self) -> dict:
         return {
-            'type': 'stop_loss_priority',
-            'weights': {
-                'stop_loss': self.w_stop_loss,
-                'terminal': self.w_terminal,
-                'return': self.w_return,
-                'risk': self.w_risk,
-                'struct': self.w_struct,
-            },
-            'scales': {
-                'return_clip': self.return_clip,
-                'risk_threshold': self.risk_threshold,
-                'risk_danger': self.risk_danger,
-                'mae_atr_scale': self.mae_atr_scale,
-                'extreme_safe_atr': self.extreme_safe_atr,
-                'terminal_steps_scale': self.terminal_steps_scale,
-            }
+            'type': 'log_return_only',
+            'c_liq': self.c_liq,
+            'base_log_ret_weight': self.base_log_ret_weight,
         }
 
-# 工廠函數保留以便外部一致使用名稱
-def create_default_calculator() -> RewardCalculator:
-    return RewardCalculator()
+# 工廠函數
+def create_default_calculator(
+    c_liq: float = 10.0,
+    fee_limit_penalty: float = 2.0,
+    base_log_ret_weight: float = 1.0,
+    conviction_trend_bonus_weight: float = 0.0,
+    conviction_trend_min_strength: float = 0.8,
+    conviction_min_abs_pos: float = 0.15,
+) -> RewardCalculator:
+    """
+    工廠函數：建立 reward calculator。
+
+    Notes:
+    - 預設仍是「純 log-return」(conviction_trend_bonus_weight=0) => 不改變現有行為。
+    - 若 conviction_trend_bonus_weight > 0，則啟用「強訊號 + 大倉 + 同向」的 conviction bonus：
+      只在 trend 訊號夠強且曝險夠大時才加分，避免小倉刷分。
+    """
+    # 兼容舊接口，但默認不再使用終局懲罰；允許外部調整 log-return 權重
+    if float(conviction_trend_bonus_weight) <= 0.0:
+        return RewardCalculator(
+            c_liq=0.0,
+            fee_limit_penalty=0.0,
+            base_log_ret_weight=base_log_ret_weight
+        )
+    return ConvictionTrendRewardCalculator(
+        c_liq=0.0,
+        fee_limit_penalty=0.0,
+        base_log_ret_weight=base_log_ret_weight,
+        conviction_trend_bonus_weight=float(conviction_trend_bonus_weight),
+        conviction_trend_min_strength=float(conviction_trend_min_strength),
+        conviction_min_abs_pos=float(conviction_min_abs_pos),
+    )
+
+
+@dataclass
+class ConvictionTrendRewardCalculator(RewardCalculator):
+    """
+    Conviction + Trend Alignment Reward (可選 shaping)
+
+    目標：讓 agent 在「訊號明確」時，願意用「較大倉位」去承擔風險並賺取主線收益，
+    而不是收斂到接近 0 的曝險。
+
+    設計原則：
+    - 只加「正向」獎勵（不另加懲罰），避免破壞既有風險約束的語義。
+    - 只在訊號強度 >= 門檻、且 abs_position_pct >= 門檻時才啟用（避免小倉刷分）。
+    - 僅獎勵「同向」曝險：pos_pct * trend_dir > 0 才加分。
+
+    需要的 kwargs（由 env 提供）：
+    - position_pct: [-1, 1] 以 equity*leverage 正規化的 signed exposure
+    - abs_position_pct: [0, 1] position_pct 絕對值
+    - trend_score: 例如 macd_z（已在 env clip 到 [-5, 5]）
+    """
+    conviction_trend_bonus_weight: float = 0.0
+    conviction_trend_min_strength: float = 0.8
+    conviction_min_abs_pos: float = 0.15
+
+    def compute(
+        self,
+        *,
+        last_equity: float,
+        new_equity: float,
+        done: bool = False,
+        termination_reason: str | None = None,
+        episode_steps: int | None = None,
+        episode_max_steps: int | None = None,
+        **kwargs
+    ) -> float:
+        base = super().compute(
+            last_equity=last_equity,
+            new_equity=new_equity,
+            done=done,
+            termination_reason=termination_reason,
+            episode_steps=episode_steps,
+            episode_max_steps=episode_max_steps,
+            **kwargs
+        )
+
+        w = float(self.conviction_trend_bonus_weight)
+        if w <= 0.0:
+            return float(base)
+
+        pos_pct = float(kwargs.get("position_pct", 0.0))
+        abs_pos_pct = float(kwargs.get("abs_position_pct", abs(pos_pct)))
+        trend_score = float(kwargs.get("trend_score", 0.0))
+
+        # Convert to bounded directional signal in [-1, 1]
+        trend_dir = float(np.tanh(np.clip(trend_score, -5.0, 5.0)))
+        strength = float(abs(trend_dir))
+
+        # Gate 1: require strong enough trend signal
+        s0 = float(self.conviction_trend_min_strength)
+        if strength < s0:
+            return float(base)
+
+        # Gate 2: require sufficiently large exposure (avoid tiny-position "bonus farming")
+        p0 = float(self.conviction_min_abs_pos)
+        if abs_pos_pct < p0:
+            return float(base)
+
+        # Alignment: only reward when exposure is in the same direction as trend proxy
+        align = float(pos_pct * trend_dir)  # positive => aligned
+        if align <= 0.0:
+            return float(base)
+
+        # Smooth gates so gradients don't become discontinuous around thresholds.
+        gate_s = float(np.clip((strength - s0) / max(1e-8, (1.0 - s0)), 0.0, 1.0))
+        gate_p = float(np.clip((abs_pos_pct - p0) / max(1e-8, (1.0 - p0)), 0.0, 1.0))
+        bonus = w * gate_s * gate_p * align
+
+        self.last_conviction_bonus = float(bonus)
+        self.last_conviction_active = True
+
+        return float(base + bonus)
