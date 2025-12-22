@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Protocol, Iterator
 import requests
+import pandas as pd
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -24,84 +25,12 @@ class CoinGlassDataError(CoinGlassAPIError):
     """Exception raised for data parsing or logical errors."""
     pass
 
-@dataclass
-class OHLCVData:
-    """
-    Data model representing a single candle (OHLCV).
-    """
-    timestamp: int  # Milliseconds
-    open_price: float
-    high_price: float
-    low_price: float
-    close_price: float
-    volume_usd: float
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Converts the data to a dictionary."""
-        return {
-            "time": self.timestamp,
-            "open": self.open_price,
-            "high": self.high_price,
-            "low": self.low_price,
-            "close": self.close_price,
-            "volume_usd": self.volume_usd
-        }
-
-    @classmethod
-    def from_api_dict(cls, data: Dict[str, Any]) -> 'OHLCVData':
-        """Creates an instance from API response dictionary."""
-        try:
-            return cls(
-                timestamp=int(data['t']),
-                open_price=float(data['o']),
-                high_price=float(data['h']),
-                low_price=float(data['l']),
-                close_price=float(data['c']),
-                volume_usd=float(data['v'])
-            )
-        except KeyError as e:
-            # Fallback for alternative field names if API differs
-            try:
-                return cls(
-                    timestamp=int(data['time']),
-                    open_price=float(data['open']),
-                    high_price=float(data['high']),
-                    low_price=float(data['low']),
-                    close_price=float(data['close']),
-                    volume_usd=float(data['volume_usd'])
-                )
-            except KeyError as inner_e:
-                raise CoinGlassDataError(f"Missing field in API response: {inner_e}") from e
-        except (ValueError, TypeError) as e:
-            raise CoinGlassDataError(f"Invalid data type in API response: {e}") from e
-
-class IMarketDataProvider(ABC):
-    """
-    Abstract Base Class for market data providers (DIP).
-    """
-    @abstractmethod
-    def fetch_history(self, exchange: str, symbol: str, interval: str, 
-                      start_time: int, end_time: int) -> Iterator[OHLCVData]:
-        """
-        Fetches historical OHLCV data.
-
-        Args:
-            exchange: The exchange name (e.g., 'Binance').
-            symbol: The trading pair symbol (e.g., 'BTCUSDT').
-            interval: The time interval (e.g., '5m').
-            start_time: Start timestamp in milliseconds.
-            end_time: End timestamp in milliseconds.
-
-        Returns:
-            Iterator of OHLCVData objects.
-        """
-        pass
 
 class CoinGlassClient:
     """
     Low-level client for CoinGlass API (SRP: Handle HTTP requests).
     """
-    BASE_URL = "https://open-api-v4.coinglass.com/api/futures/price/history"
+    BASE_URL = "https://open-api-v4.coinglass.com/api/"
 
     def __init__(self, api_key: str):
         """
@@ -122,8 +51,108 @@ class CoinGlassClient:
             "CG-API-KEY": self._api_key  # CoinGlass API v4 uses CG-API-KEY header
         })
 
+    def _fetch_history_data(self, endpoint: str, exchange: str = None, symbol: str = None, interval: str = None, limit: int = None, 
+                           start_time: Optional[int] = None, end_time: Optional[int] = None, 
+                           raise_on_error: bool = True) -> pd.DataFrame:
+        """
+        Internal method to fetch history data from CoinGlass API.
+        
+        Args:
+            endpoint: API endpoint path (e.g., 'futures/price/history').
+            exchange: Exchange name (e.g., 'Binance').
+            symbol: Trading pair symbol (e.g., 'BTCUSDT').
+            interval: Time interval (e.g., '5m').
+            limit: Maximum number of records to return.
+            start_time: Start timestamp in milliseconds (optional).
+            end_time: End timestamp in milliseconds (optional).
+            raise_on_error: Whether to raise exceptions on API errors (default: True).
+            
+        Returns:
+            DataFrame of history data.
+            
+        Raises:
+            CoinGlassRequestError: If HTTP request fails or API returns error code (when raise_on_error=True).
+            CoinGlassDataError: If response data cannot be parsed (when raise_on_error=True).
+        """
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit
+        }
+        if exchange:
+            params["exchange"] = exchange
+        if start_time:
+            params["start_time"] = start_time
+        if end_time:
+            params["end_time"] = end_time
+
+        url = self.BASE_URL + endpoint
+
+        try:
+            logger.debug(f"Requesting: {url} with params: {params}")
+            response = self._session.get(url, params=params, timeout=10)
+            
+            # Check HTTP status code
+            if response.status_code == 400:
+                error_data = response.json() if response.content else {}
+                error_msg = error_data.get("msg", "Bad Request (400)")
+                if raise_on_error:
+                    raise CoinGlassRequestError(
+                        f"API returned 400 Bad Request: {error_msg}. "
+                        f"Please check your API key and parameters. Response: {error_data}"
+                    )
+            
+            # Handle rate limit (429 Too Many Requests)
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After", "60")
+                error_data = response.json() if response.content else {}
+                error_msg = error_data.get("msg", "Rate limit exceeded")
+                if raise_on_error:
+                    raise CoinGlassRequestError(
+                        f"API returned 429 Rate Limit Exceeded: {error_msg}. "
+                        f"Please wait {retry_after} seconds before retrying. Response: {error_data}"
+                    )
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            # Check API response code (CoinGlass uses code field in response body)
+            api_code = data.get("code")
+            if api_code and api_code != "0" and str(api_code) != "200":
+                error_msg = data.get("msg", "Unknown error")
+                if raise_on_error:
+                    raise CoinGlassRequestError(
+                        f"API returned error code {api_code}: {error_msg}. "
+                        f"Full response: {data}"
+                    )
+            
+            if "data" not in data:
+                logger.warning(f"No 'data' field in API response: {data}")
+                return pd.DataFrame()
+            
+            return pd.DataFrame(data["data"])
+            
+        except requests.exceptions.HTTPError as e:
+            if raise_on_error:
+                error_detail = ""
+                try:
+                    error_data = e.response.json() if e.response.content else {}
+                    error_detail = f" Response: {error_data}"
+                except:
+                    error_detail = f" Response text: {e.response.text[:200]}"
+                raise CoinGlassRequestError(f"HTTP error during API call: {e}{error_detail}") from e
+            return pd.DataFrame()
+        except requests.exceptions.RequestException as e:
+            if raise_on_error:
+                raise CoinGlassRequestError(f"Network error during API call: {e}") from e
+            return pd.DataFrame()
+        except ValueError as e:
+            if raise_on_error:
+                raise CoinGlassDataError(f"Invalid JSON response: {e}") from e
+            return pd.DataFrame()
+
     def get_price_history(self, exchange: str, symbol: str, interval: str, limit: int, 
-                          start_time: Optional[int] = None, end_time: Optional[int] = None) -> List[Dict[str, Any]]:
+                          start_time: Optional[int] = None, end_time: Optional[int] = None) -> pd.DataFrame:
         """
         Calls the price history endpoint.
         
@@ -136,252 +165,446 @@ class CoinGlassClient:
             end_time: End timestamp in milliseconds (optional).
             
         Returns:
-            List of OHLCV data dictionaries.
+            DataFrame of OHLCV data.
             
         Raises:
             CoinGlassRequestError: If HTTP request fails or API returns error code.
             CoinGlassDataError: If response data cannot be parsed.
         """
-        params = {
-            "exchange": exchange,
-            "symbol": symbol,
-            "interval": interval,
-            "limit": limit
-        }
-        if start_time:
-            params["startTime"] = start_time
-        if end_time:
-            params["endTime"] = end_time
-
-        try:
-            logger.debug(f"Requesting: {self.BASE_URL} with params: {params}")
-            response = self._session.get(self.BASE_URL, params=params, timeout=10)
-            
-            # Check HTTP status code
-            if response.status_code == 400:
-                error_data = response.json() if response.content else {}
-                error_msg = error_data.get("msg", "Bad Request (400)")
-                raise CoinGlassRequestError(
-                    f"API returned 400 Bad Request: {error_msg}. "
-                    f"Please check your API key and parameters. Response: {error_data}"
-                )
-            
-            # Handle rate limit (429 Too Many Requests)
-            if response.status_code == 429:
-                retry_after = response.headers.get("Retry-After", "60")
-                error_data = response.json() if response.content else {}
-                error_msg = error_data.get("msg", "Rate limit exceeded")
-                raise CoinGlassRequestError(
-                    f"API returned 429 Rate Limit Exceeded: {error_msg}. "
-                    f"Please wait {retry_after} seconds before retrying. Response: {error_data}"
-                )
-            
-            response.raise_for_status()
-            data = response.json()
-            
-            # Check API response code (CoinGlass uses code field in response body)
-            api_code = data.get("code")
-            if api_code and api_code != "0" and str(api_code) != "200":
-                error_msg = data.get("msg", "Unknown error")
-                raise CoinGlassRequestError(
-                    f"API returned error code {api_code}: {error_msg}. "
-                    f"Full response: {data}"
-                )
-            
-            if "data" not in data:
-                logger.warning(f"No 'data' field in API response: {data}")
-                return []
-            
-            return data["data"], response.headers
-            
-        except requests.exceptions.HTTPError as e:
-            error_detail = ""
-            try:
-                error_data = e.response.json() if e.response.content else {}
-                error_detail = f" Response: {error_data}"
-            except:
-                error_detail = f" Response text: {e.response.text[:200]}"
-            raise CoinGlassRequestError(f"HTTP error during API call: {e}{error_detail}") from e
-        except requests.exceptions.RequestException as e:
-            raise CoinGlassRequestError(f"Network error during API call: {e}") from e
-        except ValueError as e:
-            raise CoinGlassDataError(f"Invalid JSON response: {e}") from e
-
-class CoinGlassHistoryFetcher(IMarketDataProvider):
-    """
-    High-level fetcher for CoinGlass data (SRP: Orchestrate fetching logic).
-    """
-    def __init__(self, client: CoinGlassClient):
-        self._client = client
-
-    def fetch_history(self, exchange: str, symbol: str, interval: str, 
-                      start_time: int, end_time: int) -> Iterator[OHLCVData]:
-        """
-        Fetches historical data handling pagination with loop-based batching.
-        
-        This method automatically handles pagination by making multiple API calls
-        in a loop until all data within the time range is fetched.
-        Similar to GetTradeData.py's fetch_futures_data loop structure.
-        """
-        current_start = start_time
-        limit = 1000  # API maximum limit per request
-        
-        # Rate limit tracking (similar to GetTradeData.py)
-        request_count = 0
-        last_request_time = time.time()
-        max_requests_per_minute = 60  # Conservative default, adjust based on API limits
-        
-        logger.info(
-            f"Starting fetch for {symbol} from {datetime.fromtimestamp(start_time/1000)} "
-            f"to {datetime.fromtimestamp(end_time/1000)}"
+        return self._fetch_history_data(
+            endpoint="futures/price/history",
+            exchange=exchange,
+            symbol=symbol,
+            interval=interval,
+            limit=limit,
+            start_time=start_time,
+            end_time=end_time,
+            raise_on_error=True
         )
 
-        while current_start < end_time:
-            try:
-                # Check rate limit (similar to GetTradeData.py)
-                current_time = time.time()
-                if request_count >= max_requests_per_minute:
-                    wait_time = 60 - (current_time - last_request_time)
-                    if wait_time > 0:
-                        logger.info(f"Rate limit reached. Waiting {wait_time:.2f} seconds...")
-                        time.sleep(wait_time)
-                    request_count = 0
-                    last_request_time = time.time()
-                
-                # Fetch batch
-                raw_data, response_headers = self._client.get_price_history(
-                    exchange=exchange,
-                    symbol=symbol,
-                    interval=interval,
-                    limit=limit,
-                    start_time=current_start,
-                    end_time=end_time
-                )
-                
-                request_count += 1
-                
-                if not raw_data:
-                    logger.info("No more data returned from API. Fetch complete.")
-                    break
-                
-                # Yield all records in this batch
-                for item in raw_data:
-                    ohlcv = OHLCVData.from_api_dict(item)
-                    if ohlcv.timestamp > end_time:
-                        continue
-                    yield ohlcv
-                
-                # Update start time for next batch using last record's timestamp
-                # Similar to GetTradeData.py: current_start_ts = klines[-1][0] + 1
-                last_time = raw_data[-1].get('time') or raw_data[-1].get('t')
-                if not last_time:
-                    logger.warning("Could not determine last timestamp, stopping.")
-                    break
-                
-                current_start = int(last_time) + 1  # Avoid duplicate by adding 1ms
-                
-                # Display progress (similar to GetTradeData.py)
-                current_dt = datetime.fromtimestamp(current_start / 1000)
-                print(f"\rProcessed data up to {current_dt.strftime('%Y-%m-%d %H:%M:%S')}", end="")
-                
-                # Small delay between requests (similar to GetTradeData.py)
-                time.sleep(0.2)
-                
-            except CoinGlassRequestError as e:
-                error_msg = str(e)
-                # Handle rate limit errors (similar to GetTradeData.py)
-                if "429" in error_msg or "Rate Limit" in error_msg or "rate limit" in error_msg.lower() or "Too many requests" in error_msg:
-                    logger.warning("Rate limit reached. Waiting 60 seconds...")
-                    time.sleep(60)
-                    continue
-                logger.error(f"Error fetching data: {e}")
-                break
-                
-            except CoinGlassAPIError as e:
-                logger.error(f"Error fetching data: {e}")
-                break
-
-class IDataStorage(ABC):
-    """
-    Abstract Base Class for data storage (DIP).
-    """
-    @abstractmethod
-    def save(self, data: Iterator[OHLCVData], destination: str) -> None:
-        """Saves data to the destination."""
-        pass
-
-class CSVDataStorage(IDataStorage):
-    """
-    Saves data to CSV (SRP).
-    """
-    def save(self, data: Iterator[OHLCVData], destination: str) -> None:
+    def get_open_interest_history(self, exchange: str, symbol: str, interval: str, limit: int, 
+                          start_time: Optional[int] = None, end_time: Optional[int] = None) -> pd.DataFrame:
         """
-        Saves the iterator of OHLCVData to a CSV file.
+        Calls the open interest history endpoint.
+        
+        Args:
+            exchange: Exchange name (e.g., 'Binance').
+            symbol: Trading pair symbol (e.g., 'BTCUSDT').
+            interval: Time interval (e.g., '5m').
+            limit: Maximum number of records to return.
+            start_time: Start timestamp in milliseconds (optional).
+            end_time: End timestamp in milliseconds (optional).
+            
+        Returns:
+            DataFrame of open interest data.
+            
+        Raises:
+            CoinGlassRequestError: If HTTP request fails or API returns error code.
+            CoinGlassDataError: If response data cannot be parsed.
         """
-        try:
-            # We need to consume the iterator. 
-            # Note: For very large datasets, we might want to write in chunks.
-            # Here we will write row by row.
-            
-            file_exists = os.path.isfile(destination)
-            
-            with open(destination, mode='w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=["time", "open", "high", "low", "close", "volume_usd"])
-                writer.writeheader()
-                
-                count = 0
-                for item in data:
-                    writer.writerow(item.to_dict())
-                    count += 1
-                    
-            logger.info(f"Successfully saved {count} records to {destination}")
-            
-        except IOError as e:
-            raise IOError(f"Failed to write to CSV file {destination}: {e}") from e
+        return self._fetch_history_data(
+            endpoint="futures/open-interest/history",
+            exchange=exchange,
+            symbol=symbol,
+            interval=interval,
+            limit=limit,
+            start_time=start_time,
+            end_time=end_time,
+            raise_on_error=False
+        )
 
-def run_coinglass_fetch(api_key: str, exchange: str, symbol: str, interval: str, output_file: str):
+    def get_funding_rate_history(self, exchange: str, symbol: str, interval: str, limit: int, 
+                          start_time: Optional[int] = None, end_time: Optional[int] = None) -> pd.DataFrame:
+        """
+        Calls the funding rate history endpoint.
+        
+        Args:
+            exchange: Exchange name (e.g., 'Binance').
+            symbol: Trading pair symbol (e.g., 'BTCUSDT').
+            interval: Time interval (e.g., '5m').
+            limit: Maximum number of records to return.
+            start_time: Start timestamp in milliseconds (optional).
+            end_time: End timestamp in milliseconds (optional).
+            
+        Returns:
+            DataFrame of funding rate data.
+            
+        Raises:
+            CoinGlassRequestError: If HTTP request fails or API returns error code.
+            CoinGlassDataError: If response data cannot be parsed.
+        """
+        return self._fetch_history_data(
+            endpoint="futures/funding-rate/history",
+            exchange=exchange,
+            symbol=symbol,
+            interval=interval,
+            limit=limit,
+            start_time=start_time,
+            end_time=end_time,
+            raise_on_error=False
+        )
+        
+    def get_funding_rate_oi_weight_history(self, exchange: str = None, symbol: str = None, interval: str = None, limit: int = None, 
+                          start_time: Optional[int] = None, end_time: Optional[int] = None) -> pd.DataFrame:
+        """
+        Calls the funding rate oi weight history endpoint.
+        
+        Args:
+            exchange: Exchange name (e.g., 'Binance').
+            symbol: Trading pair symbol (e.g., 'BTCUSDT').
+            interval: Time interval (e.g., '5m').
+            limit: Maximum number of records to return.
+            start_time: Start timestamp in milliseconds (optional).
+            end_time: End timestamp in milliseconds (optional).
+            
+        Returns:
+            DataFrame of funding rate oi weight data.
+            
+        Raises:
+            CoinGlassRequestError: If HTTP request fails or API returns error code.
+            CoinGlassDataError: If response data cannot be parsed.
+        """
+        return self._fetch_history_data(
+            endpoint="futures/funding-rate/oi-weight-history",
+            symbol=symbol.replace("USDT", ""),
+            interval=interval,
+            limit=limit,
+            start_time=start_time,
+            end_time=end_time,
+            raise_on_error=False
+        )
+    
+    def get_funding_rate_vol_weight_history(self, symbol: str, interval: str, limit: int, 
+                          start_time: Optional[int] = None, end_time: Optional[int] = None) -> pd.DataFrame:
+        """
+        Calls the funding rate vol weight history endpoint.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., 'BTCUSDT').
+            interval: Time interval (e.g., '5m').
+            limit: Maximum number of records to return.
+            start_time: Start timestamp in milliseconds (optional).
+            end_time: End timestamp in milliseconds (optional).
+            
+        Returns:
+            DataFrame of funding rate vol weight data.
+            
+        Raises:
+            CoinGlassRequestError: If HTTP request fails or API returns error code.
+            CoinGlassDataError: If response data cannot be parsed.
+        """
+        return self._fetch_history_data(
+            endpoint="futures/funding-rate/vol-weight-history",
+            symbol=symbol.replace("USDT", ""),
+            interval=interval,
+            limit=limit,
+            start_time=start_time,
+            end_time=end_time,
+            raise_on_error=False
+        )
+    #特定交易所交易對的多空帳戶比率歷史記錄
+    def get_global_long_short_account_ratio_history(self, exchange: str, symbol: str, interval: str, limit: int, 
+                          start_time: Optional[int] = None, end_time: Optional[int] = None) -> pd.DataFrame:
+        """
+        Calls the global long short account ratio history endpoint.
+        
+        Args:
+            exchange: Exchange name (e.g., 'Binance').
+            symbol: Trading pair symbol (e.g., 'BTCUSDT').
+            interval: Time interval (e.g., '5m').
+            limit: Maximum number of records to return.
+            start_time: Start timestamp in milliseconds (optional).
+            end_time: End timestamp in milliseconds (optional).
+            
+        Returns:
+            DataFrame of global long short account ratio data.
+            
+        Raises:
+            CoinGlassRequestError: If HTTP request fails or API returns error code.
+            CoinGlassDataError: If response data cannot be parsed.
+        """
+        return self._fetch_history_data(
+            endpoint="futures/global-long-short-account-ratio/history",
+            exchange=exchange,
+            symbol=symbol,
+            interval=interval,
+            limit=limit,
+            start_time=start_time,
+            end_time=end_time,
+            raise_on_error=False
+        )
+
+        #頂級交易員多空帳戶比率的歷史資料
+    def get_top_long_short_account_ratio_history(self, exchange: str, symbol: str, interval: str, limit: int, 
+                          start_time: Optional[int] = None, end_time: Optional[int] = None) -> pd.DataFrame:
+        """
+        Calls the top long short account ratio history endpoint.
+        
+        Args:
+            exchange: Exchange name (e.g., 'Binance').
+            symbol: Trading pair symbol (e.g., 'BTCUSDT').
+            interval: Time interval (e.g., '5m').
+            limit: Maximum number of records to return.
+            start_time: Start timestamp in milliseconds (optional).
+            end_time: End timestamp in milliseconds (optional).
+            
+        Returns:
+            DataFrame of top long short account ratio data.
+            
+        Raises:
+            CoinGlassRequestError: If HTTP request fails or API returns error code.
+            CoinGlassDataError: If response data cannot be parsed.
+        """
+        return self._fetch_history_data(
+            endpoint="futures/top-long-short-account-ratio/history",
+            exchange=exchange,
+            symbol=symbol,
+            interval=interval,
+            limit=limit,
+            start_time=start_time,
+            end_time=end_time,
+            raise_on_error=False
+        )
+         #頂級交易員多空帳戶比率的歷史資料
+    def get_top_long_short_position_ratio_history(self, exchange: str, symbol: str, interval: str, limit: int, 
+                          start_time: Optional[int] = None, end_time: Optional[int] = None) -> pd.DataFrame:
+        """
+        Calls the top long short position ratio history endpoint.
+        
+        Args:
+            exchange: Exchange name (e.g., 'Binance').
+            symbol: Trading pair symbol (e.g., 'BTCUSDT').
+            interval: Time interval (e.g., '5m').
+            limit: Maximum number of records to return.
+            start_time: Start timestamp in milliseconds (optional).
+            end_time: End timestamp in milliseconds (optional).
+            
+        Returns:
+            DataFrame of top long short position ratio data.
+            
+        Raises:
+            CoinGlassRequestError: If HTTP request fails or API returns error code.
+            CoinGlassDataError: If response data cannot be parsed.
+        """
+        return self._fetch_history_data(
+            endpoint="futures/top-long-short-position-ratio/history",
+            exchange=exchange,
+            symbol=symbol,
+            interval=interval,
+            limit=limit,
+            start_time=start_time,
+            end_time=end_time,
+            raise_on_error=False
+        )
+def run_coinglass_fetch(
+    api_key: str,
+    exchange: str,
+    symbol: str,
+    interval: str,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> pd.DataFrame:
     """
     Main function to orchestrate the process.
     """
     # 1. Setup Dependency Injection
     client = CoinGlassClient(api_key=api_key)
-    fetcher = CoinGlassHistoryFetcher(client=client)
-    storage = CSVDataStorage()
 
-    # 2. Define Time Range (1 year)
-    end_dt = datetime.now()
-    start_dt = end_dt - timedelta(days=365 * 5)
-    
     end_ts = int(end_dt.timestamp() * 1000)
     start_ts = int(start_dt.timestamp() * 1000)
+    all_klines: pd.DataFrame = pd.DataFrame()
+    before_start_ts = start_ts - 1
+    current_start_ts = start_ts
 
-    # 3. Fetch and Save
-    try:
-        data_iterator = fetcher.fetch_history(
-            exchange=exchange,
-            symbol=symbol,
-            interval=interval,
-            start_time=start_ts,
-            end_time=end_ts
-        )
-        
-        storage.save(data_iterator, output_file)
-        print(f"Data saved to {output_file}")
-        
-    except Exception as e:
-        logger.error(f"An error occurred: {e}")
-        print(f"Failed to fetch data: {e}")
+     # 添加請求計數器
+    request_count = 0
+    last_request_time = time.time()
+
+    while current_start_ts < end_ts and current_start_ts != before_start_ts:
+        before_start_ts = current_start_ts
+        try:
+            # 檢查是否需要等待
+            current_time = time.time()
+            if request_count >= 300:  # 每分鐘限制
+                wait_time = 60 - (current_time - last_request_time)
+                if wait_time > 0:
+                    print(f"\nRate limit reached. Waiting {wait_time:.2f} seconds...")
+                    time.sleep(wait_time)
+                request_count = 0
+                last_request_time = time.time()
+            
+            history_data = client.get_price_history(
+                exchange=exchange,
+                symbol=symbol,
+                interval=interval,
+                limit=1000,
+                start_time=current_start_ts,
+                end_time= 60 * 5 * 1000 * 1000 + current_start_ts
+            )
+            request_count += 1
+            #未平倉合約
+            open_interest = client.get_open_interest_history(
+                exchange=exchange,
+                symbol=symbol,
+                interval=interval,
+                limit=1000,
+                start_time=current_start_ts,
+                end_time= 60 * 5 * 1000 * 1000 + current_start_ts
+            )
+
+            if len(open_interest) != 0:
+                open_interest = open_interest.rename(columns=lambda c: f"open_interest_{c}" if c != "time" else c)
+                history_data = history_data.merge(open_interest, on='time', how='left')
+            request_count += 1
+            #資金費率
+            funding_rate = client.get_funding_rate_history(
+                exchange=exchange,
+                symbol=symbol,
+                interval=interval,
+                limit=1000,
+                start_time=current_start_ts,
+                end_time= 60 * 5 * 1000 * 1000 + current_start_ts
+            )
+
+            if len(funding_rate) != 0:
+                funding_rate = funding_rate.rename(columns=lambda c: f"funding_rate_{c}" if c != "time" else c)
+                history_data = history_data.merge(funding_rate, on='time', how='left')
+            request_count += 1
+            
+            #資金費率未平倉合約權重
+            funding_rate_oi_weight = client.get_funding_rate_oi_weight_history(
+                symbol=symbol,
+                interval=interval,
+                limit=1000,
+                start_time=current_start_ts,
+                end_time= 60 * 5 * 1000 * 1000 + current_start_ts
+            )
+            if len(funding_rate_oi_weight) != 0:
+                funding_rate_oi_weight = funding_rate_oi_weight.rename(columns=lambda c: f"funding_rate_oi_weight_{c}" if c != "time" else c)
+                history_data = history_data.merge(funding_rate_oi_weight, on='time', how='left')
+            request_count += 1
+            
+            #資金費率成交量權重
+            funding_rate_vol_weight = client.get_funding_rate_vol_weight_history(
+                symbol=symbol,
+                interval=interval,
+                limit=1000,
+                start_time=current_start_ts,
+                end_time= 60 * 5 * 1000 * 1000 + current_start_ts
+            )
+            if len(funding_rate_vol_weight) != 0:
+                funding_rate_vol_weight = funding_rate_vol_weight.rename(columns=lambda c: f"funding_rate_vol_weight_{c}" if c != "time" else c)
+                history_data = history_data.merge(funding_rate_vol_weight, on='time', how='left')
+            request_count += 1
+
+            #特定交易所交易對的多空帳戶比率歷史記錄
+            global_long_short_account_ratio = client.get_global_long_short_account_ratio_history(
+                exchange=exchange,
+                symbol=symbol,
+                interval=interval,
+                limit=1000,
+                start_time=current_start_ts,
+                end_time= 60 * 5 * 1000 * 1000 + current_start_ts
+            )
+            if len(global_long_short_account_ratio) != 0:
+                global_long_short_account_ratio = global_long_short_account_ratio.rename(columns=lambda c: f"global_long_short_account_ratio_{c}" if c != "time" else c)
+                history_data = history_data.merge(global_long_short_account_ratio, on='time', how='left')
+            request_count += 1
+            
+            #頂級交易員多空帳戶比率歷史資料
+            top_long_short_account_ratio = client.get_top_long_short_account_ratio_history(
+                exchange=exchange,
+                symbol=symbol,
+                interval=interval,
+                limit=1000,
+                start_time=current_start_ts,
+                end_time= 60 * 5 * 1000 * 1000 + current_start_ts
+            )
+            if len(top_long_short_account_ratio) != 0:
+                top_long_short_account_ratio = top_long_short_account_ratio.rename(columns=lambda c: f"top_long_short_account_ratio_{c}" if c != "time" else c)
+                history_data = history_data.merge(top_long_short_account_ratio, on='time', how='left')
+            request_count += 1
+            
+            #頂級交易員多空帳戶比率歷史資料
+            top_long_short_position_ratio = client.get_top_long_short_position_ratio_history(
+                exchange=exchange,
+                symbol=symbol,
+                interval=interval,
+                limit=1000,
+                start_time=current_start_ts,
+                end_time= 60 * 5 * 1000 * 1000 + current_start_ts
+            )
+            if len(top_long_short_position_ratio) != 0:
+                top_long_short_position_ratio = top_long_short_position_ratio.rename(columns=lambda c: f"top_long_short_position_ratio_{c}" if c != "time" else c)
+                history_data = history_data.merge(top_long_short_position_ratio, on='time', how='left')
+            request_count += 1
+
+            all_klines = pd.concat([all_klines, history_data]) # 合併 dataframes，不會有重複的 timestamp
+            last_timestamp = all_klines['time'].max()
+            first_timestamp = all_klines['time'].min()
+            
+            current_start_ts = int(last_timestamp) + 1
+            
+            # 顯示進度
+            print(f"\rProcessed data up to {datetime.fromtimestamp(current_start_ts/1000)}", end="")
+            
+            time.sleep(0.2)
+            
+        except Exception as e:
+            logger.error(f"An error occurred: {e}")
+            print(f"Failed to fetch data: {e}")
+            break
+    
+    return all_klines
 
 if __name__ == "__main__":
     # Configuration via parameters/env
     API_KEY = os.getenv("COINGLASS_API_KEY", "1e41abd6360a4d1486b770e83982e33a")
+     # List of trading pairs to fetch
+    trading_pairs = [
+        'BTCUSDT'
+    ]
     EXCHANGE = "Binance"
-    SYMBOL = "BTCUSDT"
     INTERVAL = "5m"
-    OUTPUT_FILE = "Data/BTCUSDT_futures_volume_5years_5min.csv"
+        # 2. Define Time Range (1 year)
+    end_dt = datetime.now() - timedelta(minutes=5)
+    start_dt = end_dt - timedelta(days=365 * 2)
 
     if API_KEY == "YOUR_API_KEY_HERE":
         print("Please set COINGLASS_API_KEY environment variable or edit the script.")
     else:
-        run_coinglass_fetch(API_KEY, EXCHANGE, SYMBOL, INTERVAL, OUTPUT_FILE)
+        # Fetch data for each trading pair
+        for symbol in trading_pairs:
+            try:
+                print(f"\nFetching {symbol} futures data from {start_dt} to {end_dt}...")
+                all_klines = run_coinglass_fetch(API_KEY, EXCHANGE, symbol, INTERVAL, start_dt, end_dt)
+                
+                # 將字典列表轉換為 DataFrame
+                if all_klines.empty:
+                    print(f"No data fetched for {symbol}")
+                    continue
+                
+                # 按時間戳排序並去重
+                if not all_klines.empty:
+                    all_klines = all_klines.sort_values('time').drop_duplicates(subset=['time'], keep='first')
+                    all_klines = all_klines.reset_index(drop=True)
+
+                all_klines['time'] = pd.to_datetime(all_klines['time'], unit='ms')
+                
+                # Save to CSV
+                filename = f"Data/{symbol}_futures_volume_coinglass_5years_5min.csv"
+                all_klines.to_csv(filename, index=False)
+                print(f"Data saved to {filename}")
+                
+                # Display basic information
+                print(f"Total records: {len(all_klines)}")
+                print(f"Date range: {all_klines['time'].min()} to {all_klines['time'].max()}")
+                
+                # Add a small delay to avoid rate limiting
+                time.sleep(1)
+                
+            except Exception as e:
+                print(f"Error fetching data for {symbol}: {str(e)}")
+                continue
+        
 
