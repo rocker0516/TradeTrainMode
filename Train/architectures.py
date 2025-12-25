@@ -102,19 +102,49 @@ class PriceEncoder(nn.Module):
         x = self.layer_norm(x)
         return F.relu(x)
 
+class DailyMacroEncoder(nn.Module):
+    """
+    Encoder for Daily Macro Sequence using 1D CNN.
+    """
+    def __init__(self, input_channels: int, window_size: int, output_dim: int = 32):
+        super().__init__()
+        self.input_channels = input_channels
+        self.window_size = window_size
+        
+        self.conv1 = nn.Conv1d(input_channels, 16, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm1d(16)
+        self.conv2 = nn.Conv1d(16, 32, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm1d(32)
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        
+        self.fc = nn.Linear(32, output_dim)
+        self.ln = nn.LayerNorm(output_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, W, C) or (B, C, W)
+        if x.dim() == 3 and x.shape[1] == self.window_size:
+            x = x.permute(0, 2, 1)
+            
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.pool(x).flatten(1)
+        x = F.relu(self.ln(self.fc(x)))
+        return x
 
 class Actor(nn.Module):
     """
     SAC Actor Network (Gaussian Policy).
     
-    Takes price_seq and state_vector, fuses them, and outputs mean and log_std for actions.
+    Takes price_seq, daily_seq, and state_vector, fuses them, and outputs mean and log_std for actions.
     """
     def __init__(
         self, 
         price_input_channels: int, 
-        price_window_size: int, 
+        price_window_size: int,
         state_dim: int, 
         action_dim: int,
+        daily_input_channels: int = 1,
+        daily_window_size: int = 1,
         hidden_dim: int = 256,
         log_std_min: float = -20,
         log_std_max: float = 2
@@ -125,10 +155,13 @@ class Actor(nn.Module):
         
         # Encoders
         self.price_encoder = PriceEncoder(price_input_channels, price_window_size, output_dim=128)
+        self.daily_input_channels = int(daily_input_channels)
+        self.daily_window_size = int(daily_window_size)
+        self.daily_encoder = DailyMacroEncoder(max(1, self.daily_input_channels), max(1, self.daily_window_size), output_dim=32)
         
         # Fusion and Policy Head
-        # Combined dim = 128 (price) + state_dim
-        fusion_input_dim = 128 + state_dim
+        # Combined dim = 128 (price) + 32 (daily) + state_dim
+        fusion_input_dim = 128 + 32 + state_dim
         
         self.trunk = nn.Sequential(
             nn.Linear(fusion_input_dim, hidden_dim),
@@ -148,11 +181,40 @@ class Actor(nn.Module):
             if m.bias is not None:
                 m.bias.data.fill_(0.0)
 
-    def forward(self, price_seq: torch.Tensor, state_vec: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        price_seq: torch.Tensor,
+        daily_seq: torch.Tensor | None = None,
+        state_vec: torch.Tensor | None = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass.
+
+        Backward-compat:
+        - 舊測試/舊呼叫可能是 actor(price_seq, state_vec)
+        - 新版是 actor(price_seq, daily_seq, state_vec)
+        """
+        # Backward compatible arg routing
+        if state_vec is None:
+            state_vec = daily_seq  # type: ignore[assignment]
+            daily_seq = None
+
+        if state_vec is None:
+            raise ValueError("state_vec must be provided")
+
         price_emb = self.price_encoder(price_seq)
+        if daily_seq is None:
+            # If daily_seq is missing, feed zeros (keeps net shape stable).
+            b = price_seq.shape[0]
+            daily_seq = torch.zeros(
+                (b, max(1, self.daily_window_size), max(1, self.daily_input_channels)),
+                dtype=price_seq.dtype,
+                device=price_seq.device,
+            )
+        daily_emb = self.daily_encoder(daily_seq)
         
         # Concatenate
-        x = torch.cat([price_emb, state_vec], dim=1)
+        x = torch.cat([price_emb, daily_emb, state_vec], dim=1)
         x = self.trunk(x)
         
         mean = self.mean_head(x)
@@ -168,9 +230,7 @@ class Critic(nn.Module):
     """
     SAC Critic Network (Q-function).
     
-    Takes price_seq, state_vector, and action, and outputs Q-value.
-    Uses Double Q-learning (two critics) typically, but this class defines ONE critic.
-    The agent will instantiate two of these.
+    Takes price_seq, daily_seq, state_vector, and action, and outputs Q-value.
     """
     def __init__(
         self, 
@@ -178,19 +238,21 @@ class Critic(nn.Module):
         price_window_size: int, 
         state_dim: int, 
         action_dim: int,
+        daily_input_channels: int = 1,
+        daily_window_size: int = 1,
         hidden_dim: int = 256,
         output_dim: int = 1
     ):
         super().__init__()
         
-        # We can share the price encoder or have separate ones. 
-        # For simplicity and stability, separate encoders are often used in RL to avoid interference,
-        # or shared if using a larger backbone. Here we use separate for simplicity.
         self.price_encoder = PriceEncoder(price_input_channels, price_window_size, output_dim=128)
+        self.daily_input_channels = int(daily_input_channels)
+        self.daily_window_size = int(daily_window_size)
+        self.daily_encoder = DailyMacroEncoder(max(1, self.daily_input_channels), max(1, self.daily_window_size), output_dim=32)
         
         # Fusion
-        # Input: 128 (price) + state_dim + action_dim
-        fusion_input_dim = 128 + state_dim + action_dim
+        # Input: 128 (price) + 32 (daily) + state_dim + action_dim
+        fusion_input_dim = 128 + 32 + state_dim + action_dim
         
         self.net = nn.Sequential(
             nn.Linear(fusion_input_dim, hidden_dim),
@@ -208,11 +270,17 @@ class Critic(nn.Module):
             if m.bias is not None:
                 m.bias.data.fill_(0.0)
 
-    def forward(self, price_seq: torch.Tensor, state_vec: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        price_seq: torch.Tensor,
+        daily_seq: torch.Tensor,
+        state_vec: torch.Tensor,
+        action: torch.Tensor
+    ) -> torch.Tensor:
         price_emb = self.price_encoder(price_seq)
+        daily_emb = self.daily_encoder(daily_seq)
         
-        x = torch.cat([price_emb, state_vec, action], dim=1)
+        x = torch.cat([price_emb, daily_emb, state_vec, action], dim=1)
         q_value = self.net(x)
         
         return q_value
-

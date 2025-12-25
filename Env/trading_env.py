@@ -10,6 +10,7 @@ from collections import deque
 from .trade_executor import TradeExecutor
 from .reward import create_default_calculator
 from .features import build_all_features, compute_market_shape_features
+from .macro_daily import MacroDailyConfig, MacroDailyDataset
 
 '''
     交易環境
@@ -31,6 +32,9 @@ from .features import build_all_features, compute_market_shape_features
 '''
 from Train.config import Config
 
+# Process-level cache: avoid re-reading/merging daily macro CSVs repeatedly in the same process.
+_MACRO_DATASET_CACHE: dict[str, MacroDailyDataset] = {}
+
 class TradingEnvironment(gym.Env):
     def __init__(self, df, env_id: int = 0, **kwargs):
         super(TradingEnvironment, self).__init__()
@@ -39,6 +43,11 @@ class TradingEnvironment(gym.Env):
         self.initial_balance = float(kwargs.get("initial_balance", Config.INITIAL_BALANCE))
         self.transaction_fee = float(kwargs.get("transaction_fee", Config.TRANSACTION_FEE))
         self.window_size = int(kwargs.get("window_size", Config.WINDOW_SIZE))
+        # Daily macro (1d CNN branch)
+        self.daily_window_size = int(kwargs.get("daily_window_size", getattr(Config, "DAILY_WINDOW_SIZE", 30)))
+        self.macro_enabled = bool(kwargs.get("macro_enabled", getattr(Config, "MACRO_ENABLED", True)))
+        self.macro_data_dir = str(kwargs.get("macro_data_dir", getattr(Config, "MACRO_DATA_DIR", "Data")))
+        self.macro_files = dict(kwargs.get("macro_files", getattr(Config, "MACRO_FILES", {})))
         self.leverage = float(kwargs.get("leverage", Config.LEVERAGE))
         self.min_balance = float(kwargs.get("min_balance", Config.MIN_BALANCE))
         self.min_episode_steps = int(kwargs.get("min_episode_steps", Config.MIN_EPISODE_STEPS))
@@ -120,6 +129,76 @@ class TradingEnvironment(gym.Env):
         # Remove duplicate columns if any (keep first occurrence)
         self.internal_features = self.internal_features.loc[:, ~self.internal_features.columns.duplicated()]
 
+        # 1.6 Prepare Macro Data (Daily) - from user-specified CSVs (1d long-term CNN input)
+        # Use "yesterday" (D-1) as the newest row in daily_seq to avoid look-ahead bias.
+        self.daily_features_dim = 0
+        self.macro_df = None
+        self.daily_indices = None
+        self._macro_arr = None
+
+        # Get timestamps for alignment (support both timestamp column and DatetimeIndex)
+        if "timestamp" in self.df.columns:
+            ts = pd.to_datetime(self.df["timestamp"])
+        elif isinstance(self.df.index, pd.DatetimeIndex):
+            ts = pd.to_datetime(self.df.index)
+        else:
+            ts = None
+
+        if ts is None:
+            # Without timestamps we cannot align daily macro; disable safely.
+            self.macro_enabled = False
+        else:
+            # Keep time arrays consistent (train.py usually passes DatetimeIndex)
+            self._ts = ts
+
+        if self.macro_enabled and ts is not None and self.daily_window_size > 0 and self.macro_files:
+            start_day = (ts.min().normalize() - pd.Timedelta(days=int(self.daily_window_size) + 10)).normalize()
+            end_day = (ts.max().normalize() + pd.Timedelta(days=1)).normalize()
+
+            macro_cfg = MacroDailyConfig(
+                daily_window_size=int(self.daily_window_size),
+                rolling_z_window=int(getattr(Config, "MACRO_ROLLING_Z_WINDOW", 365)),
+                rolling_z_min_periods=int(getattr(Config, "MACRO_ROLLING_Z_MIN_PERIODS", 30)),
+            )
+            cache_key = (
+                f"{self.macro_data_dir}|{tuple(sorted(self.macro_files.items()))}|"
+                f"{start_day.date()}|{end_day.date()}|{macro_cfg.rolling_z_window}|{macro_cfg.rolling_z_min_periods}"
+            )
+            try:
+                if cache_key in _MACRO_DATASET_CACHE:
+                    macro_ds = _MACRO_DATASET_CACHE[cache_key]
+                else:
+                    macro_ds = MacroDailyDataset.load(
+                        data_dir=self.macro_data_dir,
+                        files=self.macro_files,
+                        cfg=macro_cfg,
+                        date_range=(start_day, end_day),
+                    )
+                    _MACRO_DATASET_CACHE[cache_key] = macro_ds
+
+                self.macro_df = macro_ds.df
+                self.daily_features_dim = int(self.macro_df.shape[1])
+                macro_dates = self.macro_df.index.values.astype("datetime64[D]")
+                step_dates = ts.normalize().values.astype("datetime64[D]")
+
+                # Yesterday pointer: last index <= (step_date - 1 day)
+                yesterday = step_dates - np.timedelta64(1, "D")
+                ptr = np.searchsorted(macro_dates, yesterday, side="right") - 1
+                self.daily_indices = np.clip(ptr, 0, len(macro_dates) - 1).astype(np.int32)
+                self._macro_arr = self.macro_df.values.astype(np.float32)
+            except Exception:
+                # Fail-safe: disable macro if any parsing/IO error occurs
+                self.macro_enabled = False
+                self.macro_df = None
+                self.daily_features_dim = 0
+                self.daily_indices = np.zeros(len(self.df), dtype=np.int32)
+                self._macro_arr = np.zeros((max(1, int(self.daily_window_size)), 1), dtype=np.float32)
+        else:
+            # Macro disabled -> provide a deterministic zero daily_seq to keep interface stable
+            self.daily_features_dim = 1
+            self.daily_indices = np.zeros(len(self.df), dtype=np.int32)
+            self._macro_arr = np.zeros((max(1, int(self.daily_window_size)), 1), dtype=np.float32)
+
         # 2. 準備觀測特徵 (price_seq)
         self.market_shape_df = compute_market_shape_features(self.df)
         self.price_seq_features = self.market_shape_df.shape[1]
@@ -130,12 +209,24 @@ class TradingEnvironment(gym.Env):
         self._low_arr = self.df['low'].values.astype(np.float32)
         self._low_arr = self.df['low'].values.astype(np.float32)
         
-        # Time features prep
+        # Time features prep (support timestamp column OR DatetimeIndex)
         if 'timestamp' in self.df.columns:
-            ts = self.df['timestamp']
-            self._hour_arr = ts.dt.hour.values.astype(np.float32)
-            self._dow_arr = ts.dt.dayofweek.values.astype(np.float32)  # 0=Mon..6=Sun
-            self._is_weekend_arr = (ts.dt.dayofweek.values >= 5).astype(np.float32)
+            ts2 = pd.to_datetime(self.df['timestamp'])
+        elif isinstance(self.df.index, pd.DatetimeIndex):
+            ts2 = pd.to_datetime(self.df.index)
+        else:
+            ts2 = None
+
+        if ts2 is not None:
+            # ts2 may be Series or DatetimeIndex
+            if isinstance(ts2, pd.Series):
+                self._hour_arr = ts2.dt.hour.values.astype(np.float32)
+                self._dow_arr = ts2.dt.dayofweek.values.astype(np.float32)  # 0=Mon..6=Sun
+                self._is_weekend_arr = (ts2.dt.dayofweek.values >= 5).astype(np.float32)
+            else:
+                self._hour_arr = ts2.hour.values.astype(np.float32)
+                self._dow_arr = ts2.dayofweek.values.astype(np.float32)  # 0=Mon..6=Sun
+                self._is_weekend_arr = (ts2.dayofweek.values >= 5).astype(np.float32)
         else:
             self._hour_arr = np.zeros(len(self.df), dtype=np.float32)
             self._dow_arr = np.zeros(len(self.df), dtype=np.float32)
@@ -210,6 +301,7 @@ class TradingEnvironment(gym.Env):
         
         self.observation_space = spaces.Dict({
             'price_seq': spaces.Box(low=-np.inf, high=np.inf, shape=(self.window_size, self.price_seq_features), dtype=np.float32),
+            'daily_seq': spaces.Box(low=-np.inf, high=np.inf, shape=(self.daily_window_size, self.daily_features_dim), dtype=np.float32),
             # account_state keeps the original first 13 dims for backward compatibility, and appends new semantic dims.
             # NOTE: keep the first 20 dims stable; append additional accounting dims after them.
             'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(27,), dtype=np.float32),
@@ -243,13 +335,18 @@ class TradingEnvironment(gym.Env):
             "predicted_stop_distance_after_action": 0.0,
         }
         
-        self.reward_calculator = create_default_calculator(
-            c_liq=getattr(Config, "COST_LIQ_PENALTY", 10.0),
-            base_log_ret_weight=getattr(Config, "REWARD_LOG_RET_WEIGHT", 1.0),
-            conviction_trend_bonus_weight=getattr(Config, "REWARD_CONVICTION_TREND_BONUS_WEIGHT", 0.0),
-            conviction_trend_min_strength=getattr(Config, "REWARD_CONVICTION_TREND_MIN_STRENGTH", 0.8),
-            conviction_min_abs_pos=getattr(Config, "REWARD_CONVICTION_MIN_ABS_POS", 0.15),
-        )
+        # Reward calculator is injectable for unit tests / experiments (avoid global Config coupling).
+        provided_reward_calculator = kwargs.get("reward_calculator", None)
+        if provided_reward_calculator is not None:
+            self.reward_calculator = provided_reward_calculator
+        else:
+            self.reward_calculator = create_default_calculator(
+                c_liq=getattr(Config, "COST_LIQ_PENALTY", 10.0),
+                base_log_ret_weight=getattr(Config, "REWARD_LOG_RET_WEIGHT", 1.0),
+                conviction_trend_bonus_weight=getattr(Config, "REWARD_CONVICTION_TREND_BONUS_WEIGHT", 0.0),
+                conviction_trend_min_strength=getattr(Config, "REWARD_CONVICTION_TREND_MIN_STRENGTH", 0.8),
+                conviction_min_abs_pos=getattr(Config, "REWARD_CONVICTION_MIN_ABS_POS", 0.15),
+            )
         
         self.account_series = {
             'position': np.zeros(len(df)),
@@ -450,6 +547,26 @@ class TradingEnvironment(gym.Env):
         # Shape: [window_size, F]
         # USE NUMPY SLICING (Fast)
         price_seq = self._market_shape_arr[self.current_step - self.window_size : self.current_step]
+        
+        # 1.5 Daily Sequence (Macro CNN Input)
+        # Shape: [daily_window_size, F_daily]
+        daily_ptr = self.daily_indices[self.current_step]
+        daily_start = daily_ptr - self.daily_window_size + 1
+        
+        if daily_start < 0:
+            # Padding for beginning of episode if needed
+            seq_part = self._macro_arr[0 : daily_ptr + 1]
+            pad_len = self.daily_window_size - len(seq_part)
+            if pad_len > 0:
+                # Pad with edge (repeat first day)
+                daily_seq = np.pad(seq_part, ((pad_len, 0), (0, 0)), mode='edge')
+            else:
+                daily_seq = seq_part
+        else:
+            daily_seq = self._macro_arr[daily_start : daily_ptr + 1]
+
+        # Hard safety: ensure no NaN/Inf enters the policy/value networks.
+        daily_seq = np.nan_to_num(daily_seq, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
         
         # 2. State Features Extraction
         current_price = float(self._close_arr[self.current_step])
@@ -689,6 +806,7 @@ class TradingEnvironment(gym.Env):
         
         return {
             'price_seq': price_seq,
+            'daily_seq': daily_seq,
             'account_state': account_state,
             'time_state': time_state,
             'rhythm_state': rhythm_state,

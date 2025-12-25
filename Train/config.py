@@ -124,6 +124,30 @@ class Config:
         "tradability_score",
     ]
 
+    # =========================
+    # 2.2 Observation 設計（Daily Macro CNN Branch）
+    # =========================
+    # 目的：提供「日線層級的市場體制/情緒/鏈上代理」給 daily CNN（long-term branch）。
+    #
+    # 注意（避免 look-ahead bias）：
+    # - env 會在每個 5m step t 使用「昨天 (D-1)」的日線資料作為 daily_seq 的最後一筆。
+    # - 因此 daily_seq 代表「過去已完成的 N 日」資訊，而不是當天未收盤的資訊。
+    MACRO_ENABLED = True
+    MACRO_DATA_DIR = "Data"
+    DAILY_WINDOW_SIZE = 60  # 日線回看天數（long-term CNN）
+    MACRO_ROLLING_Z_WINDOW = 365
+    MACRO_ROLLING_Z_MIN_PERIODS = 30
+
+    # 日線/宏觀資料檔案（由 Env/macro_daily.py 讀取合併）
+    # 你在需求中列的檔案都在這裡（BTC coinglass 1d 重複列出一次，實際只需一份）
+    MACRO_FILES = {
+        "altcoin_season": "altcoin_season_index_history.csv",
+        "bmo": "bitcoin_macro_oscillator_index_history.csv",
+        "sopr": "bitcoin_sth_sopr_index_history.csv",
+        "fear_greed": "fear_greed_index_history.csv",
+        "coinglass_btc_1d": "BTCUSDT_futures_volume_coinglass_5years_1d.csv",
+    }
+
     MAINTENANCE_MARGIN_RATE = 0.005   
     # 維持保證金比率（0.5%）： 0.005 = 0.5%
     # 當 (權益/持倉價值) < 此值時，觸發爆倉。

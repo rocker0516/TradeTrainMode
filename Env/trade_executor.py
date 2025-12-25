@@ -93,9 +93,6 @@ class TradeExecutor:
         """
         if self.position.size == 0.0 or self.position.entry_price <= 0.0:
             return
-        if self.position.stop_loss_price <= 0.0:
-            return
-
         liq_price = self._calc_liquidation_price(current_price=current_price)
         if liq_price is None or liq_price <= 0.0:
             return
@@ -106,7 +103,8 @@ class TradeExecutor:
         if self.position.size > 0.0:
             # 多單：止損必須在強平價之上（較早觸發）
             min_sl = float(liq_price) * (1.0 + buffer_pct) + eps
-            if self.position.stop_loss_price < min_sl:
+            # stop_loss_price 可能因 ATR*倍數過大而落到 0 以下；此時也必須收斂
+            if self.position.stop_loss_price <= 0.0 or self.position.stop_loss_price < min_sl:
                 # 避免 stop 反而高於現價造成立即「邏輯不一致」；若接近爆倉，讓止損貼近現價即可。
                 cap = float(current_price) - eps
                 self.position.stop_loss_price = float(min(min_sl, cap)) if cap > 0.0 else float(min_sl)
@@ -114,7 +112,7 @@ class TradeExecutor:
         else:
             # 空單：止損必須在強平價之下（較早觸發）
             max_sl = float(liq_price) * (1.0 - buffer_pct) - eps
-            if self.position.stop_loss_price > max_sl:
+            if self.position.stop_loss_price <= 0.0 or self.position.stop_loss_price > max_sl:
                 cap = float(current_price) + eps
                 self.position.stop_loss_price = float(max(max_sl, cap))
                 self._update_max_stop_loss_distance_metric()
@@ -409,7 +407,8 @@ class TradeExecutor:
                  self.position.stop_loss_price = 0.0
 
         # 保證止損一定先於強平（避免 SL 比 LIQ 更遠而永遠觸發不到）
-        if self.position.size != 0.0 and self.position.stop_loss_price > 0.0:
+        # 注意：stop_loss_price 可能因 ATR*倍數過大而落到 0 以下，因此不要用 >0 作為 gate
+        if self.position.size != 0.0 and self.stop_loss_atr > 0.0:
             self._clamp_stop_loss_before_liquidation(current_price=price)
 
         # 若原先為空倉，視為進場（記一次）
@@ -458,7 +457,7 @@ class TradeExecutor:
             self.position.entry_price = 0.0
             self.position.stop_loss_price = 0.0
         else:
-            if self.position.stop_loss_price > 0.0:
+            if self.position.size != 0.0 and self.stop_loss_atr > 0.0:
                 self._clamp_stop_loss_before_liquidation(current_price=price)
         # 統計
         self.total_fees += fee

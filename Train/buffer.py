@@ -5,7 +5,7 @@ from typing import Dict, Tuple, List, Optional
 
 class ReplayBuffer:
     """
-    Replay Buffer for Dict Observations (Price Seq + State Vector).
+    Replay Buffer for Dict Observations (Price Seq + Daily Seq + State Vector).
     Supports Multi-Dimensional Cost.
     """
     def __init__(
@@ -23,14 +23,52 @@ class ReplayBuffer:
         self.size = 0
         self.cost_dim = cost_dim
         
+        # Determine daily seq shape if available (inferred from usage, or need passing)
+        # For now, we will lazily init or expect it passed in constructor if we want to be strict.
+        # But to avoid breaking signature too much, let's assume standard shape or handle dynamically?
+        # No, numpy arrays need fixed shape. We should update __init__ signature in train.py
+        # But wait, train.py initializes this. We need to update train.py too.
+        # Let's add daily_seq_shape to __init__ with default None for backward compat (though we are changing everything).
+        
+        # We'll assume the user updates train.py to pass daily_seq_shape.
+        # But wait, I can only edit this file. I should make it flexible or hardcode a default if not passed?
+        # Actually, looking at previous step, I am modifying train.py later.
+        # So I will add daily_seq_shape to __init__.
+        
+    def __init__(
+        self, 
+        capacity: int, 
+        price_seq_shape: Tuple[int, int], 
+        state_dim: int, 
+        action_dim: int,
+        cost_dim: int = 1,
+        device: torch.device = torch.device("cpu"),
+        daily_seq_shape: Optional[Tuple[int, int]] = None
+    ):
+        self.capacity = capacity
+        self.device = device
+        self.ptr = 0
+        self.size = 0
+        self.cost_dim = cost_dim
+        
         # Buffers
         self.price_seqs = np.zeros((capacity, *price_seq_shape), dtype=np.float32)
+        if daily_seq_shape is not None:
+            self.daily_seqs = np.zeros((capacity, *daily_seq_shape), dtype=np.float32)
+        else:
+            self.daily_seqs = None
+            
         self.state_vecs = np.zeros((capacity, state_dim), dtype=np.float32)
         self.actions = np.zeros((capacity, action_dim), dtype=np.float32)
         self.rewards = np.zeros((capacity, 1), dtype=np.float32)
         self.costs = np.zeros((capacity, cost_dim), dtype=np.float32) # For Lagrangian
         
         self.next_price_seqs = np.zeros((capacity, *price_seq_shape), dtype=np.float32)
+        if daily_seq_shape is not None:
+            self.next_daily_seqs = np.zeros((capacity, *daily_seq_shape), dtype=np.float32)
+        else:
+            self.next_daily_seqs = None
+            
         self.next_state_vecs = np.zeros((capacity, state_dim), dtype=np.float32)
         self.dones = np.zeros((capacity, 1), dtype=np.float32)
 
@@ -44,6 +82,8 @@ class ReplayBuffer:
         done: bool
     ):
         self.price_seqs[self.ptr] = obs['price_seq']
+        if self.daily_seqs is not None and 'daily_seq' in obs:
+            self.daily_seqs[self.ptr] = obs['daily_seq']
         
         # Concatenate states for storage
         self.state_vecs[self.ptr] = np.concatenate([
@@ -59,6 +99,8 @@ class ReplayBuffer:
         self.costs[self.ptr] = cost 
         
         self.next_price_seqs[self.ptr] = next_obs['price_seq']
+        if self.next_daily_seqs is not None and 'daily_seq' in next_obs:
+            self.next_daily_seqs[self.ptr] = next_obs['daily_seq']
         
         # Concatenate next states
         self.next_state_vecs[self.ptr] = np.concatenate([
@@ -113,6 +155,8 @@ class ReplayBuffer:
         sl = slice(start_slice, end_slice) if end_slice is not None else slice(start_slice, None)
         
         self.price_seqs[indices] = obs['price_seq'][sl]
+        if self.daily_seqs is not None and 'daily_seq' in obs:
+            self.daily_seqs[indices] = obs['daily_seq'][sl]
         
         # Batch Concatenate States
         # Axis 1 because 0 is batch dimension
@@ -130,6 +174,8 @@ class ReplayBuffer:
         self.costs[indices] = cost[sl] # Assuming cost is already (B, cost_dim)
         
         self.next_price_seqs[indices] = next_obs['price_seq'][sl]
+        if self.next_daily_seqs is not None and 'daily_seq' in next_obs:
+            self.next_daily_seqs[indices] = next_obs['daily_seq'][sl]
         
         self.next_state_vecs[indices] = np.concatenate([
             next_obs['account_state'][sl],
@@ -144,7 +190,7 @@ class ReplayBuffer:
     def sample(self, batch_size: int) -> Dict[str, torch.Tensor]:
         indices = np.random.randint(0, self.size, size=batch_size)
         
-        return {
+        batch = {
             'price_seq': torch.FloatTensor(self.price_seqs[indices]).to(self.device),
             'state_vec': torch.FloatTensor(self.state_vecs[indices]).to(self.device),
             'action': torch.FloatTensor(self.actions[indices]).to(self.device),
@@ -154,3 +200,9 @@ class ReplayBuffer:
             'next_state_vec': torch.FloatTensor(self.next_state_vecs[indices]).to(self.device),
             'done': torch.FloatTensor(self.dones[indices]).to(self.device)
         }
+        
+        if self.daily_seqs is not None:
+            batch['daily_seq'] = torch.FloatTensor(self.daily_seqs[indices]).to(self.device)
+            batch['next_daily_seq'] = torch.FloatTensor(self.next_daily_seqs[indices]).to(self.device)
+            
+        return batch

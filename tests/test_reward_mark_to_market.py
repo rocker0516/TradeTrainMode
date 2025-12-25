@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from Env.trading_env import TradingEnvironment
+from Env.reward import create_default_calculator
 
 
 def _make_linear_price_df(n: int = 200, start: float = 100.0, step: float = 1.0) -> pd.DataFrame:
@@ -48,6 +49,11 @@ def test_reward_is_mark_to_market_log_return_when_fee_zero() -> None:
         max_step_pos_change_pct=1.0,
         # Disable ATR-based stop-loss to avoid intrabar forced closes in this unit test.
         stop_loss_atr=0.0,
+        # Disable optional conviction/trend shaping so reward equals pure log-return.
+        reward_calculator=create_default_calculator(
+            base_log_ret_weight=1.0,
+            conviction_trend_bonus_weight=0.0,
+        ),
     )
 
     obs, _ = env.reset()

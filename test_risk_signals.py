@@ -88,7 +88,8 @@ def test_observation_contains_risk_metrics(patched_config):
     env = TradingEnvironment(df=df, random_start=False)
     obs, _ = env.reset()
 
-    assert obs['cost_state'].shape[0] == 14
+    # cost_state 前 14 維為核心（穩定語義），後面會附加 action-conditioned proxies，因此總長度目前為 19
+    assert obs['cost_state'].shape[0] == 19
 
     obs, _, _, _, info = env.step(np.array([0.5], dtype=np.float32))
     risk = info['risk_signals']

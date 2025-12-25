@@ -76,11 +76,12 @@ class TestObsLogic(unittest.TestCase):
         )
 
         self.check(2, "Price Seq 第 0 維為 window_size", obs["price_seq"].shape[0] == 50, actual_val=obs["price_seq"].shape)
+        # account_state / cost_state 已擴充（account_state=27, cost_state=19）
         self.check(3, "Account/Time/Rhythm/Cost/Market 維度正確",
-                   obs["account_state"].shape == (20,)
+                   obs["account_state"].shape == (27,)
                    and obs["time_state"].shape == (7,)
                    and obs["rhythm_state"].shape == (2,)
-                   and obs["cost_state"].shape == (14,)
+                   and obs["cost_state"].shape == (19,)
                    and obs["market_state"].shape == (len(getattr(self.env, "market_state_cols", [])),),
                    actual_val=(obs["account_state"].shape, obs["time_state"].shape, obs["rhythm_state"].shape, obs["cost_state"].shape, obs["market_state"].shape))
 

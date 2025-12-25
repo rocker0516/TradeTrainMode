@@ -1,4 +1,3 @@
-
 import os
 import sys
 import time
@@ -253,6 +252,7 @@ def train():
     temp_env = make_env(0, df)()
     obs_sample, _ = temp_env.reset()
     price_seq_shape = obs_sample['price_seq'].shape
+    daily_seq_shape = obs_sample['daily_seq'].shape # Get daily seq shape
     
     # Calculate total state dim from parts
     state_dim = (
@@ -266,13 +266,15 @@ def train():
     action_dim = temp_env.action_space.shape[0]
     del temp_env
     
-    logger.info(f"Obs Space: PriceSeq {price_seq_shape}, StateVec {state_dim}")
+    logger.info(f"Obs Space: PriceSeq {price_seq_shape}, DailySeq {daily_seq_shape}, StateVec {state_dim}")
     logger.info(f"Action Space: {action_dim}")
     
     # 3. Initialize Agent
     agent = SACLagrangianAgent(
         price_input_channels=price_seq_shape[1],
         price_window_size=price_seq_shape[0],
+        daily_input_channels=daily_seq_shape[1], # Pass daily channels
+        daily_window_size=daily_seq_shape[0],    # Pass daily window size
         state_dim=state_dim,
         action_dim=action_dim,
         cost_limits=Config.COST_LIMITS,
@@ -293,7 +295,8 @@ def train():
         state_dim=state_dim,
         action_dim=action_dim,
         cost_dim=len(Config.COST_LIMITS),
-        device=torch.device(Config.DEVICE)
+        device=torch.device(Config.DEVICE),
+        daily_seq_shape=daily_seq_shape # Pass daily seq shape
     )
     
     cost_calculator = CombinedCostCalculator(num_envs=num_envs)
