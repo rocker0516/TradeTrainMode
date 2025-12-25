@@ -1063,7 +1063,7 @@ if __name__ == "__main__":
     diff = timedelta(hours=1)
     diff_ms = diff.total_seconds() * 1000
     end_dt = datetime.now() - diff
-    start_dt = end_dt - timedelta(days=365 * 5)
+    start_dt = end_dt - timedelta(days=365 * 3)
 
     if API_KEY == "YOUR_API_KEY_HERE":
         print("Please set COINGLASS_API_KEY environment variable or edit the script.")
