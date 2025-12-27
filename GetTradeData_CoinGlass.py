@@ -25,7 +25,6 @@ class CoinGlassDataError(CoinGlassAPIError):
     """Exception raised for data parsing or logical errors."""
     pass
 
-
 class CoinGlassClient:
     """
     Low-level client for CoinGlass API (SRP: Handle HTTP requests).
@@ -814,6 +813,7 @@ class CoinGlassClient:
             end_time=end_time,
             raise_on_error=False
         )
+
 def run_coinglass_fetch(
     api_key: str,
     exchange: str,
@@ -1058,9 +1058,9 @@ if __name__ == "__main__":
         '1000PEPEUSDT'
     ]
     EXCHANGE = "Binance"
-    INTERVAL = "1h"
+    INTERVAL = "15m"
         # 2. Define Time Range (1 year)
-    diff = timedelta(hours=1)
+    diff = timedelta(minutes=15)
     diff_ms = diff.total_seconds() * 1000
     end_dt = datetime.now() - diff
     start_dt = end_dt - timedelta(days=365 * 3)
@@ -1088,7 +1088,7 @@ if __name__ == "__main__":
                 
                 # Save to CSV
                 filename = f"Data/{symbol}_futures_volume_coinglass_5years_{INTERVAL}.csv"
-                all_klines.to_csv(filename, index=False)
+                all_klines.dropna().to_csv(filename, index=False)
                 print(f"Data saved to {filename}")
 
                 # Add a small delay to avoid rate limiting

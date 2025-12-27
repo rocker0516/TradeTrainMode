@@ -111,7 +111,7 @@ def main():
     
     # Calculate date range (5 years)
     end_time = datetime.now()  # 使用昨天的數據
-    start_time = end_time - timedelta(days=3*365)
+    start_time = end_time - timedelta(days=2*365)
     
     print(f"Fetching data from {start_time} to {end_time}")
     
