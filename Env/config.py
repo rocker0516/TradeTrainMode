@@ -24,8 +24,8 @@ class Config:
     WINDOW_SIZE_1D: int = 30
 
     # ---- 交易參數 ----
-    LEVERAGE: float = 3.0
-    MIN_BALANCE: float = 10.0
+    LEVERAGE: float = 10.0
+    MIN_BALANCE: float = INITIAL_BALANCE * 0.5
     MIN_EPISODE_STEPS: int = 3000
     MAX_EPISODE_STEPS: int = 1_000_000
     MIN_POSITION_CHANGE: float = 0.0
