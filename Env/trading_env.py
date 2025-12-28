@@ -99,11 +99,11 @@ class TradingEnvironment(gym.Env):
         
         # Reward Calculator
         self.reward_calculator = create_default_calculator(
-            c_liq=getattr(Config, "COST_LIQ_PENALTY", 10.0),
-            base_log_ret_weight=getattr(Config, "REWARD_LOG_RET_WEIGHT", 1.0),
-            conviction_trend_bonus_weight=getattr(Config, "REWARD_CONVICTION_TREND_BONUS_WEIGHT", 0.0),
-            conviction_trend_min_strength=getattr(Config, "REWARD_CONVICTION_TREND_MIN_STRENGTH", 0.8),
-            conviction_min_abs_pos=getattr(Config, "REWARD_CONVICTION_MIN_ABS_POS", 0.15),
+            c_liq=0.0,
+            base_log_ret_weight=1.0,
+            conviction_trend_bonus_weight=0.0,
+            conviction_trend_min_strength=0.8,
+            conviction_min_abs_pos=0.15,
         )
         
         # Tracker

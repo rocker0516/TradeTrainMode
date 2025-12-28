@@ -39,11 +39,6 @@ def test_config_importable_and_has_required_attributes() -> None:
         "MAX_EPISODE_STEPS",
         "STOP_LOSS_LIQ_BUFFER_PCT",
         "STOP_LOSS_COOLDOWN_STEPS",
-        "COST_LIQ_PENALTY",
-        "REWARD_LOG_RET_WEIGHT",
-        "REWARD_CONVICTION_TREND_BONUS_WEIGHT",
-        "REWARD_CONVICTION_TREND_MIN_STRENGTH",
-        "REWARD_CONVICTION_MIN_ABS_POS",
         "TURNOVER_NOTIONAL_SCALE",
     ]
 

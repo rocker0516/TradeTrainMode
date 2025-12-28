@@ -62,13 +62,6 @@ class Config:
     # 舊版程式/測試可能會期待此屬性存在；目前 MarketData 會自行從 df 欄位推導 features。
     MARKET_STATE_COLS: list[str] = []
 
-    # ---- Reward 參數（供 RewardCalculator 建立用；保持與 trading_env.py 呼叫相容）----
-    COST_LIQ_PENALTY: float = 10.0
-    REWARD_LOG_RET_WEIGHT: float = 1.0
-    REWARD_CONVICTION_TREND_BONUS_WEIGHT: float = 0.0
-    REWARD_CONVICTION_TREND_MIN_STRENGTH: float = 0.8
-    REWARD_CONVICTION_MIN_ABS_POS: float = 0.15
-
     # ---- 其他（測試/相容性用）----
     TURNOVER_NOTIONAL_SCALE: float = 1.0
 
