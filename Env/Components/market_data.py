@@ -1,12 +1,19 @@
 import numpy as np
 import pandas as pd
 from Env.config import Config
+from Env.feature_transformer import FeatureTransformer
 
 class MarketData:
     """
     負責處理市場數據、特徵計算與緩存。
     目前支援 5min 與 1day 雙週期數據。
-    移除了複雜的特徵工程，改為直接使用原始欄位（除 timestamp 外）。
+
+    重要更新（特徵工程模組化）：
+    - 不再把 merge 後的「所有 numeric 欄位」直接丟進 observation（那會導致維度失控、混入其他幣種資訊、難以解析）。
+    - 改為透過 `FeatureTransformer`：
+      - 5m: 輸出固定 14 通道（可解釋、可控、適合 SAC）
+      - 1d: 輸出固定通道（symbol-specific coinglass + global macro）
+    - 1d 對齊採用策略 B：上一根已收盤日線（避免日內偷看未收盤資訊）
     """
     def __init__(self, df_5m: pd.DataFrame, df_1d: pd.DataFrame, window_size: int, window_size_1d: int, 
                  market_state_cols: list[str] = None, target_symbol: str = 'BTCUSDT'):
@@ -17,6 +24,7 @@ class MarketData:
         self.target_symbol = target_symbol
         self.feature_lookback = int(max(288, self.window_size))
         self.feature_lookback_1d = int(max(30, self.window_size_1d))
+        self._transformer = FeatureTransformer()
         
         # 1. 時間欄位處理與確保 datetime 格式
         self._ensure_datetime(self.df_5m)
@@ -41,40 +49,50 @@ class MarketData:
         # 我們希望找到 t_1d <= t_5m 的最大索引。
         # searchsorted(side='right') 返回 idx，使得 times_1d[:idx] <= t_5m (不完全正確，是 < vs <= 的差異)
         # 正確做法：searchsorted('right') - 1
-        self.map_5m_to_1d = np.searchsorted(times_1d, times_5m, side='right') - 1 # 這裡是 -1 是因為我們希望找到 t_1d <= t_5m 的最大索引。
-        
-        # 3. 提取特徵欄位 (排除 timestamp)
+        # 原本：idx_asof = last(times_1d <= t_5m)
+        idx_asof = np.searchsorted(times_1d, times_5m, side='right') - 1
 
-        # 5m 數據
-        self.features_5m_arr, self.cols_5m = self._extract_numeric_features(self.df_5m)
-        # 1d 數據
-        self.features_1d_arr, self.cols_1d = self._extract_numeric_features(self.df_1d)
+        # 你已選定對齊策略 B：上一根「已收盤」日線
+        # 因此我們再往回退 1 根，避免在日內偷看到「今天尚未收盤」的 1d close/high/low 等資訊。
+        self.map_5m_to_1d = idx_asof - 1
         
-        # 4. 基礎價格數據 (Numpy Access for Speed - 使用 5m 作為執行基準)
+        # 3. 基礎價格數據 (Numpy Access for Speed - 使用 5m 作為執行基準)
         # 根據 target_symbol 選擇價格欄位
         col_close = f"{self.target_symbol}_close"
         col_high = f"{self.target_symbol}_high"
         col_low = f"{self.target_symbol}_low"
+        col_open = f"{self.target_symbol}_open"
         
         if col_close in self.df_5m.columns:
             self.close_arr = self.df_5m[col_close].values.astype(np.float64)
             self.high_arr = self.df_5m[col_high].values.astype(np.float64)
             self.low_arr = self.df_5m[col_low].values.astype(np.float64)
+            # open 可能不存在（保守處理）
+            self.open_arr = (
+                self.df_5m[col_open].values.astype(np.float64)
+                if col_open in self.df_5m.columns
+                else self.close_arr.copy()
+            )
         elif 'close' in self.df_5m.columns:
             # Fallback for single-pair data without prefix
             self.close_arr = self.df_5m['close'].values.astype(np.float64)
             self.high_arr = self.df_5m['high'].values.astype(np.float64)
             self.low_arr = self.df_5m['low'].values.astype(np.float64)
+            self.open_arr = (
+                self.df_5m['open'].values.astype(np.float64)
+                if 'open' in self.df_5m.columns
+                else self.close_arr.copy()
+            )
         else:
             raise ValueError(f"Price columns for '{self.target_symbol}' (e.g. {col_close}) not found in df_5m columns: {self.df_5m.columns.tolist()[:10]}...")
         
-        # 5. 時間特徵 (5m)
+        # 4. 時間特徵 (5m)
         ts = self.df_5m['timestamp']
         self.hour_arr = ts.dt.hour.values.astype(np.float32)
         self.dow_arr = ts.dt.dayofweek.values.astype(np.float32)
         self.is_weekend_arr = (ts.dt.dayofweek.values >= 5).astype(np.float32)# 0: Monday, 1: Tuesday, ..., 4: Friday, 5: Saturday, 6: Sunday
 
-        # 6. 計算 ATR Ratio (用於 ENV 內部的動態止損計算，非僅作為特徵)
+        # 5. 計算 ATR Ratio (用於 ENV 內部的動態止損計算，非僅作為特徵)
         prev_close = pd.Series(self.close_arr).shift(1)
         true_range = np.maximum.reduce([
             (self.high_arr - self.low_arr),
@@ -84,7 +102,7 @@ class MarketData:
         atr = pd.Series(true_range).rolling(14, min_periods=5).mean().fillna(0.0)
         self.atr_ratio_arr = (atr / np.maximum(self.close_arr, 1e-12)).astype(np.float32).values
 
-        # 7. 計算 Rhythm Feature (RV Ratio) - 維持原邏輯供 Env 使用
+        # 6. 計算 Rhythm Feature (RV Ratio) - 維持原邏輯供 Env 使用
         self.rv_ratio_arr = self._compute_rv_ratio()
         
         # 計算 Trend Score (簡單移動平均趨勢) - 補足缺失的屬性
@@ -92,10 +110,25 @@ class MarketData:
         ma_200 = pd.Series(self.close_arr).rolling(window=200, min_periods=1).mean()
         self.trend_score_arr = ((ma_50 - ma_200) / (ma_200 + 1e-8)).fillna(0.0).values.astype(np.float32)
         
-        # 8. 定義特徵維度供 Observer 使用
-        self.price_seq_features_dim = self.features_5m_arr.shape[1]
-        self.features_1d_dim = self.features_1d_arr.shape[1]
-        self.market_state_cols = self.cols_5m # 相容既有介面，雖然現在直接用 raw features
+        # 7. 透過 FeatureTransformer 建立固定特徵（可解釋、固定 shape）
+        # 重要：只針對 target_symbol 產生特徵，避免把其他幣種的整套 OHLCV 混入 state。
+        self.features_5m_arr, self.cols_5m = self._transformer.build_5m_features(
+            self.df_5m,
+            target_symbol=self.target_symbol,
+            atr_ratio_arr=self.atr_ratio_arr,
+            rv_ratio_arr=self.rv_ratio_arr,
+            z_window=self.feature_lookback,
+        )
+        self.features_1d_arr, self.cols_1d = self._transformer.build_1d_features(
+            self.df_1d,
+            target_symbol=self.target_symbol,
+            z_window_1d=max(60, self.feature_lookback_1d * 2),
+        )
+
+        # 8. 定義特徵維度供 Observer 使用（固定、可控）
+        self.price_seq_features_dim = int(self.features_5m_arr.shape[1])
+        self.features_1d_dim = int(self.features_1d_arr.shape[1])
+        self.market_state_cols = self.cols_5m  # 相容既有介面：提供 5m 特徵欄位名稱
 
     def _ensure_datetime(self, df):
         # 確保存在 datetime 型態的「時間欄位」：若有 timestamp 或 time，統一轉成 timestamp 欄、且格式為 datetime
@@ -112,13 +145,7 @@ class MarketData:
                 df['timestamp'] = df[time_col]
         # 若皆無則略過
 
-    def _extract_numeric_features(self, df: pd.DataFrame) -> tuple[np.ndarray, list]:
-        """提取數值型特徵，排除 timestamp"""
-        cols = [c for c in df.columns if c != 'timestamp']
-        # 確保只取數值欄位
-        numeric_cols = df[cols].select_dtypes(include=[np.number]).columns.tolist()
-        arr = df[numeric_cols].values.astype(np.float32)
-        return arr, numeric_cols
+    # _extract_numeric_features 已不再使用（改用 FeatureTransformer 輸出固定特徵），保留舊函數會讓維度失控且難以解析。
 
     def _compute_rv_ratio(self):
         try:
@@ -175,12 +202,15 @@ class MarketData:
         # 若 idx_1d_current 指向的是「昨天」(已收盤)，則為滯後資訊
         # 由 map_5m_to_1d 的構建邏輯決定。
         
-        start = idx_1d_current - window_size_1d + 1
-        end = idx_1d_current + 1
+        # 注意：idx_1d_current 可能 < 0（代表沒有任何「已收盤」日線可用），此時全 padding 0。
+        start = int(idx_1d_current) - int(window_size_1d) + 1
+        end = int(idx_1d_current) + 1
         
         if start < 0:
-            pad = np.zeros((abs(start), self.features_1d_arr.shape[1]), dtype=np.float32)
-            data = self.features_1d_arr[0:end]
-            return np.vstack([pad, data])
+            pad_len = abs(start)
+            pad = np.zeros((pad_len, self.features_1d_arr.shape[1]), dtype=np.float32)
+            data_end = max(0, end)
+            data = self.features_1d_arr[0:data_end]
+            return np.vstack([pad, data]) if len(data) > 0 else pad
             
         return self.features_1d_arr[start:end]
