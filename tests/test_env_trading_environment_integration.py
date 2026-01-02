@@ -151,6 +151,11 @@ def _scenarios() -> List[Scenario]:
             expect={"info_keys": True},
         ),
         Scenario(
+            name="cost_stop_missing_when_stop_disabled",
+            actions=[1.0],
+            expect={"cost_stop_missing": True},
+        ),
+        Scenario(
             name="mark_to_market_uses_next_close",
             actions=[1.0],
             expect={"equity_matches_next_close": True},
@@ -200,6 +205,9 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
         env_kwargs["min_balance"] = 800.0  # 高門檻，讓小虧也能終止
     if sc.name == "liquidation_triggers_terminated":
         env_kwargs["stop_loss_atr"] = 0.0
+    if sc.name == "cost_stop_missing_when_stop_disabled":
+        # 關閉止損：讓環境回報 stop_loss_missing cost（有倉但沒有 stop）
+        env_kwargs["stop_loss_atr"] = 0.0
 
     # stop loss cooldown 需要 Config 常數
     if sc.name == "stop_loss_cooldown_forces_no_trade_next_step":
@@ -230,8 +238,24 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
 
     # --- common required info keys ---
     if sc.expect.get("info_keys"):
-        for k in ("equity", "profit", "stop_loss_triggered", "liq_triggered", "step_fee_ratio", "is_flip", "risk_budget", "current_dd"):
+        for k in (
+            "equity",
+            "profit",
+            "stop_loss_triggered",
+            "liq_triggered",
+            "step_fee_ratio",
+            "is_flip",
+            "risk_budget",
+            "current_dd",
+            # cost / breakdown（供 Lagrangian 或解析使用）
+            "cost",
+            "cost_breakdown",
+        ):
             assert k in info
+        assert isinstance(info["cost_breakdown"], dict)
+        # 核心分項 key
+        for k in ("fee_cost", "liq_proximity_cost", "dd_cost"):
+            assert k in info["cost_breakdown"]
 
     # --- position checks ---
     pos = float(env.executor.position.size)
@@ -307,5 +331,10 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
     if sc.expect.get("equity_matches_next_close"):
         # new_equity 是用 idx+1 close 計算；此情境把 idx=11 close 設成 110
         assert float(info["equity"]) == pytest.approx(env.executor.equity(110.0), abs=1e-6)
+
+    # --- cost: stop missing when stop disabled ---
+    if sc.expect.get("cost_stop_missing"):
+        assert float(info["cost"]) >= 0.0
+        assert float(info["cost_breakdown"]["stop_missing_cost"]) == 1.0
 
 

@@ -13,6 +13,7 @@ from Env.Components.observer import TradingObserver
 from Env.Components.action_processor import ActionProcessor
 from Env.Components.tracker import Tracker
 from Env.load_file import load_data
+from Env.Costs.cost import CostCalculator, CostWeights
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,24 @@ class TradingEnvironment(gym.Env):
         # Fee Limit
         self.fee_limit_enabled = getattr(Config, "FEE_LIMIT_ENABLED", True)
         self.fee_limit_ratio = float(kwargs.get("fee_limit_ratio", Config.FEE_LIMIT_RATIO))
+
+        # Cost / Constraint（供 Lagrangian-SAC 使用）
+        # 注意：reward 與 cost 分離，cost 透過 info 回傳，方便訓練端做 λ 更新與解析。
+        self.cost_calculator = CostCalculator(
+            liq_warn_pct=getattr(Config, "LIQUIDATION_WARN_PCT", 0.05),
+            stop_warn_pct=getattr(Config, "STOP_LOSS_WARN_PCT", 0.02),
+            maintenance_margin_rate=getattr(Config, "MAINTENANCE_MARGIN_RATE", 0.005),
+            weights=CostWeights(
+                w_fee=float(getattr(Config, "COST_W_FEE", 1.0)),
+                w_liq_proximity=float(getattr(Config, "COST_W_LIQ_PROXIMITY", 1.0)),
+                w_margin_proximity=float(getattr(Config, "COST_W_MARGIN_PROXIMITY", 0.5)),
+                w_dd=float(getattr(Config, "COST_W_DD", 0.2)),
+                w_stop_missing=float(getattr(Config, "COST_W_STOP_MISSING", 0.5)),
+                w_stop_proximity=float(getattr(Config, "COST_W_STOP_PROXIMITY", 0.2)),
+                w_liq_event=float(getattr(Config, "COST_W_LIQ_EVENT", 5.0)),
+                w_stop_event=float(getattr(Config, "COST_W_STOP_EVENT", 1.0)),
+            ),
+        )
 
         # Runtime State
         self.current_step = 0
@@ -668,6 +687,21 @@ class TradingEnvironment(gym.Env):
             trend_score=metrics['trend_score']
         )
         
+        # 9. Cost / Constraint（成本線）
+        # 我們使用「當下價格」計算風險訊號（含 stop_loss_missing / 距離爆倉 / margin_ratio 等），
+        # 並把總 cost 與分項寫入 info，方便訓練端做 Lagrangian 更新與 debug。
+        risk_post = self.observer.compute_risk_signals(
+            self.executor, prices.current_price, self.current_step, len(self.market_data.df_5m)
+        )
+        step_fee_ratio = float(step_fee / self.initial_balance) if self.initial_balance > 0 else 0.0
+        cost_out = self.cost_calculator.compute(
+            step_fee_ratio=step_fee_ratio,
+            current_dd=float(current_dd),
+            risk_signals=risk_post,
+            liq_triggered=bool(liq_triggered),
+            stop_loss_triggered=bool(stop_loss_triggered),
+        )
+
         # 10. Update Step
         self.current_step += 1
         self.episode_steps += 1
@@ -685,6 +719,10 @@ class TradingEnvironment(gym.Env):
             truncated=bool(truncated),
             termination_reason=termination_reason,
         )
+
+        # 將 cost 與分項加入 info（不破壞既有 key）
+        info["cost"] = float(cost_out["cost"])
+        info["cost_breakdown"] = dict(cost_out["cost_breakdown"])
 
         log_payload = self._build_log_payload(
             step=int(self.current_step),

@@ -26,6 +26,7 @@ class ActionRepeatWrapper(gym.Wrapper):
         
         # 累積變數
         total_step_fee = 0.0
+        total_cost = 0.0
         
         for i in range(self.repeat):
             obs, reward, d, t, info = self.env.step(action)
@@ -37,6 +38,9 @@ class ActionRepeatWrapper(gym.Wrapper):
             # 嘗試累積單步手續費資訊 (如果存在)
             if 'step_fee_ratio' in info:
                 total_step_fee += info['step_fee_ratio']
+            # 嘗試累積 cost（如果存在）
+            if 'cost' in info:
+                total_cost += float(info['cost'])
             
             # --- Safety Break Logic ---
             # 如果觸發止損、強平或任何終止條件，立即停止 Repeat，
@@ -50,6 +54,8 @@ class ActionRepeatWrapper(gym.Wrapper):
         # 更新 Info 中的累積值 (僅針對需要加總的欄位)
         if 'step_fee_ratio' in info:
             info['step_fee_ratio'] = total_step_fee
+        if 'cost' in info:
+            info['cost'] = float(total_cost)
             
         return obs, total_reward, done, truncated, info
 

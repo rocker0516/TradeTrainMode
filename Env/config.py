@@ -50,6 +50,17 @@ class Config:
     LIQUIDATION_WARN_PCT: float = 0.05
     STOP_LOSS_WARN_PCT: float = 0.02
 
+    # ---- Lagrangian / Cost（成本線）----
+    # cost 的定義在 `Env/Costs/cost.py`，此處僅提供可調權重（避免硬編碼散落各處）
+    COST_W_FEE: float = 1.0
+    COST_W_LIQ_PROXIMITY: float = 1.0
+    COST_W_MARGIN_PROXIMITY: float = 0.5
+    COST_W_DD: float = 0.2
+    COST_W_STOP_MISSING: float = 0.5
+    COST_W_STOP_PROXIMITY: float = 0.2
+    COST_W_LIQ_EVENT: float = 5.0
+    COST_W_STOP_EVENT: float = 1.0
+
     # ---- 逐倉維持保證金 ----
     MAINTENANCE_MARGIN_RATE: float = 0.005
 
