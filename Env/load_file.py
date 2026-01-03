@@ -6,7 +6,7 @@ import glob
 
 def load_data():
     """載入 Data/ 目錄下所有符合規則的 5min 與 1d 數據並合併"""
-    print("Loading data from Data/ directory...")
+    #print("Loading data from Data/ directory...")
     
     data_dir = 'Data'
     file_name = ''
@@ -22,8 +22,8 @@ def load_data():
     if not files_1d:
         raise ValueError("No *_1d.csv files found in Data/")
         
-    print(f"Found {len(files_5m)} 5m files: {[os.path.basename(f) for f in files_5m]}")
-    print(f"Found {len(files_1d)} 1d files: {[os.path.basename(f) for f in files_1d]}")
+    #print(f"Found {len(files_5m)} 5m files: {[os.path.basename(f) for f in files_5m]}")
+    #print(f"Found {len(files_1d)} 1d files: {[os.path.basename(f) for f in files_1d]}")
 
     # 2. 讀取並合併 5m 數據
     df_list_5m = pd.DataFrame()
@@ -93,5 +93,5 @@ def load_data():
     df_1d.reset_index(drop=True, inplace=True)
     
     
-    print(f"Merged Data loaded. 5m: {len(df_5m)} rows, 1d: {len(df_1d)} rows")
+    #print(f"Merged Data loaded. 5m: {len(df_5m)} rows, 1d: {len(df_1d)} rows")
     return df_5m, df_1d

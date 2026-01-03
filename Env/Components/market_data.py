@@ -54,7 +54,11 @@ class MarketData:
 
         # 你已選定對齊策略 B：上一根「已收盤」日線
         # 因此我們再往回退 1 根，避免在日內偷看到「今天尚未收盤」的 1d close/high/low 等資訊。
-        self.map_5m_to_1d = idx_asof - 1
+        #
+        # 重要：由於 load_file.py 會 inner join 所有 1d 檔案，df_1d 的起始時間可能晚於 df_5m。
+        # 當 5m 時間點早於 df_1d 的第一筆 timestamp 時，idx_asof 會是 -1，退一根後會變成 -2。
+        # 若不做下界保護，get_1d_seq 的 padding 會超過 window_size_1d，導致 VecEnv stack shape mismatch。
+        self.map_5m_to_1d = np.maximum(idx_asof - 1, -1)
         
         # 3. 基礎價格數據 (Numpy Access for Speed - 使用 5m 作為執行基準)
         # 根據 target_symbol 選擇價格欄位
@@ -202,15 +206,24 @@ class MarketData:
         # 若 idx_1d_current 指向的是「昨天」(已收盤)，則為滯後資訊
         # 由 map_5m_to_1d 的構建邏輯決定。
         
-        # 注意：idx_1d_current 可能 < 0（代表沒有任何「已收盤」日線可用），此時全 padding 0。
-        start = int(idx_1d_current) - int(window_size_1d) + 1
-        end = int(idx_1d_current) + 1
-        
-        if start < 0:
-            pad_len = abs(start)
-            pad = np.zeros((pad_len, self.features_1d_arr.shape[1]), dtype=np.float32)
-            data_end = max(0, end)
-            data = self.features_1d_arr[0:data_end]
-            return np.vstack([pad, data]) if len(data) > 0 else pad
-            
-        return self.features_1d_arr[start:end]
+        # 注意：為了支援 VecEnv（多環境堆疊），此函式必須「無論任何邊界狀況」都回傳固定 shape：
+        #   (window_size_1d, F_1d)
+        out = np.zeros((int(window_size_1d), self.features_1d_arr.shape[1]), dtype=np.float32)
+
+        idx_1d_current = int(idx_1d_current)
+        if idx_1d_current < 0:
+            # 沒有任何已收盤日線可用 -> 全 0
+            return out
+
+        end = idx_1d_current + 1  # slice end（不含）
+        start = end - int(window_size_1d)
+
+        # 取可用區間並放到 out 尾端（不足前面補 0）
+        src_start = max(0, start)
+        src_end = min(end, len(self.features_1d_arr))
+        src = self.features_1d_arr[src_start:src_end]
+        if len(src) == 0:
+            return out
+
+        out[-len(src) :] = src
+        return out

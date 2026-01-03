@@ -329,6 +329,29 @@ class TradingEnvironment(gym.Env):
             info["terminated"] = bool(terminated)
             info["truncated"] = bool(truncated)
 
+            # ---- Episode summary（供訓練端每 N 回合統計/解析用）----
+            # 注意：這些統計只在回合結束時提供，避免每步 info 過大造成效能負擔。
+            # 1) 手續費（累積）
+            info["total_fees"] = float(getattr(self.executor, "total_fees", 0.0))
+            info["total_fees_ratio"] = (
+                float(getattr(self.executor, "total_fees", 0.0)) / float(self.initial_balance)
+                if self.initial_balance > 0
+                else 0.0
+            )
+            # 2) 多空進場/平倉次數（累積）
+            info["long_entry_count"] = int(getattr(self.executor, "long_entry_count", 0))
+            info["short_entry_count"] = int(getattr(self.executor, "short_entry_count", 0))
+            info["long_close_count"] = int(getattr(self.executor, "long_close_count", 0))
+            info["short_close_count"] = int(getattr(self.executor, "short_close_count", 0))
+            # 3) 結束時庫存（持倉 size）
+            info["final_position_size"] = float(getattr(self.executor.position, "size", 0.0))
+            info["final_position_notional"] = float(getattr(self.executor.position, "size", 0.0)) * float(
+                new_equity
+            )  # 粗略參考（不一定等於名目）
+            # 4) 回合事件統計（累積）
+            info["episode_stop_loss_count"] = int(getattr(self, "episode_stop_loss_count", 0))
+            info["episode_liq_count"] = int(getattr(self, "episode_liq_count", 0))
+
         return info
 
     def _build_log_payload(

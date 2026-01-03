@@ -16,7 +16,7 @@ class Config:
     """交易環境的預設參數集合（類似常數容器）。"""
 
     # ---- 基本資金與交易成本 ----
-    INITIAL_BALANCE: float = 1000.0
+    INITIAL_BALANCE: float = 10000.0
     TRANSACTION_FEE: float = 0.04  # (%) 手續費百分比（例如 0.04 代表 0.04%）
 
     # ---- 視窗大小 ----
@@ -26,10 +26,10 @@ class Config:
     # ---- 交易參數 ----
     LEVERAGE: float = 10.0
     MIN_BALANCE: float = INITIAL_BALANCE * 0.5
-    MIN_EPISODE_STEPS: int = 3000
-    MAX_EPISODE_STEPS: int = 1_000_000
-    MIN_POSITION_CHANGE: float = 0.0
-    MAX_STEP_POS_CHANGE_PCT: float = 0.1 # 最大單步持倉比例變化
+    MIN_EPISODE_STEPS: int = 288 * 31
+    MAX_EPISODE_STEPS: int = 288 * 31
+    MIN_POSITION_CHANGE: float = 0.2 # 最小調倉幅度 0.2 代表 20%
+    MAX_STEP_POS_CHANGE_PCT: float = 0.5 # 最大單步持倉比例變化 0.5 代表 50%
 
     # ---- 風險 / Flip 預算 ----
     FLIP_BUDGET_MAX: float = 1.0
@@ -39,16 +39,16 @@ class Config:
     FLIP_PROFIT_RECOVERY_RATE: float = 0.1
 
     # ---- 手續費限制 ----
-    FEE_LIMIT_ENABLED: bool = True
+    FEE_LIMIT_ENABLED: bool = False
     FEE_LIMIT_RATIO: float = 0.05
     FEE_ROLLING_WINDOW: int = 288
 
     # ---- 止損 / 清算提醒（供 Observer 或外部使用；目前 trading_env 主要用 STOP_LOSS_ATR）----
-    STOP_LOSS_ATR: float = 2.0
-    STOP_LOSS_LIQ_BUFFER_PCT: float = 0.0
-    STOP_LOSS_COOLDOWN_STEPS: int = 0
-    LIQUIDATION_WARN_PCT: float = 0.05
-    STOP_LOSS_WARN_PCT: float = 0.02
+    STOP_LOSS_ATR: float = 3.0 
+    STOP_LOSS_LIQ_BUFFER_PCT: float = 0.0 # 止損相對強平價的安全緩衝（比例）
+    STOP_LOSS_COOLDOWN_STEPS: int = 30 / 5 # 止損冷卻步數
+    LIQUIDATION_WARN_PCT: float = 0.05 # 清算警告比例
+    STOP_LOSS_WARN_PCT: float = 0.02 # 止損警告比例
 
     # ---- Lagrangian / Cost（成本線）----
     # cost 的定義在 `Env/Costs/cost.py`，此處僅提供可調權重（避免硬編碼散落各處）
