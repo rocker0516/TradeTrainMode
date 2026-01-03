@@ -20,6 +20,24 @@ def _make_env_shallow() -> "TradingEnvironment":
     env = TradingEnvironment.__new__(TradingEnvironment)
     env.initial_balance = 1000.0
     env.risk_budget = 0.5
+    env.episode_stop_loss_count = 0
+    env.episode_liq_count = 0
+
+    # _build_step_info(done=True) 會讀取 executor / position 的最小欄位。
+    class _DummyPos:
+        size = 0.0
+        entry_price = 0.0
+        stop_loss_price = 0.0
+
+    class _DummyExecutor:
+        total_fees = 0.0
+        long_entry_count = 0
+        short_entry_count = 0
+        long_close_count = 0
+        short_close_count = 0
+        position = _DummyPos()
+
+    env.executor = _DummyExecutor()
     return env
 
 
@@ -98,6 +116,10 @@ def test_build_step_info_contains_required_keys_and_done_fields() -> None:
         step_fee=1.25,
         is_flip=True,
         current_dd=0.1,
+        episode_max_dd=0.25,
+        episode_turnover_notional=123.0,
+        episode_holding_steps=10,
+        episode_trade_count=3,
         terminated=False,
         truncated=True,
         termination_reason="max_steps_reached",
@@ -109,6 +131,11 @@ def test_build_step_info_contains_required_keys_and_done_fields() -> None:
     assert info["risk_budget"] == 0.5
     assert info["termination_reason"] == "max_steps_reached"
     assert info["final_balance"] == 1100.0
+    assert info["episode_max_dd"] == 0.25
+    assert info["episode_turnover_notional"] == 123.0
+    assert info["episode_holding_steps"] == 10
+    assert info["episode_trade_count"] == 3
+    assert "fees_to_equity_ratio" in info
     assert info["terminated"] is False
     assert info["truncated"] is True
 

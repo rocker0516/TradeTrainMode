@@ -123,6 +123,14 @@ class LagrangianCallback(BaseCallback):
         
         # 交易統計緩衝區 (Episode level)
         self.ep_infos: List[Dict[str, Any]] = []
+
+        # 全域回合計數（跨 dump，不會清空）
+        self.total_episodes: int = 0
+        # 固定視窗：最近 100 回合的最大回撤（max drawdown）
+        self.recent_episode_max_dd: Deque[float] = deque(maxlen=100)
+        # 最近 100 回合：最大手續費/費用比等「極端值」追蹤
+        self.recent_total_fees: Deque[float] = deque(maxlen=100)
+        self.recent_fees_to_equity: Deque[float] = deque(maxlen=100)
         
     def _on_step(self) -> bool:
         # SB3 的 locals['infos'] 包含所有並行環境的 info
@@ -137,6 +145,24 @@ class LagrangianCallback(BaseCallback):
             # VecMonitor 會在 episode 結束時加入 info["episode"] = {"r": ep_return, "l": ep_len, ...}
             # 我們以此判斷「確實結束了一個回合」，並把同一筆 info 裡的回合摘要一起存起來。
             if "episode" in info:
+                self.total_episodes += 1
+                # Env 在 done 時提供 episode_max_dd；若舊模型/舊環境未提供，fallback 到 current_dd
+                dd_val = float(info.get("episode_max_dd", info.get("current_dd", 0.0)))
+                # 理論範圍 0~1（保守 clamp，避免偶發 NaN/Inf 影響統計）
+                if not np.isfinite(dd_val):
+                    dd_val = 0.0
+                dd_val = float(np.clip(dd_val, 0.0, 1.0))
+                self.recent_episode_max_dd.append(dd_val)
+
+                fees_val = float(info.get("total_fees", 0.0))
+                if not np.isfinite(fees_val) or fees_val < 0.0:
+                    fees_val = 0.0
+                self.recent_total_fees.append(float(fees_val))
+
+                f2e = float(info.get("fees_to_equity_ratio", 0.0))
+                if not np.isfinite(f2e) or f2e < 0.0:
+                    f2e = 0.0
+                self.recent_fees_to_equity.append(float(f2e))
                 self.ep_infos.append(info)
 
         # 3. 定期更新 λ
@@ -174,6 +200,11 @@ class LagrangianCallback(BaseCallback):
         final_pos = [float(x.get("final_position_size", 0.0)) for x in self.ep_infos]
         stop_counts = [int(x.get("episode_stop_loss_count", 0)) for x in self.ep_infos]
         liq_counts = [int(x.get("episode_liq_count", 0)) for x in self.ep_infos]
+        ep_max_dds = [float(x.get("episode_max_dd", x.get("current_dd", 0.0))) for x in self.ep_infos]
+        profits = [float(x.get("profit", 0.0)) for x in self.ep_infos]
+        holding_steps = [int(x.get("episode_holding_steps", 0)) for x in self.ep_infos]
+        turnover_notional = [float(x.get("episode_turnover_notional", 0.0)) for x in self.ep_infos]
+        fees_to_equity = [float(x.get("fees_to_equity_ratio", 0.0)) for x in self.ep_infos]
 
         # 終止原因統計
         reasons = [str(x.get("termination_reason", "")) for x in self.ep_infos if "termination_reason" in x]
@@ -189,6 +220,26 @@ class LagrangianCallback(BaseCallback):
         avg_final_pos = float(np.mean(final_pos)) if final_pos else 0.0
         avg_stop_count = float(np.mean(stop_counts)) if stop_counts else 0.0
         avg_liq_count = float(np.mean(liq_counts)) if liq_counts else 0.0
+        avg_ep_max_dd = float(np.mean(ep_max_dds)) if ep_max_dds else 0.0
+        max_dd_last_100 = float(max(self.recent_episode_max_dd)) if len(self.recent_episode_max_dd) > 0 else 0.0
+
+        # 最近 N 回合：Win Rate / Profit Factor（用 env profit；與訓練 reward 不同）
+        win_rate = float(np.mean([1.0 if p > 0.0 else 0.0 for p in profits])) if profits else 0.0
+        gross_profit = float(sum(p for p in profits if p > 0.0))
+        gross_loss_abs = float(abs(sum(p for p in profits if p < 0.0)))
+        if gross_loss_abs > 0.0:
+            profit_factor = float(gross_profit / gross_loss_abs)
+        else:
+            profit_factor = float("inf") if gross_profit > 0.0 else 0.0
+
+        # Overtrading hints: holding / turnover
+        avg_holding_steps = float(np.mean(holding_steps)) if holding_steps else 0.0
+        avg_turnover_notional = float(np.mean(turnover_notional)) if turnover_notional else 0.0
+
+        # Fee pain: max fees last100 + fees-to-equity
+        max_fees_last_100 = float(max(self.recent_total_fees)) if len(self.recent_total_fees) > 0 else 0.0
+        avg_fees_to_equity = float(np.mean(fees_to_equity)) if fees_to_equity else 0.0
+        max_fees_to_equity_last_100 = float(max(self.recent_fees_to_equity)) if len(self.recent_fees_to_equity) > 0 else 0.0
         
         # 寫入 Logger
         self.logger.record("trade/avg_episode_return", avg_ep_return)
@@ -200,17 +251,33 @@ class LagrangianCallback(BaseCallback):
         self.logger.record("trade/avg_final_position_size", avg_final_pos)
         self.logger.record("trade/avg_stop_loss_count", avg_stop_count)
         self.logger.record("trade/avg_liq_count", avg_liq_count)
+        self.logger.record("trade/avg_episode_max_dd", avg_ep_max_dd)
+        self.logger.record("trade/max_dd_last_100", max_dd_last_100)
+        self.logger.record("trade/total_episodes", float(self.total_episodes))
+        self.logger.record("trade/win_rate_last_n", win_rate)
+        self.logger.record("trade/profit_factor_last_n", profit_factor)
+        self.logger.record("trade/avg_holding_steps_last_n", avg_holding_steps)
+        self.logger.record("trade/avg_turnover_notional_last_n", avg_turnover_notional)
+        self.logger.record("trade/max_fees_last_100", max_fees_last_100)
+        self.logger.record("trade/avg_fees_to_equity_last_n", avg_fees_to_equity)
+        self.logger.record("trade/max_fees_to_equity_last_100", max_fees_to_equity_last_100)
         self.logger.record("trade/lambda", float(self.controller.current_lambda))
         
         # Console 輸出
         if self.verbose > 0:
             print(f"\n[Trade Stats @ {self.num_timesteps} steps] (last {n} episodes)")
+            print(f"  Total Episodes: {self.total_episodes}")
             print(f"  Avg Episode Return: {avg_ep_return:.4f}")
             print(f"  Avg Episode Len: {avg_ep_len:.2f}")
             print(f"  Avg Fees: {avg_total_fees:.4f}  (ratio={avg_total_fees_ratio:.6f})")
+            print(f"  Max Fees (last 100): {max_fees_last_100:.4f}")
+            print(f"  Fees-to-Equity: avg(last N)={avg_fees_to_equity:.6f} | max(last 100)={max_fees_to_equity_last_100:.6f}")
             print(f"  Avg Long Entries: {avg_long_entries:.2f} | Avg Short Entries: {avg_short_entries:.2f}")
             print(f"  Avg Final Position Size: {avg_final_pos:.6f}")
             print(f"  Avg Stop Loss Count: {avg_stop_count:.2f} | Avg Liq Count: {avg_liq_count:.2f}")
+            print(f"  Max Drawdown (last 100): {max_dd_last_100:.4f}")
+            print(f"  Win Rate (last N): {win_rate:.2%} | Profit Factor (last N): {profit_factor:.4f}")
+            print(f"  Avg Holding Steps (last N): {avg_holding_steps:.2f} | Avg Turnover Notional (last N): {avg_turnover_notional:.4f}")
             if reason_counter:
                 print(f"  Termination Reasons: {dict(reason_counter)}")
             print(f"  Current Lambda: {self.controller.current_lambda:.4f}")

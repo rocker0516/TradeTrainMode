@@ -28,7 +28,10 @@ class Config:
     MIN_BALANCE: float = INITIAL_BALANCE * 0.5
     MIN_EPISODE_STEPS: int = 288 * 31
     MAX_EPISODE_STEPS: int = 288 * 31
-    MIN_POSITION_CHANGE: float = 0.2 # 最小調倉幅度 0.2 代表 20%
+    # 最小調倉幅度（Deadband, 0.0 ~ 1.0）
+    # 預設使用 0.0：讓「單步倉位變化限制(max_step_pos_change_pct)」可以逐步累積倉位，
+    # 需要抑制微小調倉刷手續費時，再由外部 kwargs 覆寫（例如 0.2 代表 20%）。
+    MIN_POSITION_CHANGE: float = 0.0
     MAX_STEP_POS_CHANGE_PCT: float = 0.5 # 最大單步持倉比例變化 0.5 代表 50%
 
     # ---- 風險 / Flip 預算 ----

@@ -147,6 +147,12 @@ class TradingEnvironment(gym.Env):
         self.risk_budget = 0.0
         self.last_equity_for_budget = 0.0
         self.max_equity_so_far = 0.0
+        # Episode-level max drawdown (0~1). Used for trade stats (e.g., last 100 episodes max DD).
+        self.episode_max_dd = 0.0
+        # Episode-level metrics (for Trade Stats)
+        self.episode_turnover_notional = 0.0
+        self.episode_holding_steps = 0
+        self.episode_trade_count = 0
         
         # Action-conditioned effects cache (for next obs)
         self._last_action_effects = {}
@@ -192,6 +198,10 @@ class TradingEnvironment(gym.Env):
         self.risk_budget = Config.FLIP_BUDGET_MAX
         self.last_equity_for_budget = self.initial_balance
         self.max_equity_so_far = self.initial_balance
+        self.episode_max_dd = 0.0
+        self.episode_turnover_notional = 0.0
+        self.episode_holding_steps = 0
+        self.episode_trade_count = 0
         
         self.last_trade_step = -999999
         self.position_entry_step = None
@@ -289,6 +299,10 @@ class TradingEnvironment(gym.Env):
         step_fee: float,
         is_flip: bool,
         current_dd: float,
+        episode_max_dd: float,
+        episode_turnover_notional: float,
+        episode_holding_steps: int,
+        episode_trade_count: int,
         terminated: bool,
         truncated: bool,
         termination_reason: Optional[str],
@@ -303,6 +317,10 @@ class TradingEnvironment(gym.Env):
             step_fee: 本 step 手續費
             is_flip: 是否發生翻倉/反手（由 ActionProcessor 回傳）
             current_dd: 當前回撤
+            episode_max_dd: 本回合迄今最大回撤（0~1）
+            episode_turnover_notional: 本回合累積換手名目（sum(abs(delta_size) * price)）
+            episode_holding_steps: 本回合持倉步數（abs(position.size)>0 的 step 數）
+            episode_trade_count: 本回合發生交易的 step 數（position_change > threshold）
             terminated: Gymnasium terminated（自然終止）
             truncated: Gymnasium truncated（時間/資料截斷）
             termination_reason: 終止原因（若結束回合）
@@ -325,6 +343,13 @@ class TradingEnvironment(gym.Env):
         if done:
             info["termination_reason"] = termination_reason
             info["final_balance"] = float(new_equity)
+            info["episode_max_dd"] = float(episode_max_dd)
+            info["episode_turnover_notional"] = float(max(0.0, episode_turnover_notional))
+            info["episode_holding_steps"] = int(max(0, int(episode_holding_steps)))
+            info["episode_trade_count"] = int(max(0, int(episode_trade_count)))
+            info["fees_to_equity_ratio"] = (
+                float(getattr(self.executor, "total_fees", 0.0)) / float(max(1e-8, new_equity))
+            )
             # 額外提供 Gymnasium 語意旗標，方便外部檢查（不影響既有 key）
             info["terminated"] = bool(terminated)
             info["truncated"] = bool(truncated)
@@ -662,6 +687,24 @@ class TradingEnvironment(gym.Env):
             new_equity=new_equity,
             new_size=new_size,
         )
+        # Episode metrics: turnover / holding / trade count
+        try:
+            turnover_notional_change = float(position_change) * float(prices.current_price)
+            if np.isfinite(turnover_notional_change) and turnover_notional_change > 0.0:
+                self.episode_turnover_notional = float(self.episode_turnover_notional) + float(turnover_notional_change)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+        if bool(traded):
+            self.episode_trade_count += 1
+        if abs(float(new_size)) > 1e-8:
+            self.episode_holding_steps += 1
+        # Track episode-level max drawdown (0~1)
+        try:
+            dd_clamped = float(np.clip(float(current_dd), 0.0, 1.0))
+            self.episode_max_dd = float(max(float(self.episode_max_dd), dd_clamped))
+        except (TypeError, ValueError):
+            # Should never break training due to a stats field
+            pass
         stop_loss_triggered, liq_triggered = self._update_episode_event_counters()
             
         # 8. Check Done
@@ -738,6 +781,10 @@ class TradingEnvironment(gym.Env):
             step_fee=float(step_fee),
             is_flip=bool(is_flip),
             current_dd=float(current_dd),
+            episode_max_dd=float(self.episode_max_dd),
+            episode_turnover_notional=float(self.episode_turnover_notional),
+            episode_holding_steps=int(self.episode_holding_steps),
+            episode_trade_count=int(self.episode_trade_count),
             terminated=bool(terminated),
             truncated=bool(truncated),
             termination_reason=termination_reason,

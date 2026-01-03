@@ -236,6 +236,21 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
 
     done = bool(terminated or truncated)
 
+    # --- episode summary fields when done ---
+    if done:
+        # Env 只在回合結束時提供 episode_max_dd
+        assert "episode_max_dd" in info
+        assert 0.0 <= float(info["episode_max_dd"]) <= 1.0
+        # Overtrading / fee diagnostics
+        assert "episode_turnover_notional" in info
+        assert float(info["episode_turnover_notional"]) >= 0.0
+        assert "episode_holding_steps" in info
+        assert int(info["episode_holding_steps"]) >= 0
+        assert "episode_trade_count" in info
+        assert int(info["episode_trade_count"]) >= 0
+        assert "fees_to_equity_ratio" in info
+        assert float(info["fees_to_equity_ratio"]) >= 0.0
+
     # --- common required info keys ---
     if sc.expect.get("info_keys"):
         for k in (
