@@ -53,45 +53,23 @@ class Config:
     FEE_LIMIT_RATIO: float = 0.05
     FEE_ROLLING_WINDOW: int = 288
 
-    # ---- 止損 / 清算提醒（供 Observer 或外部使用；目前 trading_env 主要用 STOP_LOSS_ATR）----
+    # ---- 止損 / 清算提醒（供 Observer 或外部使用）----
     STOP_LOSS_ATR: float = 2 
     STOP_LOSS_LIQ_BUFFER_PCT: float = 0.05 # 止損相對強平價的安全緩衝（比例）
     STOP_LOSS_COOLDOWN_STEPS: int = 30 / 5 # 止損冷卻步數
+    
+    # 這些閾值保留供 Observation 特徵使用 (near_liq, near_stop)，但不參與 Cost 計算
     LIQUIDATION_WARN_PCT: float = 0.2 # 清算警告比例  0.05 代表 5%
     STOP_LOSS_WARN_PCT: float = 0.1 # 止損警告比例 0.02 代表 2%
 
-    # ---- Lagrangian / Cost（成本線） - REFACTORED ----
-    # 設計理念：Lagrangian 約束僅用於「生存邊界」與「極端異常」。
-    # 交易損耗（手續費、停損、回撤）應由 Main Reward (Log Return) 負責，
-    # 避免雙重懲罰導致 Agent 為了不觸發成本而放棄交易。
-
-    COST_W_FEE: float = 0.0 # 停用（改由 Main Reward 內扣手續費）
+    # ---- Lagrangian / Cost（成本線） - REFACTORED (Death Penalty Only) ----
+    # 設計理念：
+    # 成本線只保留「死亡懲罰」（實際爆倉、資金耗盡）。
+    # 其他摩擦成本（手續費、換手）、過程風險（接近爆倉、回撤）全部移除，
+    # 改由 Main Reward (Log Return) 自然引導 Agent 避免虧損。
     
-    # 交易摩擦：保留少量換手懲罰，抑制高頻刷單，但不應過大
-    COST_W_FEE_EQUITY: float = 0.0 # 停用
-    COST_W_TURNOVER: float = 0.1   # 降低權重
-    COST_W_TRADE_EVENT: float = 0.0 # 停用（交易本身不是罪）
-
-    # 生存約束（Risk）：這些是真正的紅線
-    COST_W_LIQ_PROXIMITY: float = 1.0 # 接近爆倉：危險
-    COST_W_MARGIN_PROXIMITY: float = 1.0 # 保證金不足：危險
-    COST_W_BALANCE_PROXIMITY: float = 5.0 # 接近破產：極度危險（拉高權重）
-    
-    # 風控紀律（Risk）：
-    COST_W_STOP_MISSING: float = 1.0 # 未設停損：違規（保留）
-    
-    # 下列項目屬於「交易結果」而非「違規」，移除以避免誤導 Agent
-    COST_W_DD: float = 0.0           # 回撤由 Log Return 負責
-    COST_W_STOP_PROXIMITY: float = 0.0 # 接近停損是市場波動，不罰
-    COST_W_STOP_EVENT: float = 0.0     # 觸發停損是正確風控，不罰！
-    
-    COST_W_LIQ_EVENT: float = 5.0 # 實際爆倉：嚴重違規
-
-    # ---- Cost proximity 曲線與警戒帶（越小越嚴格）----
-    # - BALANCE_WARN_UP_RATIO: 當 equity <= (1+ratio)*min_balance 時開始拉高 balance_proximity_cost（線性到 1）
-    # - PROX_CURVE_POWER: proximity 類成本的非線性倍率（>1 更「末端敏感」）
-    BALANCE_WARN_UP_RATIO: float = 0.5
-    PROX_CURVE_POWER: float = 2.0
+    COST_W_LIQ_EVENT: float = 5.0      # 實際爆倉：嚴重違規
+    COST_W_BANKRUPT_EVENT: float = 5.0 # 資金耗盡 (Equity <= Min Balance)：嚴重違規
 
     # ---- 逐倉維持保證金 ----
     MAINTENANCE_MARGIN_RATE: float = 0.005
@@ -107,5 +85,3 @@ class Config:
 
     # ---- 其他（測試/相容性用）----
     TURNOVER_NOTIONAL_SCALE: float = 1.0
-
- 

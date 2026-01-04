@@ -163,7 +163,8 @@ def main() -> None:
     lag_callback = LagrangianCallback(
         controller=lag_controller,
         update_freq=int(args.update_lambda_every_steps),  # 每 N 步更新一次 λ
-        log_freq=int(args.log_every_episodes)             # 每 N episodes 顯示一次交易狀態
+        log_freq=int(args.log_every_episodes),            # 每 N episodes 顯示一次交易狀態
+        window_size=int(TrainConfig.STATS_WINDOW_EPISODES)# 統計視窗大小
     )
     
     # CheckpointCallback: 定期存檔

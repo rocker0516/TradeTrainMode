@@ -124,25 +124,11 @@ class TradingEnvironment(gym.Env):
 
         # Cost / Constraint（供 Lagrangian-SAC 使用）
         # 注意：reward 與 cost 分離，cost 透過 info 回傳，方便訓練端做 λ 更新與解析。
+        # REFACTORED: 只保留死亡懲罰 (Liq / Bankrupt)，移除所有 proximity / friction 參數
         self.cost_calculator = CostCalculator(
-            liq_warn_pct=getattr(Config, "LIQUIDATION_WARN_PCT", 0.05),
-            stop_warn_pct=getattr(Config, "STOP_LOSS_WARN_PCT", 0.02),
-            maintenance_margin_rate=getattr(Config, "MAINTENANCE_MARGIN_RATE", 0.005),
-            balance_warn_up_ratio=float(getattr(Config, "BALANCE_WARN_UP_RATIO", 0.5)),
-            prox_curve_power=float(getattr(Config, "PROX_CURVE_POWER", 2.0)),
             weights=CostWeights(
-                w_fee=float(getattr(Config, "COST_W_FEE", 1.0)),
-                w_fee_equity=float(getattr(Config, "COST_W_FEE_EQUITY", 1.0)),
-                w_turnover=float(getattr(Config, "COST_W_TURNOVER", 0.5)),
-                w_trade_event=float(getattr(Config, "COST_W_TRADE_EVENT", 0.05)),
-                w_liq_proximity=float(getattr(Config, "COST_W_LIQ_PROXIMITY", 1.0)),
-                w_margin_proximity=float(getattr(Config, "COST_W_MARGIN_PROXIMITY", 0.5)),
-                w_dd=float(getattr(Config, "COST_W_DD", 0.2)),
-                w_balance_proximity=float(getattr(Config, "COST_W_BALANCE_PROXIMITY", 2.0)),
-                w_stop_missing=float(getattr(Config, "COST_W_STOP_MISSING", 0.5)),
-                w_stop_proximity=float(getattr(Config, "COST_W_STOP_PROXIMITY", 0.2)),
                 w_liq_event=float(getattr(Config, "COST_W_LIQ_EVENT", 5.0)),
-                w_stop_event=float(getattr(Config, "COST_W_STOP_EVENT", 1.0)),
+                w_bankrupt_event=float(getattr(Config, "COST_W_BANKRUPT_EVENT", 5.0)),
             ),
         )
 
@@ -770,16 +756,19 @@ class TradingEnvironment(gym.Env):
             self.executor, prices.current_price, self.current_step, len(self.market_data.df_5m)
         )
         step_fee_ratio = float(step_fee / self.initial_balance) if self.initial_balance > 0 else 0.0
+        
+        # REFACTORED: 僅傳遞必要參數 (liq_triggered, equity, min_balance)
         cost_out = self.cost_calculator.compute(
-            step_fee_ratio=step_fee_ratio,
-            step_fee=float(step_fee),
+            liq_triggered=bool(liq_triggered),
             equity=float(new_equity),
             min_balance=float(self.min_balance),
+            # 以下參數保留傳遞但 CostCalculator 會忽略
+            step_fee_ratio=step_fee_ratio,
+            step_fee=float(step_fee),
             turnover_ratio=float(turnover_ratio),
             traded=bool(traded),
             current_dd=float(current_dd),
             risk_signals=risk_post,
-            liq_triggered=bool(liq_triggered),
             stop_loss_triggered=bool(stop_loss_triggered),
         )
 
