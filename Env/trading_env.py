@@ -128,11 +128,17 @@ class TradingEnvironment(gym.Env):
             liq_warn_pct=getattr(Config, "LIQUIDATION_WARN_PCT", 0.05),
             stop_warn_pct=getattr(Config, "STOP_LOSS_WARN_PCT", 0.02),
             maintenance_margin_rate=getattr(Config, "MAINTENANCE_MARGIN_RATE", 0.005),
+            balance_warn_up_ratio=float(getattr(Config, "BALANCE_WARN_UP_RATIO", 0.5)),
+            prox_curve_power=float(getattr(Config, "PROX_CURVE_POWER", 2.0)),
             weights=CostWeights(
                 w_fee=float(getattr(Config, "COST_W_FEE", 1.0)),
+                w_fee_equity=float(getattr(Config, "COST_W_FEE_EQUITY", 1.0)),
+                w_turnover=float(getattr(Config, "COST_W_TURNOVER", 0.5)),
+                w_trade_event=float(getattr(Config, "COST_W_TRADE_EVENT", 0.05)),
                 w_liq_proximity=float(getattr(Config, "COST_W_LIQ_PROXIMITY", 1.0)),
                 w_margin_proximity=float(getattr(Config, "COST_W_MARGIN_PROXIMITY", 0.5)),
                 w_dd=float(getattr(Config, "COST_W_DD", 0.2)),
+                w_balance_proximity=float(getattr(Config, "COST_W_BALANCE_PROXIMITY", 2.0)),
                 w_stop_missing=float(getattr(Config, "COST_W_STOP_MISSING", 0.5)),
                 w_stop_proximity=float(getattr(Config, "COST_W_STOP_PROXIMITY", 0.2)),
                 w_liq_event=float(getattr(Config, "COST_W_LIQ_EVENT", 5.0)),
@@ -176,7 +182,11 @@ class TradingEnvironment(gym.Env):
         # 1. 決定起始點
         if self.random_start:
             max_start_index = len(self.market_data.df_5m) - self.min_episode_steps - 2
-            self.current_step = int(random.randint(self.window_size, max_start_index))
+            # 若資料量不足以支援 min_episode_steps（常見於測試用合成資料），退化為固定起點，避免 randint 空範圍。
+            if int(max_start_index) <= int(self.window_size):
+                self.current_step = int(self.window_size)
+            else:
+                self.current_step = int(random.randint(self.window_size, max_start_index))
         else:
             self.current_step = self.window_size 
             
@@ -762,6 +772,11 @@ class TradingEnvironment(gym.Env):
         step_fee_ratio = float(step_fee / self.initial_balance) if self.initial_balance > 0 else 0.0
         cost_out = self.cost_calculator.compute(
             step_fee_ratio=step_fee_ratio,
+            step_fee=float(step_fee),
+            equity=float(new_equity),
+            min_balance=float(self.min_balance),
+            turnover_ratio=float(turnover_ratio),
+            traded=bool(traded),
             current_dd=float(current_dd),
             risk_signals=risk_post,
             liq_triggered=bool(liq_triggered),
@@ -792,6 +807,11 @@ class TradingEnvironment(gym.Env):
 
         # 將 cost 與分項加入 info（不破壞既有 key）
         info["cost"] = float(cost_out["cost"])
+        # 新增：雙路徑成本（供雙 λ 使用）；舊訓練端若不認得也不會壞
+        if "cost_risk" in cost_out:
+            info["cost_risk"] = float(cost_out["cost_risk"])
+        if "cost_fric" in cost_out:
+            info["cost_fric"] = float(cost_out["cost_fric"])
         info["cost_breakdown"] = dict(cost_out["cost_breakdown"])
 
         log_payload = self._build_log_payload(

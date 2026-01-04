@@ -17,7 +17,7 @@ class Config:
 
     # ---- 基本資金與交易成本 ----
     INITIAL_BALANCE: float = 10000.0
-    TRANSACTION_FEE: float = 0.04  # (%) 手續費百分比（例如 0.04 代表 0.04%）
+    TRANSACTION_FEE: float = 0.01  # (%) 手續費百分比（例如 0.04 代表 0.04%）
 
     # ---- 視窗大小 ----
     WINDOW_SIZE: int = 288  # 5m * 288 = 1 day
@@ -25,14 +25,21 @@ class Config:
 
     # ---- 交易參數 ----
     LEVERAGE: float = 10.0
-    MIN_BALANCE: float = INITIAL_BALANCE * 0.5
-    MIN_EPISODE_STEPS: int = 288 * 31
-    MAX_EPISODE_STEPS: int = 288 * 31
+    MIN_BALANCE: float = INITIAL_BALANCE * 0.2 # 最小餘額 0.2 代表 20%
+    MIN_EPISODE_STEPS: int = 288 * 31 # 最小步數 288 * 31 = 8928 步
+    MAX_EPISODE_STEPS: int = 288 * 31 # 最大步數 288 * 31 = 8928 步
     # 最小調倉幅度（Deadband, 0.0 ~ 1.0）
     # 預設使用 0.0：讓「單步倉位變化限制(max_step_pos_change_pct)」可以逐步累積倉位，
     # 需要抑制微小調倉刷手續費時，再由外部 kwargs 覆寫（例如 0.2 代表 20%）。
-    MIN_POSITION_CHANGE: float = 0.0
+    MIN_POSITION_CHANGE: float = 0.2 # 最小調倉幅度 0.2 代表 20%
     MAX_STEP_POS_CHANGE_PCT: float = 0.5 # 最大單步持倉比例變化 0.5 代表 50%
+
+    # ---- 訓練/執行 Wrapper 參數（單一來源）----
+    # ActionSmoothClipWrapper：先硬限制最大目標倉位，再做動作平滑，抑制高頻翻倉刷手續費
+    MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（-P~P）
+    ACTION_SMOOTH_ALPHA: float = 0.5  # 0~1；越小越平滑
+    # ActionRepeatWrapper：降低決策頻率（Frame Skip）
+    ACTION_REPEAT: int = 1
 
     # ---- 風險 / Flip 預算 ----
     FLIP_BUDGET_MAX: float = 1.0
@@ -47,22 +54,44 @@ class Config:
     FEE_ROLLING_WINDOW: int = 288
 
     # ---- 止損 / 清算提醒（供 Observer 或外部使用；目前 trading_env 主要用 STOP_LOSS_ATR）----
-    STOP_LOSS_ATR: float = 3.0 
-    STOP_LOSS_LIQ_BUFFER_PCT: float = 0.0 # 止損相對強平價的安全緩衝（比例）
+    STOP_LOSS_ATR: float = 2 
+    STOP_LOSS_LIQ_BUFFER_PCT: float = 0.05 # 止損相對強平價的安全緩衝（比例）
     STOP_LOSS_COOLDOWN_STEPS: int = 30 / 5 # 止損冷卻步數
-    LIQUIDATION_WARN_PCT: float = 0.05 # 清算警告比例
-    STOP_LOSS_WARN_PCT: float = 0.02 # 止損警告比例
+    LIQUIDATION_WARN_PCT: float = 0.2 # 清算警告比例  0.05 代表 5%
+    STOP_LOSS_WARN_PCT: float = 0.1 # 止損警告比例 0.02 代表 2%
 
-    # ---- Lagrangian / Cost（成本線）----
-    # cost 的定義在 `Env/Costs/cost.py`，此處僅提供可調權重（避免硬編碼散落各處）
-    COST_W_FEE: float = 1.0
-    COST_W_LIQ_PROXIMITY: float = 1.0
-    COST_W_MARGIN_PROXIMITY: float = 0.5
-    COST_W_DD: float = 0.2
-    COST_W_STOP_MISSING: float = 0.5
-    COST_W_STOP_PROXIMITY: float = 0.2
-    COST_W_LIQ_EVENT: float = 5.0
-    COST_W_STOP_EVENT: float = 1.0
+    # ---- Lagrangian / Cost（成本線） - REFACTORED ----
+    # 設計理念：Lagrangian 約束僅用於「生存邊界」與「極端異常」。
+    # 交易損耗（手續費、停損、回撤）應由 Main Reward (Log Return) 負責，
+    # 避免雙重懲罰導致 Agent 為了不觸發成本而放棄交易。
+
+    COST_W_FEE: float = 0.0 # 停用（改由 Main Reward 內扣手續費）
+    
+    # 交易摩擦：保留少量換手懲罰，抑制高頻刷單，但不應過大
+    COST_W_FEE_EQUITY: float = 0.0 # 停用
+    COST_W_TURNOVER: float = 0.1   # 降低權重
+    COST_W_TRADE_EVENT: float = 0.0 # 停用（交易本身不是罪）
+
+    # 生存約束（Risk）：這些是真正的紅線
+    COST_W_LIQ_PROXIMITY: float = 1.0 # 接近爆倉：危險
+    COST_W_MARGIN_PROXIMITY: float = 1.0 # 保證金不足：危險
+    COST_W_BALANCE_PROXIMITY: float = 5.0 # 接近破產：極度危險（拉高權重）
+    
+    # 風控紀律（Risk）：
+    COST_W_STOP_MISSING: float = 1.0 # 未設停損：違規（保留）
+    
+    # 下列項目屬於「交易結果」而非「違規」，移除以避免誤導 Agent
+    COST_W_DD: float = 0.0           # 回撤由 Log Return 負責
+    COST_W_STOP_PROXIMITY: float = 0.0 # 接近停損是市場波動，不罰
+    COST_W_STOP_EVENT: float = 0.0     # 觸發停損是正確風控，不罰！
+    
+    COST_W_LIQ_EVENT: float = 5.0 # 實際爆倉：嚴重違規
+
+    # ---- Cost proximity 曲線與警戒帶（越小越嚴格）----
+    # - BALANCE_WARN_UP_RATIO: 當 equity <= (1+ratio)*min_balance 時開始拉高 balance_proximity_cost（線性到 1）
+    # - PROX_CURVE_POWER: proximity 類成本的非線性倍率（>1 更「末端敏感」）
+    BALANCE_WARN_UP_RATIO: float = 0.5
+    PROX_CURVE_POWER: float = 2.0
 
     # ---- 逐倉維持保證金 ----
     MAINTENANCE_MARGIN_RATE: float = 0.005
