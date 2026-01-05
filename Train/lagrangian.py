@@ -10,6 +10,127 @@ from typing import Any, Dict, List, Tuple, Deque, Optional
 from stable_baselines3.common.callbacks import BaseCallback
 
 
+def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
+    """
+    計算「TRADE STATS」視窗統計（純計算，方便測試）。
+
+    Args:
+        ep_infos: Callback 收集到的 episode 結束 info（VecMonitor 會在結束時注入 "episode" key）。
+
+    Returns:
+        dict，包含：
+        - avg_fee
+        - avg_liq
+        - avg_dd
+        - avg_long_entries
+        - avg_short_entries
+        - avg_stop_loss
+    """
+    if not ep_infos:
+        return {
+            "avg_fee": 0.0,
+            "avg_liq": 0.0,
+            "avg_dd": 0.0,
+            "avg_long_entries": 0.0,
+            "avg_short_entries": 0.0,
+            "avg_stop_loss": 0.0,
+        }
+
+    total_fees = [float(x.get("total_fees", 0.0)) for x in ep_infos]
+    liq_counts = [int(x.get("episode_liq_count", 0)) for x in ep_infos]
+    max_dds = [float(x.get("episode_max_dd", 0.0)) for x in ep_infos]
+    long_entries = [int(x.get("long_entry_count", 0)) for x in ep_infos]
+    short_entries = [int(x.get("short_entry_count", 0)) for x in ep_infos]
+    stop_losses = [int(x.get("episode_stop_loss_count", 0)) for x in ep_infos]
+
+    return {
+        "avg_fee": float(np.mean(total_fees)) if total_fees else 0.0,
+        "avg_liq": float(np.mean(liq_counts)) if liq_counts else 0.0,
+        "avg_dd": float(np.mean(max_dds)) if max_dds else 0.0,
+        "avg_long_entries": float(np.mean(long_entries)) if long_entries else 0.0,
+        "avg_short_entries": float(np.mean(short_entries)) if short_entries else 0.0,
+        "avg_stop_loss": float(np.mean(stop_losses)) if stop_losses else 0.0,
+    }
+
+
+def compute_end_result_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    計算「回合結束結果」視窗統計（純計算，方便測試）。
+
+    統計內容：
+    - terminated / truncated 次數與比例
+    - termination_reason 各類型次數與比例
+    - Avg Episode Length（VecMonitor: info["episode"]["l"]）
+    - Avg Final Balance（TradingEnv: info["final_balance"]）
+
+    Args:
+        ep_infos: Callback 收集到的 episode 結束 info。
+
+    Returns:
+        dict（結構穩定，適合印出/寫 TB）。
+    """
+    n = int(len(ep_infos))
+    if n == 0:
+        return {
+            "n": 0,
+            "terminated_count": 0,
+            "truncated_count": 0,
+            "terminated_rate": 0.0,
+            "truncated_rate": 0.0,
+            "reason_counts": {},
+            "reason_rates": {},
+            "avg_episode_len": 0.0,
+            "avg_final_balance": 0.0,
+        }
+
+    terminated_flags = [bool(x.get("terminated", False)) for x in ep_infos]
+    truncated_flags = [bool(x.get("truncated", False)) for x in ep_infos]
+    terminated_count = int(sum(terminated_flags))
+    truncated_count = int(sum(truncated_flags))
+
+    # termination_reason（缺失則歸類 unknown）
+    reasons: List[str] = []
+    for x in ep_infos:
+        r = x.get("termination_reason", "unknown")
+        r = str(r) if r is not None else "unknown"
+        r = r.strip() or "unknown"
+        reasons.append(r)
+
+    reason_counts = dict(Counter(reasons))
+    reason_rates = {k: (v / n) * 100.0 for k, v in reason_counts.items()}
+
+    # VecMonitor episode length
+    ep_lens: List[int] = []
+    for x in ep_infos:
+        ep = x.get("episode", {})
+        if isinstance(ep, dict):
+            try:
+                ep_lens.append(int(ep.get("l", 0)))
+            except (TypeError, ValueError):
+                ep_lens.append(0)
+        else:
+            ep_lens.append(0)
+
+    final_balances: List[float] = []
+    for x in ep_infos:
+        try:
+            final_balances.append(float(x.get("final_balance", 0.0)))
+        except (TypeError, ValueError):
+            final_balances.append(0.0)
+
+    return {
+        "n": n,
+        "terminated_count": terminated_count,
+        "truncated_count": truncated_count,
+        "terminated_rate": (terminated_count / n) * 100.0,
+        "truncated_rate": (truncated_count / n) * 100.0,
+        "reason_counts": reason_counts,
+        "reason_rates": reason_rates,
+        "avg_episode_len": float(np.mean(ep_lens)) if ep_lens else 0.0,
+        "avg_final_balance": float(np.mean(final_balances)) if final_balances else 0.0,
+    }
+
+
 class SharedLagrangianController:
     """
     跨進程共享的 Lagrangian Multiplier (λ) 控制器。
@@ -72,13 +193,23 @@ class LagrangianRewardWrapper(gym.Wrapper):
         
         # 累計當前回合數據 (for statistics)
         self.ep_ret_orig = 0.0
+        self.ep_ret_orig_scaled = 0.0
+        self.ep_ret_total = 0.0  # 實際給 agent 訓練的 reward（modified reward）累計
         self.ep_cost = 0.0
         self.ep_cost_breakdown = defaultdict(float)
+        # cost 對 reward 的「懲罰貢獻」：每步 (λ * cost_component) 累計
+        # 注意：實際 modified_reward 公式是減掉它，所以輸出時通常會以負號呈現。
+        self.ep_cost_penalty_total = 0.0
+        self.ep_cost_penalty_breakdown = defaultdict(float)
         
     def reset(self, **kwargs):
         self.ep_ret_orig = 0.0
+        self.ep_ret_orig_scaled = 0.0
+        self.ep_ret_total = 0.0
         self.ep_cost = 0.0
         self.ep_cost_breakdown.clear()
+        self.ep_cost_penalty_total = 0.0
+        self.ep_cost_penalty_breakdown.clear()
         return self.env.reset(**kwargs)
         
     def step(self, action: Any) -> Tuple[Any, float, bool, bool, Dict[str, Any]]:
@@ -92,6 +223,7 @@ class LagrangianRewardWrapper(gym.Wrapper):
         
         # 2. 累計回合統計
         self.ep_ret_orig += raw_reward
+        self.ep_ret_orig_scaled += raw_reward * self.reward_scale
         self.ep_cost += cost
         for k, v in breakdown.items():
             self.ep_cost_breakdown[k] += float(v)
@@ -99,13 +231,23 @@ class LagrangianRewardWrapper(gym.Wrapper):
         # 3. 計算 Lagrangian Reward (給 Agent 訓練用)
         lam = self.controller.current_lambda
         modified_reward = (raw_reward * self.reward_scale) - (lam * cost)
+        self.ep_ret_total += float(modified_reward)
+        self.ep_cost_penalty_total += float(lam) * float(cost)
+        for k, v in breakdown.items():
+            self.ep_cost_penalty_breakdown[k] += float(lam) * float(v)
         
         # 4. 若回合結束，將累計統計注入 info 供 Callback 讀取
         if terminated or truncated:
             info["episode_metrics"] = {
                 "return_orig": self.ep_ret_orig,
+                "return_orig_scaled": self.ep_ret_orig_scaled,
+                "return_total": self.ep_ret_total,
                 "return_cost": self.ep_cost,
                 "cost_breakdown": dict(self.ep_cost_breakdown)
+                ,
+                # penalty 是「正數大小」（= λ * cost），總 reward 公式會減掉它
+                "cost_penalty_total": self.ep_cost_penalty_total,
+                "cost_penalty_breakdown": dict(self.ep_cost_penalty_breakdown),
             }
             # Reset 在 reset() 做，這裡不急著清空，避免 info 引用錯誤
         
@@ -171,7 +313,9 @@ class LagrangianCallback(BaseCallback):
                 
                 # 寫入 TensorBoard
                 self.logger.record("lagrangian/lambda", new_lambda)
+                # 相容：保留舊 key（部分測試/既有圖表可能用到）
                 self.logger.record("lagrangian/avg_cost_step", avg_cost)
+                self.logger.record("lagrangian/avg_cost", avg_cost)
                 self.logger.record("lagrangian/cost_violation", avg_cost - self.controller.cost_limit)
 
         # 4. 定期顯示統計 (每 log_freq 回合)
@@ -215,35 +359,67 @@ class LagrangianCallback(BaseCallback):
         # --- 1. 提取數據 ---
         # 透過 Wrapper 注入的 "episode_metrics" 獲取精確的主線與成本統計
         ep_ret_origs = []
+        ep_ret_orig_scaleds = []
+        ep_ret_totals = []
         ep_costs = []
         cost_breakdowns = defaultdict(list)
+        cost_penalty_totals = []
+        cost_penalty_breakdowns = defaultdict(list)
         
         for info in self.ep_infos:
             metrics = info.get("episode_metrics", {})
             if metrics:
                 ep_ret_origs.append(metrics.get("return_orig", 0.0))
+                ep_ret_orig_scaleds.append(metrics.get("return_orig_scaled", 0.0))
+                ep_ret_totals.append(metrics.get("return_total", 0.0))
                 ep_costs.append(metrics.get("return_cost", 0.0))
                 for k, v in metrics.get("cost_breakdown", {}).items():
                     cost_breakdowns[k].append(v)
+                if "cost_penalty_total" in metrics:
+                    cost_penalty_totals.append(metrics.get("cost_penalty_total", 0.0))
+                for k, v in metrics.get("cost_penalty_breakdown", {}).items():
+                    cost_penalty_breakdowns[k].append(v)
+
+        # VecMonitor 的 episode 統計（wrapped env 的 reward 回報；也就是訓練端「主線 reward」episode return）
+        # SB3/VecMonitor: info["episode"] = {"r": ep_return, "l": ep_len, "t": elapsed_sec}
+        ep_main_rewards = []
+        for info in self.ep_infos:
+            ep = info.get("episode", {})
+            if isinstance(ep, dict):
+                ep_main_rewards.append(float(ep.get("r", 0.0)))
         
         # 環境原生統計 (TradingEnv)
         profits = [float(x.get("profit", 0.0)) for x in self.ep_infos]
-        total_fees = [float(x.get("total_fees", 0.0)) for x in self.ep_infos]
-        liq_counts = [int(x.get("episode_liq_count", 0)) for x in self.ep_infos]
-        max_dds = [float(x.get("episode_max_dd", 0.0)) for x in self.ep_infos]
+        trade_stats = compute_trade_stats(list(self.ep_infos))
         
         # --- 2. 計算平均 ---
         avg_ret_orig = np.mean(ep_ret_origs) if ep_ret_origs else 0.0
+        avg_main_reward = np.mean(ep_main_rewards) if ep_main_rewards else 0.0
+        avg_ret_orig_scaled = np.mean(ep_ret_orig_scaleds) if ep_ret_orig_scaleds else 0.0
+        # 若 wrapper 有提供 return_total，優先用它（避免 VecMonitor 受其他 wrapper 影響）
+        avg_total_reward = np.mean(ep_ret_totals) if ep_ret_totals else avg_main_reward
         avg_cost = np.mean(ep_costs) if ep_costs else 0.0
+        avg_cost_penalty_total = np.mean(cost_penalty_totals) if cost_penalty_totals else 0.0
         
         avg_breakdown = {}
         for k, v_list in cost_breakdowns.items():
             avg_breakdown[k] = np.mean(v_list) if v_list else 0.0
             
         avg_profit = np.mean(profits) if profits else 0.0
-        avg_fee = np.mean(total_fees) if total_fees else 0.0
-        avg_liq = np.mean(liq_counts) if liq_counts else 0.0
-        avg_dd = np.mean(max_dds) if max_dds else 0.0
+        avg_fee = float(trade_stats["avg_fee"])
+        avg_liq = float(trade_stats["avg_liq"])
+        avg_dd = float(trade_stats["avg_dd"])
+        avg_long_entries = float(trade_stats["avg_long_entries"])
+        avg_short_entries = float(trade_stats["avg_short_entries"])
+        avg_stop_loss = float(trade_stats["avg_stop_loss"])
+
+        end_stats = compute_end_result_stats(list(self.ep_infos))
+        terminated_count = int(end_stats["terminated_count"])
+        truncated_count = int(end_stats["truncated_count"])
+        terminated_rate = float(end_stats["terminated_rate"])
+        truncated_rate = float(end_stats["truncated_rate"])
+        avg_episode_len = float(end_stats["avg_episode_len"])
+        avg_final_balance = float(end_stats["avg_final_balance"])
         
         # Win Rate
         wins = sum(1 for p in profits if p > 0)
@@ -260,7 +436,11 @@ class LagrangianCallback(BaseCallback):
         
         # Section 1: Main Reward (Training Objective)
         print(f"[{'MAIN REWARD':^20}]")
+        print(f"  Avg Total Reward (Modified) : {avg_total_reward:8.4f}")
+        print(f"  Avg Main Reward (Episode)   : {avg_main_reward:8.4f}")
         print(f"  Avg Original Return (LogRet): {avg_ret_orig:8.4f}")
+        print(f"  Avg Main Reward (Scaled)    : {avg_ret_orig_scaled:8.4f}")
+        print(f"  Avg Cost Penalty (=-λ*C)    : {-avg_cost_penalty_total:8.4f}")
         print(f"  Avg Profit (USDT)           : {avg_profit:8.2f}")
         print(f"  Win Rate                    : {win_rate:8.1f} %")
         print("-" * 60)
@@ -273,6 +453,13 @@ class LagrangianCallback(BaseCallback):
             for k, v in avg_breakdown.items():
                 if v > 1e-6: # 只顯示非零項
                     print(f"    - {k:<20}: {v:8.4f}")
+            if cost_penalty_breakdowns:
+                # cost penalty breakdown（以負號呈現）
+                print("  --- Cost Penalty Breakdown (=-λ*C) ---")
+                for k, v_list in cost_penalty_breakdowns.items():
+                    avg_pen = float(np.mean(v_list)) if v_list else 0.0
+                    if abs(avg_pen) > 1e-6:
+                        print(f"    - {k:<20}: {-avg_pen:8.4f}")
         else:
             print("    (No costs triggered)")
         print("-" * 60)
@@ -289,10 +476,67 @@ class LagrangianCallback(BaseCallback):
         print(f"  Avg Max Drawdown            : {avg_dd*100:8.2f} %")
         print(f"  Avg Liq Count               : {avg_liq:8.4f}")
         print(f"  Avg Fees                    : {avg_fee:8.2f}")
+        print(f"  Avg Long Entries            : {avg_long_entries:8.4f}")
+        print(f"  Avg Short Entries           : {avg_short_entries:8.4f}")
+        print(f"  Avg Stop Loss Count         : {avg_stop_loss:8.4f}")
+        print("-" * 60)
+
+        # Section 5: End Results (Episode termination summary)
+        print(f"[{'END RESULTS':^20}]")
+        print(
+            f"  Terminated/Truncated        : {terminated_count:4d} / {truncated_count:4d} "
+            f"({terminated_rate:5.1f}% / {truncated_rate:5.1f}%)"
+        )
+        print(f"  Avg Episode Length          : {avg_episode_len:8.2f}")
+        print(f"  Avg Final Balance           : {avg_final_balance:8.2f}")
+        print("  --- Termination Reasons ---")
+        reason_counts = dict(end_stats.get("reason_counts", {}))
+        reason_rates = dict(end_stats.get("reason_rates", {}))
+        # 常見 reason 先列出，其他再補
+        preferred_order = ["liq_triggered", "balance_insufficient", "max_steps_reached", "data_exhausted", "unknown"]
+        printed = set()
+        for k in preferred_order:
+            if k in reason_counts:
+                printed.add(k)
+                print(f"    - {k:<20}: {int(reason_counts[k]):4d} ({float(reason_rates.get(k, 0.0)):5.1f}%)")
+        for k in sorted(reason_counts.keys()):
+            if k in printed:
+                continue
+            print(f"    - {k:<20}: {int(reason_counts[k]):4d} ({float(reason_rates.get(k, 0.0)):5.1f}%)")
+
         print("="*60 + "\n")
 
         # --- 4. 寫入 TensorBoard (Optional) ---
+        self.logger.record("custom/avg_main_reward", avg_main_reward)
+        self.logger.record("custom/avg_total_reward", avg_total_reward)
         self.logger.record("custom/avg_ret_orig", avg_ret_orig)
+        self.logger.record("custom/avg_ret_orig_scaled", avg_ret_orig_scaled)
+        self.logger.record("custom/avg_cost_penalty_total", avg_cost_penalty_total)
         self.logger.record("custom/avg_profit", avg_profit)
         self.logger.record("custom/q_mean", q_mean)
         self.logger.record("custom/ep_cost", avg_cost)
+        self.logger.record("custom/avg_fee", avg_fee)
+        self.logger.record("custom/avg_dd", avg_dd)
+        self.logger.record("custom/avg_liq", avg_liq)
+        self.logger.record("custom/avg_long_entries", avg_long_entries)
+        self.logger.record("custom/avg_short_entries", avg_short_entries)
+        self.logger.record("custom/avg_stop_loss", avg_stop_loss)
+        self.logger.record("custom/terminated_rate", terminated_rate)
+        self.logger.record("custom/truncated_rate", truncated_rate)
+        self.logger.record("custom/avg_episode_len", avg_episode_len)
+        self.logger.record("custom/avg_final_balance", avg_final_balance)
+        for k, v in dict(end_stats.get("reason_counts", {})).items():
+            # 只記錄有限長度 key，避免 logger key 太亂
+            safe_k = str(k).replace(" ", "_")[:64]
+            self.logger.record(f"custom/end_reason_count/{safe_k}", int(v))
+        for k, v in dict(end_stats.get("reason_rates", {})).items():
+            safe_k = str(k).replace(" ", "_")[:64]
+            self.logger.record(f"custom/end_reason_rate/{safe_k}", float(v))
+
+        # cost penalty breakdown to TensorBoard（以負號呈現）
+        for k, v_list in cost_penalty_breakdowns.items():
+            avg_pen = float(np.mean(v_list)) if v_list else 0.0
+            if abs(avg_pen) <= 1e-12:
+                continue
+            safe_k = str(k).replace(" ", "_")[:64]
+            self.logger.record(f"custom/cost_penalty/{safe_k}", -avg_pen)
