@@ -272,13 +272,15 @@ class LagrangianCallback(BaseCallback):
         update_freq: int = 1000,   # 多少 global steps 更新一次 λ
         log_freq: int = 20,        # 多少 episodes 顯示一次統計 (Request: 20)
         window_size: int = 100,    # 統計視窗大小 (Request: 100)
-        verbose: int = 1
+        verbose: int = 1,
+        reward_scale: float = 1.0  # 新增：用於顯示統計時的說明
     ) -> None:
         super().__init__(verbose)
         self.controller = controller
         self.update_freq = update_freq
         self.log_freq = log_freq
         self.window_size = window_size
+        self.reward_scale = float(reward_scale)
         
         # Lambda Update Buffer
         self.cost_buffer: Deque[float] = deque(maxlen=int(update_freq))
@@ -435,26 +437,49 @@ class LagrangianCallback(BaseCallback):
         print("="*60)
         
         # Section 1: Main Reward (Training Objective)
+        # 用更直觀的標籤區分「原始市場表現」與「RL 訓練訊號」
         print(f"[{'MAIN REWARD':^20}]")
-        print(f"  Avg Total Reward (Modified) : {avg_total_reward:8.4f}")
-        print(f"  Avg Main Reward (Episode)   : {avg_main_reward:8.4f}")
-        print(f"  Avg Original Return (LogRet): {avg_ret_orig:8.4f}")
-        print(f"  Avg Main Reward (Scaled)    : {avg_ret_orig_scaled:8.4f}")
-        print(f"  Avg Cost Penalty (=-λ*C)    : {-avg_cost_penalty_total:8.4f}")
+        print("  --- RL Training Signal (What Agent Sees) ---")
+        print(f"  Total Reward (R_total)      : {avg_total_reward:8.4f}  [= R_scaled - (λ * Cost)]")
+        print(f"  Scaled Reward (R_scaled)    : {avg_ret_orig_scaled:8.4f}  [= LogRet * {self.reward_scale}]")
+        print(f"  Cost Penalty (-λ * C)       : {-avg_cost_penalty_total:8.4f}")
+        
+        print("  --- Original Market Performance ---")
+        print(f"  Log Return Sum (LogRet)     : {avg_ret_orig:8.4f}")
+        # 將 Log Return 換算成簡單的 ROI% 估算 (exp(sum_log_ret) - 1)，供參考
+        roi_est = (np.exp(avg_ret_orig) - 1.0) * 100.0
+        print(f"  Est. ROI (from LogRet)      : {roi_est:8.2f} %")
         print(f"  Avg Profit (USDT)           : {avg_profit:8.2f}")
         print(f"  Win Rate                    : {win_rate:8.1f} %")
         print("-" * 60)
         
         # Section 2: Cost Line (Constraints)
-        print(f"[{'COST LINE':^20}] Lambda: {self.controller.current_lambda:.4f}")
-        print(f"  Avg Episode Cost            : {avg_cost:8.4f}")
+        # 關鍵：顯示每步平均 Cost (與 Cost Limit 對齊)
+        # avg_episode_len 已經在上面計算過
+        avg_cost_per_step = avg_cost / max(1.0, avg_episode_len)
+        cost_limit = self.controller.cost_limit
+        violation = avg_cost_per_step - cost_limit
+        
+        print(f"[{'COST LINE':^20}] Lambda: {self.controller.current_lambda:.6f}")
+        print(f"  Cost Limit (Per Step)       : {cost_limit:.6f}")
+        print(f"  Avg Cost (Per Step)         : {avg_cost_per_step:.6f}  [{'OK' if violation <= 0 else 'VIOLATION'}]")
+        print(f"  Avg Cost (Episode Total)    : {avg_cost:8.4f}")
+        
         if avg_breakdown:
             print("  --- Cost Breakdown ---")
             for k, v in avg_breakdown.items():
-                if v > 1e-6: # 只顯示非零項
-                    print(f"    - {k:<20}: {v:8.4f}")
+                if v > 1e-6: 
+                    # 若是 death_cost (單次=1.0)，則平均值即為發生率
+                    if k == "death_cost":
+                        print(f"    - {k:<20}: {v:.4f} (Rate: {v*100:.2f}%)")
+                    # 若是 fric_cost，也顯示 Per Step 值
+                    elif k == "fric_cost":
+                        per_step = v / max(1.0, avg_episode_len)
+                        print(f"    - {k:<20}: {v:.4f} (Step: {per_step:.6f})")
+                    else:
+                        print(f"    - {k:<20}: {v:8.4f}")
+            
             if cost_penalty_breakdowns:
-                # cost penalty breakdown（以負號呈現）
                 print("  --- Cost Penalty Breakdown (=-λ*C) ---")
                 for k, v_list in cost_penalty_breakdowns.items():
                     avg_pen = float(np.mean(v_list)) if v_list else 0.0

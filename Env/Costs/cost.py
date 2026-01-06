@@ -1,37 +1,31 @@
 from __future__ import annotations
-
-"""
-成本線（Cost / Constraint）計算器
-
-用途：
-- 將環境內部的「死亡事件」（實際爆倉、資金耗盡）轉成可被 Lagrangian-SAC 使用的 cost 訊號。
-- 依照需求，只保留死亡懲罰，移除所有摩擦成本與過程風險成本。
-"""
-
 from dataclasses import dataclass
-from typing import Dict, Mapping
-
+from typing import Dict
 
 @dataclass(frozen=True)
 class CostWeights:
-    """成本權重（只保留死亡懲罰）。"""
-    w_liq_event: float = 5.0
-    w_bankrupt_event: float = 5.0
+    """
+    成本權重/設定 (新架構)
+    雖然公式已標準化，但保留此類別以備未來擴充 (例如是否啟用某條線的開關)。
+    目前主要用於佔位，參數皆預設為 1.0 或由 Config 控制。
+    """
+    pass
 
 
 class CostCalculator:
     """
-    成本計算器（簡化版：只懲罰死亡）。
-    
-    Cost 只在以下情況產生：
-    1. liq_triggered = True (爆倉)
-    2. equity <= min_balance (資金耗盡/破產)
+    正規化成本計算器 (Normalized Cost Calculator)
+
+    設計原則：
+    所有成本皆正規化為「佔當前權益的比例」 (Cost / Equity)，
+    確保約束條件在不同資金規模下具有尺度不變性 (Scale Invariance)。
+
+    公式：
+    1. Death Cost: 1.0 (若發生爆倉/破產，視為損失 100% 權益)
+    2. Fric Cost : StepFee / Equity (本步手續費佔權益的比例)
     """
 
-    def __init__(
-        self,
-        weights: CostWeights | None = None,
-    ) -> None:
+    def __init__(self, weights: CostWeights | None = None) -> None:
         self.weights = weights or CostWeights()
 
     def compute(
@@ -40,41 +34,50 @@ class CostCalculator:
         liq_triggered: bool,
         equity: float,
         min_balance: float,
-        **kwargs  # 忽略其他不再使用的參數 (step_fee, turnover 等)
-    ) -> Dict[str, object]:
+        step_fee: float,
+        **kwargs
+    ) -> Dict[str, float]:
         """
-        計算 cost（總成本 + 分項）。
+        計算正規化成本。
 
         Args:
-            liq_triggered: 是否本 step 觸發爆倉
-            equity: 本 step 權益
-            min_balance: 最低允許權益
+            liq_triggered: 是否觸發爆倉
+            equity: 當前權益 (E_t)
+            min_balance: 最低資金門檻
+            step_fee: 本步產生的手續費 (絕對金額)
 
         Returns:
-            dict：
-            - cost: float（總成本）
-            - cost_breakdown: dict（分項，供解析）
+            Dict:
+            - cost: 總正規化成本 (供單一 Lambda 使用)
+            - cost_risk: 死亡成本 (1.0 or 0.0)
+            - cost_fric: 摩擦成本 (Fee / Equity)
+            - cost_breakdown: 詳細分項
         """
-        w = self.weights
+        # 防除以零保護：使用 min_balance 或極小值做為分母下限
+        # 若 equity 已經低於 0，則保護值為 1e-4，避免負值或除零炸裂
+        safe_equity = max(equity, 1e-4)
 
-        # 1. 爆倉事件成本
-        liq_event_cost = float(w.w_liq_event) if bool(liq_triggered) else 0.0
+        # 1. 死亡/風險成本 (c_risk)
+        # 定義：發生死亡事件 = 100% 權益損失風險實現 -> Cost = 1.0
+        is_dead = liq_triggered or (equity <= min_balance)
+        c_death = 1.0 if is_dead else 0.0
 
-        # 2. 資金耗盡成本 (Bankruptcy)
-        # 當權益低於最小餘額時，視為死亡
-        bankrupt_event_cost = 0.0
-        if equity <= min_balance:
-             bankrupt_event_cost = float(w.w_bankrupt_event)
+        # 2. 摩擦/換手成本 (c_fric)
+        # 定義：手續費佔當前權益的比例
+        # c_fric = Fee_t / E_t
+        c_fric = step_fee / safe_equity
 
-        total = liq_event_cost + bankrupt_event_cost
+        # 總成本 (若訓練端只支援單一 cost channel，則相加)
+        # 通常死亡成本 (1.0) 會遠大於摩擦成本 (e.g. 0.001)，
+        # 所以直接相加在數學上是合理的 (死亡是主導項)。
+        total_cost = c_death + c_fric
 
         return {
-            "cost": float(total),
-            # 兼容舊接口的 key (risk/fric)，這裡全部歸類為 risk
-            "cost_risk": float(total), 
-            "cost_fric": 0.0,
+            "cost": float(total_cost),       # 總和 (供 Env.info['cost'] 使用)
+            "cost_risk": float(c_death),     # 獨立通道 (供多 Lambda 使用)
+            "cost_fric": float(c_fric),      # 獨立通道 (供多 Lambda 使用)
             "cost_breakdown": {
-                "liq_event_cost": float(liq_event_cost),
-                "bankrupt_event_cost": float(bankrupt_event_cost),
+                "death_cost": float(c_death),
+                "fric_cost": float(c_fric),
             },
         }

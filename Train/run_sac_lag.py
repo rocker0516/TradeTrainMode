@@ -56,17 +56,17 @@ class EnvFactory:
         
         # 2. 動作平滑與截斷 (Action Smooth & Clip)
         # 防止 Agent 輸出極端動作導致手續費暴增
-        env = ActionSmoothClipWrapper(env, max_position_pct=1.0, smoothing_alpha=0.5)
+        env = ActionSmoothClipWrapper(env, max_position_pct= TrainConfig.MAX_POSITION_PCT, smoothing_alpha=TrainConfig.ACTION_SMOOTH_ALPHA)
         
         # 3. 動作重複 (Action Repeat)
         # 降低決策頻率，穩定訓練
-        env = ActionRepeatWrapper(env, repeat=1)
+        env = ActionRepeatWrapper(env, repeat=TrainConfig.ACTION_REPEAT)
         
         # 4. Lagrangian Reward Shaping
         # 如果有 Controller，套用 Lagrangian Wrapper 修改獎勵
         if self.controller is not None:
             # reward_scale=10.0: 放大原始獲利，讓 Agent 更有動力去賺錢，而不是只顧著避險
-            env = LagrangianRewardWrapper(env, self.controller, reward_scale=10.0)
+            env = LagrangianRewardWrapper(env, self.controller, reward_scale=TrainConfig.REWARD_SCALE)
             
         return env
 
@@ -164,7 +164,8 @@ def main() -> None:
         controller=lag_controller,
         update_freq=int(args.update_lambda_every_steps),  # 每 N 步更新一次 λ
         log_freq=int(args.log_every_episodes),            # 每 N episodes 顯示一次交易狀態
-        window_size=int(TrainConfig.STATS_WINDOW_EPISODES)# 統計視窗大小
+        window_size=int(TrainConfig.STATS_WINDOW_EPISODES),# 統計視窗大小
+        reward_scale=10.0                                  # 與 Env wrapper 一致
     )
     
     # CheckpointCallback: 定期存檔

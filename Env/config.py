@@ -20,12 +20,12 @@ class Config:
     TRANSACTION_FEE: float = 0.01  # (%) 手續費百分比（例如 0.04 代表 0.04%）
 
     # ---- 視窗大小 ----
-    WINDOW_SIZE: int = 288  # 5m * 288 = 1 day
+    WINDOW_SIZE: int = 288 * 3  # 5m * 288 = 1 day
     WINDOW_SIZE_1D: int = 30
 
     # ---- 交易參數 ----
     LEVERAGE: float = 10.0
-    MIN_BALANCE: float = INITIAL_BALANCE * 0.2 # 最小餘額 0.2 代表 20%
+    MIN_BALANCE: float = INITIAL_BALANCE * 0.5 # 最小餘額 0.5 代表 50%
     MIN_EPISODE_STEPS: int = 288 * 31 # 最小步數 288 * 31 = 8928 步
     MAX_EPISODE_STEPS: int = 288 * 31 # 最大步數 288 * 31 = 8928 步
     # 最小調倉幅度（Deadband, 0.0 ~ 1.0）
@@ -36,7 +36,7 @@ class Config:
 
     # ---- 訓練/執行 Wrapper 參數（單一來源）----
     # ActionSmoothClipWrapper：先硬限制最大目標倉位，再做動作平滑，抑制高頻翻倉刷手續費
-    MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（-P~P）
+    MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（-P~P）0.8 代表 80%
     ACTION_SMOOTH_ALPHA: float = 0.5  # 0~1；越小越平滑
     # ActionRepeatWrapper：降低決策頻率（Frame Skip）
     ACTION_REPEAT: int = 1
@@ -54,7 +54,7 @@ class Config:
     FEE_ROLLING_WINDOW: int = 288
 
     # ---- 止損 / 清算提醒（供 Observer 或外部使用）----
-    STOP_LOSS_ATR: float = 2 
+    STOP_LOSS_ATR: float = 1.5
     STOP_LOSS_LIQ_BUFFER_PCT: float = 0.05 # 止損相對強平價的安全緩衝（比例）
     STOP_LOSS_COOLDOWN_STEPS: int = 30 / 5 # 止損冷卻步數
     
@@ -62,14 +62,10 @@ class Config:
     LIQUIDATION_WARN_PCT: float = 0.2 # 清算警告比例  0.05 代表 5%
     STOP_LOSS_WARN_PCT: float = 0.1 # 止損警告比例 0.02 代表 2%
 
-    # ---- Lagrangian / Cost（成本線） - REFACTORED (Death Penalty Only) ----
-    # 設計理念：
-    # 成本線只保留「死亡懲罰」（實際爆倉、資金耗盡）。
-    # 其他摩擦成本（手續費、換手）、過程風險（接近爆倉、回撤）全部移除，
-    # 改由 Main Reward (Log Return) 自然引導 Agent 避免虧損。
-    
-    COST_W_LIQ_EVENT: float = 5.0      # 實際爆倉：嚴重違規
-    COST_W_BANKRUPT_EVENT: float = 5.0 # 資金耗盡 (Equity <= Min Balance)：嚴重違規
+    # ---- Cost (Lagrangian Constraints) - REFACTORED ----
+    # 舊的固定權重已移除 (COST_W_LIQ_EVENT 等)。
+    # 新版 Cost 計算完全正規化 (Cost / Equity)，無須在此設定絕對值權重。
+    # 相關邏輯請見 Env/Costs/cost.py
 
     # ---- 逐倉維持保證金 ----
     MAINTENANCE_MARGIN_RATE: float = 0.005

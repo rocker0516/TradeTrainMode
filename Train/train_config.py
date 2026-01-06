@@ -23,16 +23,18 @@ class TrainConfig:
     DEVICE: str = "auto"  # "cuda" / "cpu" / "auto"
 
     # ---- Lagrangian / 約束 ----
-    COST_LIMIT: float = 0.05
-    # 新版：雙路徑成本限制（risk / friction）
-    # 設計原則：兩者都是「每 step 平均 cost」的上限
-    RISK_COST_LIMIT: float = 0.05
-    FRIC_COST_LIMIT: float = 0.02
+    # 新版 Cost 已正規化為 Cost/Equity。
+    # 建議值 0.0005 (5bps) 代表容許每步平均損耗 0.05% 的權益 (含手續費與死亡風險攤提)
+    COST_LIMIT: float = 0.00008
+    # 新版：雙路徑成本限制（risk / friction）- 目前 Controller 尚未完全支援分開的 dual-lambda，
+    # 但保留參數供未來擴充。邏輯同上，Risk 應趨近於 0，Fric 容許少量。
+    RISK_COST_LIMIT: float = 0.0001 # 0.00001 代表 0.001% 死亡風險(容許極小風險)
+    FRIC_COST_LIMIT: float = 0.5 # 0.005 代表 0.5% 手續費 (容許少量換手)
     UPDATE_LAMBDA_EVERY_STEPS: int = 1000 
     # 交易統計輸出：
     # - LOG_EVERY_EPISODES: 每 N 個 episode 刷新一次統計（建議：20）
     # - STATS_WINDOW_EPISODES: 統計最多取最近 M 個 episode（滾動視窗，建議：100）
-    LOG_EVERY_EPISODES: int = 20
+    LOG_EVERY_EPISODES: int = 50
     STATS_WINDOW_EPISODES: int = 100
     REWARD_SCALE: float = 10.0
 
@@ -55,7 +57,7 @@ class TrainConfig:
     # ---- Wrapper（動作平滑/重複）----
     # 訓練時建議用「更強的降頻/降換手」設定，否則手續費與 turnover 會把主線 log-return 磨成長期負值。
     # 這些會由 Train/run_sac_lag.py 以 CLI 參數覆寫（不必動 Env/config.py 的全域預設）。
-    ACTION_REPEAT: int = 5
+    ACTION_REPEAT: int = 1 # 5 代表 5 步一決策
     MAX_POSITION_PCT: float = 0.3
     ACTION_SMOOTH_ALPHA: float = 0.2
     MIN_POSITION_CHANGE: float = 0.2

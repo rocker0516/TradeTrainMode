@@ -124,13 +124,9 @@ class TradingEnvironment(gym.Env):
 
         # Cost / Constraint（供 Lagrangian-SAC 使用）
         # 注意：reward 與 cost 分離，cost 透過 info 回傳，方便訓練端做 λ 更新與解析。
-        # REFACTORED: 只保留死亡懲罰 (Liq / Bankrupt)，移除所有 proximity / friction 參數
-        self.cost_calculator = CostCalculator(
-            weights=CostWeights(
-                w_liq_event=float(getattr(Config, "COST_W_LIQ_EVENT", 5.0)),
-                w_bankrupt_event=float(getattr(Config, "COST_W_BANKRUPT_EVENT", 5.0)),
-            ),
-        )
+        # REFACTORED: 只保留死亡懲罰 (Liq / Bankrupt) 與 摩擦成本 (Fee/Equity)
+        # CostCalculator 現在不再需要 weights (已內建正規化公式)，這裡維持空建構
+        self.cost_calculator = CostCalculator()
 
         # Runtime State
         self.current_step = 0
@@ -757,14 +753,14 @@ class TradingEnvironment(gym.Env):
         )
         step_fee_ratio = float(step_fee / self.initial_balance) if self.initial_balance > 0 else 0.0
         
-        # REFACTORED: 僅傳遞必要參數 (liq_triggered, equity, min_balance)
+        # REFACTORED: 僅傳遞必要參數 (liq_triggered, equity, min_balance, step_fee)
         cost_out = self.cost_calculator.compute(
             liq_triggered=bool(liq_triggered),
             equity=float(new_equity),
             min_balance=float(self.min_balance),
-            # 以下參數保留傳遞但 CostCalculator 會忽略
-            step_fee_ratio=step_fee_ratio,
             step_fee=float(step_fee),
+            # kwargs 傳遞以保留擴充性，但目前 cost.py 主要只用上述四個
+            step_fee_ratio=step_fee_ratio,
             turnover_ratio=float(turnover_ratio),
             traded=bool(traded),
             current_dd=float(current_dd),
