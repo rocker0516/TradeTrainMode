@@ -24,7 +24,13 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
         - avg_dd
         - avg_long_entries
         - avg_short_entries
+        - avg_long_closes
+        - avg_short_closes
         - avg_stop_loss
+        - avg_active_exits
+        - stop_loss_rate_pct
+        - active_exit_rate_pct
+        - exit_coverage_rate_pct: (active_exit + stop_loss) / total_closes
     """
     if not ep_infos:
         return {
@@ -33,7 +39,13 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
             "avg_dd": 0.0,
             "avg_long_entries": 0.0,
             "avg_short_entries": 0.0,
+            "avg_long_closes": 0.0,
+            "avg_short_closes": 0.0,
             "avg_stop_loss": 0.0,
+            "avg_active_exits": 0.0,
+            "stop_loss_rate_pct": 0.0,
+            "active_exit_rate_pct": 0.0,
+            "exit_coverage_rate_pct": 0.0,
         }
 
     total_fees = [float(x.get("total_fees", 0.0)) for x in ep_infos]
@@ -41,7 +53,26 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
     max_dds = [float(x.get("episode_max_dd", 0.0)) for x in ep_infos]
     long_entries = [int(x.get("long_entry_count", 0)) for x in ep_infos]
     short_entries = [int(x.get("short_entry_count", 0)) for x in ep_infos]
+    long_closes = [int(x.get("long_close_count", 0)) for x in ep_infos]
+    short_closes = [int(x.get("short_close_count", 0)) for x in ep_infos]
     stop_losses = [int(x.get("episode_stop_loss_count", 0)) for x in ep_infos]
+    active_exits = [int(x.get("episode_active_exit_count", 0)) for x in ep_infos]
+
+    total_stop_losses = int(np.sum(stop_losses)) if stop_losses else 0
+    total_active_exits = int(np.sum(active_exits)) if active_exits else 0
+    total_exits = int(total_stop_losses + total_active_exits)
+    if total_exits > 0:
+        stop_loss_rate_pct = (total_stop_losses / total_exits) * 100.0
+        active_exit_rate_pct = (total_active_exits / total_exits) * 100.0
+    else:
+        stop_loss_rate_pct = 0.0
+        active_exit_rate_pct = 0.0
+
+    total_closes = int(np.sum(long_closes) + np.sum(short_closes)) if (long_closes or short_closes) else 0
+    if total_closes > 0:
+        exit_coverage_rate_pct = (total_exits / total_closes) * 100.0
+    else:
+        exit_coverage_rate_pct = 0.0
 
     return {
         "avg_fee": float(np.mean(total_fees)) if total_fees else 0.0,
@@ -49,7 +80,13 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
         "avg_dd": float(np.mean(max_dds)) if max_dds else 0.0,
         "avg_long_entries": float(np.mean(long_entries)) if long_entries else 0.0,
         "avg_short_entries": float(np.mean(short_entries)) if short_entries else 0.0,
+        "avg_long_closes": float(np.mean(long_closes)) if long_closes else 0.0,
+        "avg_short_closes": float(np.mean(short_closes)) if short_closes else 0.0,
         "avg_stop_loss": float(np.mean(stop_losses)) if stop_losses else 0.0,
+        "avg_active_exits": float(np.mean(active_exits)) if active_exits else 0.0,
+        "stop_loss_rate_pct": float(stop_loss_rate_pct),
+        "active_exit_rate_pct": float(active_exit_rate_pct),
+        "exit_coverage_rate_pct": float(exit_coverage_rate_pct),
     }
 
 
@@ -413,7 +450,13 @@ class LagrangianCallback(BaseCallback):
         avg_dd = float(trade_stats["avg_dd"])
         avg_long_entries = float(trade_stats["avg_long_entries"])
         avg_short_entries = float(trade_stats["avg_short_entries"])
+        avg_long_closes = float(trade_stats["avg_long_closes"])
+        avg_short_closes = float(trade_stats["avg_short_closes"])
         avg_stop_loss = float(trade_stats["avg_stop_loss"])
+        avg_active_exits = float(trade_stats["avg_active_exits"])
+        stop_loss_rate_pct = float(trade_stats["stop_loss_rate_pct"])
+        active_exit_rate_pct = float(trade_stats["active_exit_rate_pct"])
+        exit_coverage_rate_pct = float(trade_stats["exit_coverage_rate_pct"])
 
         end_stats = compute_end_result_stats(list(self.ep_infos))
         terminated_count = int(end_stats["terminated_count"])
@@ -503,7 +546,11 @@ class LagrangianCallback(BaseCallback):
         print(f"  Avg Fees                    : {avg_fee:8.2f}")
         print(f"  Avg Long Entries            : {avg_long_entries:8.4f}")
         print(f"  Avg Short Entries           : {avg_short_entries:8.4f}")
-        print(f"  Avg Stop Loss Count         : {avg_stop_loss:8.4f}")
+        print(f"  Avg Long Close Count        : {avg_long_closes:8.4f}")
+        print(f"  Avg Short Close Count       : {avg_short_closes:8.4f}")
+        print(f"  Avg Active Exit Count       : {avg_active_exits:8.4f} ({active_exit_rate_pct:5.1f}%)")
+        print(f"  Avg Stop Loss Count         : {avg_stop_loss:8.4f} ({stop_loss_rate_pct:5.1f}%)")
+        print(f"  Exit Coverage (AE+SL)/Close  : {exit_coverage_rate_pct:8.2f} %")
         print("-" * 60)
 
         # Section 5: End Results (Episode termination summary)
@@ -546,6 +593,12 @@ class LagrangianCallback(BaseCallback):
         self.logger.record("custom/avg_long_entries", avg_long_entries)
         self.logger.record("custom/avg_short_entries", avg_short_entries)
         self.logger.record("custom/avg_stop_loss", avg_stop_loss)
+        self.logger.record("custom/avg_active_exits", avg_active_exits)
+        self.logger.record("custom/stop_loss_rate_pct", stop_loss_rate_pct)
+        self.logger.record("custom/active_exit_rate_pct", active_exit_rate_pct)
+        self.logger.record("custom/avg_long_closes", avg_long_closes)
+        self.logger.record("custom/avg_short_closes", avg_short_closes)
+        self.logger.record("custom/exit_coverage_rate_pct", exit_coverage_rate_pct)
         self.logger.record("custom/terminated_rate", terminated_rate)
         self.logger.record("custom/truncated_rate", truncated_rate)
         self.logger.record("custom/avg_episode_len", avg_episode_len)

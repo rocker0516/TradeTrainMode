@@ -141,6 +141,9 @@ class TradingEnvironment(gym.Env):
         self.episode_turnover_notional = 0.0
         self.episode_holding_steps = 0
         self.episode_trade_count = 0
+        # Episode-level event metrics (for Trade Stats)
+        # 主動出場：由 agent 動作將持倉平到 0（排除 stop loss / liquidation 強制出場）
+        self.episode_active_exit_count = 0
         
         # Action-conditioned effects cache (for next obs)
         self._last_action_effects = {}
@@ -194,6 +197,7 @@ class TradingEnvironment(gym.Env):
         self.episode_turnover_notional = 0.0
         self.episode_holding_steps = 0
         self.episode_trade_count = 0
+        self.episode_active_exit_count = 0
         
         self.last_trade_step = -999999
         self.position_entry_step = None
@@ -368,6 +372,7 @@ class TradingEnvironment(gym.Env):
             # 4) 回合事件統計（累積）
             info["episode_stop_loss_count"] = int(getattr(self, "episode_stop_loss_count", 0))
             info["episode_liq_count"] = int(getattr(self, "episode_liq_count", 0))
+            info["episode_active_exit_count"] = int(getattr(self, "episode_active_exit_count", 0))
 
         return info
 
@@ -652,6 +657,7 @@ class TradingEnvironment(gym.Env):
         prices = self._prepare_step_prices(metrics)
         self._maybe_update_daily_risk_base()
         last_equity = float(self.executor.equity(prices.current_price))
+        prev_size = float(self._last_position_size)
 
         # 2. Process action + execute
         final_pos_pct, expected_fee, prev_wallet, is_flip, action_used = self._process_action_and_execute(
@@ -698,6 +704,13 @@ class TradingEnvironment(gym.Env):
             # Should never break training due to a stats field
             pass
         stop_loss_triggered, liq_triggered = self._update_episode_event_counters()
+        # Episode metrics: 主動出場次數（平倉到 0 且非 stop loss / liq）
+        try:
+            closed_to_flat = (abs(prev_size) > 1e-8) and (abs(float(new_size)) <= 1e-8)
+            if closed_to_flat and (not bool(stop_loss_triggered)) and (not bool(liq_triggered)):
+                self.episode_active_exit_count += 1
+        except (TypeError, ValueError):
+            pass
             
         # 8. Check Done
         data_exhausted = (self.current_step >= len(self.market_data.df_5m) - 1)

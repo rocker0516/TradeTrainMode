@@ -25,7 +25,7 @@ class Config:
 
     # ---- 交易參數 ----
     LEVERAGE: float = 10.0
-    MIN_BALANCE: float = INITIAL_BALANCE * 0.5 # 最小餘額 0.5 代表 50%
+    MIN_BALANCE: float = INITIAL_BALANCE * 0.5 # 最小餘額 0. 5 代表 50%
     MIN_EPISODE_STEPS: int = 288 * 31 # 最小步數 288 * 31 = 8928 步
     MAX_EPISODE_STEPS: int = 288 * 31 # 最大步數 288 * 31 = 8928 步
     # 最小調倉幅度（Deadband, 0.0 ~ 1.0）
@@ -54,8 +54,8 @@ class Config:
     FEE_ROLLING_WINDOW: int = 288
 
     # ---- 止損 / 清算提醒（供 Observer 或外部使用）----
-    STOP_LOSS_ATR: float = 1.5
-    STOP_LOSS_LIQ_BUFFER_PCT: float = 0.05 # 止損相對強平價的安全緩衝（比例）
+    STOP_LOSS_ATR: float = 2
+    STOP_LOSS_LIQ_BUFFER_PCT: float = 0.05 # 止損相對強平價的安全緩衝（比例） 0.05 代表 5%
     STOP_LOSS_COOLDOWN_STEPS: int = 30 / 5 # 止損冷卻步數
     
     # 這些閾值保留供 Observation 特徵使用 (near_liq, near_stop)，但不參與 Cost 計算
