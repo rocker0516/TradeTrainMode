@@ -5,6 +5,7 @@ import numpy as np
 import gymnasium as gym
 import torch
 from collections import Counter, deque, defaultdict
+from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple, Deque, Optional
 
 from stable_baselines3.common.callbacks import BaseCallback
@@ -211,6 +212,68 @@ class SharedLagrangianController:
             return new_val
 
 
+@dataclass(frozen=True)
+class LagrangianChannelConfig:
+    """多通道 Lagrangian 參數（每條成本線各自一組）。"""
+
+    cost_limit: float
+    kp: float = 0.1
+    lambda_init: float = 0.0
+    lambda_min: float = 0.0
+    lambda_max: float = 5.0
+
+
+class MultiSharedLagrangianController:
+    """
+    多通道的 Shared Lagrangian Controller。
+
+    目的：
+    - 將不同「成本線」分開更新 λ，避免單一 cost 混合後尺度不一致。
+    - 每個通道有自己的 limit 與 λ（P-control + clamp）。
+    """
+
+    def __init__(self, channel_configs: Dict[str, LagrangianChannelConfig]) -> None:
+        if not channel_configs:
+            raise ValueError("channel_configs must not be empty.")
+        self.channel_configs: Dict[str, LagrangianChannelConfig] = dict(channel_configs)
+        self._lambda_vals: Dict[str, multiprocessing.Value] = {
+            k: multiprocessing.Value("d", float(cfg.lambda_init))
+            for k, cfg in self.channel_configs.items()
+        }
+
+    @property
+    def current_lambdas(self) -> Dict[str, float]:
+        """取得當前所有 λ（跨進程共享值）。"""
+        out: Dict[str, float] = {}
+        for k, v in self._lambda_vals.items():
+            with v.get_lock():
+                out[k] = float(v.value)
+        return out
+
+    @property
+    def current_lambda(self) -> float:
+        """相容舊版：回傳所有 λ 的和（僅供 debug/舊 key）。"""
+        vals = self.current_lambdas
+        return float(sum(vals.values()))
+
+    def update(self, avg_costs: Dict[str, float]) -> Dict[str, float]:
+        """
+        根據各通道 avg_cost 更新對應 λ。
+        公式：λ_new = clamp(λ_old + kp * (avg_cost - limit))
+        """
+        new_vals: Dict[str, float] = {}
+        for k, cfg in self.channel_configs.items():
+            avg_cost = float(avg_costs.get(k, 0.0))
+            violation = avg_cost - float(cfg.cost_limit)
+            v = self._lambda_vals[k]
+            with v.get_lock():
+                new_val = float(v.value) + float(cfg.kp) * float(violation)
+                new_val = max(float(cfg.lambda_min), min(float(cfg.lambda_max), float(new_val)))
+                v.value = float(new_val)
+                new_vals[k] = float(new_val)
+        return new_vals
+
+
 class LagrangianRewardWrapper(gym.Wrapper):
     """
     環境包裝器：將原始 Reward 修正為 Lagrangian Reward。
@@ -221,7 +284,7 @@ class LagrangianRewardWrapper(gym.Wrapper):
     def __init__(
         self, 
         env: gym.Env, 
-        controller: SharedLagrangianController,
+        controller: Any,
         reward_scale: float = 1.0
     ) -> None:
         super().__init__(env)
@@ -266,12 +329,47 @@ class LagrangianRewardWrapper(gym.Wrapper):
             self.ep_cost_breakdown[k] += float(v)
             
         # 3. 計算 Lagrangian Reward (給 Agent 訓練用)
-        lam = self.controller.current_lambda
-        modified_reward = (raw_reward * self.reward_scale) - (lam * cost)
-        self.ep_ret_total += float(modified_reward)
-        self.ep_cost_penalty_total += float(lam) * float(cost)
-        for k, v in breakdown.items():
-            self.ep_cost_penalty_breakdown[k] += float(lam) * float(v)
+        modified_reward: float
+
+        # --- multi-lambda path ---
+        if isinstance(self.controller, MultiSharedLagrangianController):
+            lams = self.controller.current_lambdas
+            channel_costs = {
+                k: float(info.get(f"cost_{k}", 0.0))
+                for k in self.controller.channel_configs.keys()
+            }
+            penalty = float(sum(lams[k] * channel_costs[k] for k in channel_costs.keys()))
+            modified_reward = (raw_reward * self.reward_scale) - penalty
+            self.ep_ret_total += float(modified_reward)
+            self.ep_cost_penalty_total += float(penalty)
+
+            # penalty breakdown：依元件對應通道（未知元件 -> 使用 λ 總和）
+            component_to_channel = {
+                "death_cost": "risk",
+                "fric_cost": "fric",
+                "sl_buf_cost": "sl_buf",
+                "stop_missing_cost": "sl_buf",
+            }
+            lam_sum = float(sum(lams.values()))
+            for k, v in breakdown.items():
+                ch = component_to_channel.get(str(k))
+                lam_k = float(lams.get(ch, lam_sum)) if ch is not None else lam_sum
+                self.ep_cost_penalty_breakdown[k] += float(lam_k) * float(v)
+
+            # Debug info（相容 + 詳細）
+            info["lag_lambdas"] = dict(lams)
+            for k, v in lams.items():
+                info[f"lag_lambda_{k}"] = float(v)
+            info["lag_lambda"] = float(lam_sum)
+        else:
+            # --- single-lambda path ---
+            lam = float(getattr(self.controller, "current_lambda", 0.0))
+            modified_reward = (raw_reward * self.reward_scale) - (lam * cost)
+            self.ep_ret_total += float(modified_reward)
+            self.ep_cost_penalty_total += float(lam) * float(cost)
+            for k, v in breakdown.items():
+                self.ep_cost_penalty_breakdown[k] += float(lam) * float(v)
+            info["lag_lambda"] = lam
         
         # 4. 若回合結束，將累計統計注入 info 供 Callback 讀取
         if terminated or truncated:
@@ -289,7 +387,6 @@ class LagrangianRewardWrapper(gym.Wrapper):
             # Reset 在 reset() 做，這裡不急著清空，避免 info 引用錯誤
         
         # Debug info
-        info["lag_lambda"] = lam
         info["original_reward"] = raw_reward
         info["modified_reward"] = modified_reward
         
@@ -305,7 +402,7 @@ class LagrangianCallback(BaseCallback):
     """
     def __init__(
         self,
-        controller: SharedLagrangianController,
+        controller: Any,
         update_freq: int = 1000,   # 多少 global steps 更新一次 λ
         log_freq: int = 20,        # 多少 episodes 顯示一次統計 (Request: 20)
         window_size: int = 100,    # 統計視窗大小 (Request: 100)
@@ -321,6 +418,12 @@ class LagrangianCallback(BaseCallback):
         
         # Lambda Update Buffer
         self.cost_buffer: Deque[float] = deque(maxlen=int(update_freq))
+        self.cost_buffers: Dict[str, Deque[float]] = {}
+        if isinstance(self.controller, MultiSharedLagrangianController):
+            self.cost_buffers = {
+                k: deque(maxlen=int(update_freq))
+                for k in self.controller.channel_configs.keys()
+            }
         
         # Stats Buffer (存最近 N 回合的 info)
         self.ep_infos: Deque[Dict[str, Any]] = deque(maxlen=window_size)
@@ -335,8 +438,14 @@ class LagrangianCallback(BaseCallback):
         
         for info in infos:
             # 1. 收集 Cost (Step level, for Lambda update)
-            if "cost" in info:
-                self.cost_buffer.append(float(info["cost"]))
+            if isinstance(self.controller, MultiSharedLagrangianController):
+                for k in self.controller.channel_configs.keys():
+                    key = f"cost_{k}"
+                    if key in info:
+                        self.cost_buffers[k].append(float(info[key]))
+            else:
+                if "cost" in info:
+                    self.cost_buffer.append(float(info["cost"]))
             
             # 2. 收集 Episode 結束時的統計
             # VecMonitor 在回合結束時會加入 "episode" key
@@ -346,16 +455,33 @@ class LagrangianCallback(BaseCallback):
 
         # 3. 定期更新 λ
         if self.n_calls % self.update_freq == 0:
-            if len(self.cost_buffer) > 0:
-                avg_cost = np.mean(self.cost_buffer)
-                new_lambda = self.controller.update(avg_cost)
-                
-                # 寫入 TensorBoard
-                self.logger.record("lagrangian/lambda", new_lambda)
-                # 相容：保留舊 key（部分測試/既有圖表可能用到）
-                self.logger.record("lagrangian/avg_cost_step", avg_cost)
-                self.logger.record("lagrangian/avg_cost", avg_cost)
-                self.logger.record("lagrangian/cost_violation", avg_cost - self.controller.cost_limit)
+            if isinstance(self.controller, MultiSharedLagrangianController):
+                avg_costs: Dict[str, float] = {}
+                for k, buf in self.cost_buffers.items():
+                    avg_costs[k] = float(np.mean(buf)) if len(buf) > 0 else 0.0
+                new_lams = self.controller.update(avg_costs)
+
+                # TensorBoard：每條 λ + 相容總和
+                self.logger.record("lagrangian/lambda", float(sum(new_lams.values())))
+                for k, lam in new_lams.items():
+                    self.logger.record(f"lagrangian/lambda_{k}", float(lam))
+                    avg_c = float(avg_costs.get(k, 0.0))
+                    self.logger.record(f"lagrangian/avg_cost_{k}", avg_c)
+                    self.logger.record(
+                        f"lagrangian/cost_violation_{k}",
+                        avg_c - float(self.controller.channel_configs[k].cost_limit),
+                    )
+            else:
+                if len(self.cost_buffer) > 0:
+                    avg_cost = np.mean(self.cost_buffer)
+                    new_lambda = self.controller.update(avg_cost)
+                    
+                    # 寫入 TensorBoard
+                    self.logger.record("lagrangian/lambda", new_lambda)
+                    # 相容：保留舊 key（部分測試/既有圖表可能用到）
+                    self.logger.record("lagrangian/avg_cost_step", avg_cost)
+                    self.logger.record("lagrangian/avg_cost", avg_cost)
+                    self.logger.record("lagrangian/cost_violation", avg_cost - self.controller.cost_limit)
 
         # 4. 定期顯示統計 (每 log_freq 回合)
         # 檢查是否累積了足夠的新回合
@@ -500,12 +626,27 @@ class LagrangianCallback(BaseCallback):
         # 關鍵：顯示每步平均 Cost (與 Cost Limit 對齊)
         # avg_episode_len 已經在上面計算過
         avg_cost_per_step = avg_cost / max(1.0, avg_episode_len)
-        cost_limit = self.controller.cost_limit
-        violation = avg_cost_per_step - cost_limit
-        
-        print(f"[{'COST LINE':^20}] Lambda: {self.controller.current_lambda:.6f}")
-        print(f"  Cost Limit (Per Step)       : {cost_limit:.6f}")
-        print(f"  Avg Cost (Per Step)         : {avg_cost_per_step:.6f}  [{'OK' if violation <= 0 else 'VIOLATION'}]")
+        if isinstance(self.controller, MultiSharedLagrangianController):
+            lams = self.controller.current_lambdas
+            print(f"[{'COST LINES':^20}] Lambdas (sum={sum(lams.values()):.6f})")
+            for k in self.controller.channel_configs.keys():
+                limit = float(self.controller.channel_configs[k].cost_limit)
+                avg_c = 0.0
+                if k in self.cost_buffers and len(self.cost_buffers[k]) > 0:
+                    avg_c = float(np.mean(self.cost_buffers[k]))
+                vio = avg_c - limit
+                print(
+                    f"  - {k:<8} λ={lams.get(k, 0.0):.6f}  limit={limit:.6f}  avg={avg_c:.6f}  "
+                    f"[{'OK' if vio <= 0 else 'VIOLATION'}]"
+                )
+            # 仍顯示 aggregated cost（方便對照舊圖表）
+            print(f"  Avg Cost (Per Step)         : {avg_cost_per_step:.6f}  [aggregate]")
+        else:
+            cost_limit = float(self.controller.cost_limit)
+            violation = avg_cost_per_step - cost_limit
+            print(f"[{'COST LINE':^20}] Lambda: {self.controller.current_lambda:.6f}")
+            print(f"  Cost Limit (Per Step)       : {cost_limit:.6f}")
+            print(f"  Avg Cost (Per Step)         : {avg_cost_per_step:.6f}  [{'OK' if violation <= 0 else 'VIOLATION'}]")
         print(f"  Avg Cost (Episode Total)    : {avg_cost:8.4f}")
         
         if avg_breakdown:

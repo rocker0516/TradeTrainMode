@@ -611,7 +611,7 @@ class TradingEnvironment(gym.Env):
         new_size: float,
     ) -> Tuple[float, bool, float, float, float]:
         """
-        計算 reward 會用到的中間特徵（維持原公式）。
+        計算 reward 會用到的中間特徵。
 
         Returns:
             (position_change, traded, position_change_norm, turnover_ratio, current_dd)
@@ -624,7 +624,10 @@ class TradingEnvironment(gym.Env):
         max_capacity_qty = (self.daily_risk_base * self.leverage) / current_price if current_price > 0 else 1.0
         position_change_norm = position_change / max_capacity_qty if max_capacity_qty > 0 else 0.0
 
-        turnover_notional_change = position_change * current_price
+        # Turnover ratio（只罰「加碼/加曝險」，不罰「減碼/平倉」）
+        # c_to ∝ max(0, |pos_{t+1}| - |pos_t|)
+        exposure_increase_qty = max(0.0, abs(float(new_size)) - abs(float(self._last_position_size)))
+        turnover_notional_change = float(exposure_increase_qty) * float(current_price)
         turnover_scale = max(last_equity * self.leverage, 1e-8)
         turnover_ratio = turnover_notional_change / turnover_scale
 
@@ -779,6 +782,13 @@ class TradingEnvironment(gym.Env):
             current_dd=float(current_dd),
             risk_signals=risk_post,
             stop_loss_triggered=bool(stop_loss_triggered),
+            # Stop-Buffer Cost inputs
+            has_position=bool(abs(float(new_size)) > 1e-8),
+            current_price=float(prices.current_price),
+            stop_loss_price=float(getattr(self.executor.position, "stop_loss_price", 0.0) or 0.0),
+            atr=float(prices.atr_est),
+            stop_buffer_d_min=float(getattr(Config, "STOP_BUFFER_D_MIN", 0.3)),
+            stop_buffer_d_scale=float(getattr(Config, "STOP_BUFFER_D_SCALE", 0.3)),
         )
 
         # 10. Update Step
@@ -810,6 +820,8 @@ class TradingEnvironment(gym.Env):
             info["cost_risk"] = float(cost_out["cost_risk"])
         if "cost_fric" in cost_out:
             info["cost_fric"] = float(cost_out["cost_fric"])
+        if "cost_sl_buf" in cost_out:
+            info["cost_sl_buf"] = float(cost_out["cost_sl_buf"])
         info["cost_breakdown"] = dict(cost_out["cost_breakdown"])
 
         log_payload = self._build_log_payload(

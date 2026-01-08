@@ -57,6 +57,16 @@ class Config:
     STOP_LOSS_ATR: float = 2
     STOP_LOSS_LIQ_BUFFER_PCT: float = 0.05 # 止損相對強平價的安全緩衝（比例） 0.05 代表 5%
     STOP_LOSS_COOLDOWN_STEPS: int = 30 / 5 # 止損冷卻步數
+
+    # ---- Stop-Buffer Cost（止損安全緩衝成本線）----
+    # 定義：d_t = |P_t - SL_t| / ATR_t（無量綱）
+    # 成本：c_sl_buf = clip( max(0, d_min - d_t) / d_scale, 0, 1 )
+    #
+    # 建議：
+    # - d_min: 安全緩衝門檻（常見量級 0.2~0.5 ATR）
+    # - d_scale: 線性縮放（建議先用 d_min，讓 d_t=0 時成本=1）
+    STOP_BUFFER_D_MIN: float = 0.5
+    STOP_BUFFER_D_SCALE: float = 0.3
     
     # 這些閾值保留供 Observation 特徵使用 (near_liq, near_stop)，但不參與 Cost 計算
     LIQUIDATION_WARN_PCT: float = 0.2 # 清算警告比例  0.05 代表 5%

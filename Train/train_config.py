@@ -28,8 +28,11 @@ class TrainConfig:
     COST_LIMIT: float = 0.00008
     # 新版：雙路徑成本限制（risk / friction）- 目前 Controller 尚未完全支援分開的 dual-lambda，
     # 但保留參數供未來擴充。邏輯同上，Risk 應趨近於 0，Fric 容許少量。
-    RISK_COST_LIMIT: float = 0.00008 # 0.00001 代表 0.001% 死亡風險(容許極小風險)
-    FRIC_COST_LIMIT: float = 0.5 # 0.005 代表 0.5% 手續費 (容許少量換手)
+    RISK_COST_LIMIT: float = 0.000005 # 0.000005 代表 0.0005% 死亡風險(容許極小風險)
+    FRIC_COST_LIMIT: float = 0.0002 # 0.0002：代表允許每步平均手續費佔權益 0.2%
+    # Stop-Buffer Cost（0~1）：建議先設很小的平均步成本上限，因為「接近止損」應該是短暫狀態
+    SL_BUF_COST_LIMIT: float = 0.01 # 0.1：代表允許每步平均止損緩衝成本佔權益 10%
+    
     UPDATE_LAMBDA_EVERY_STEPS: int = 1000 
     # 交易統計輸出：
     # - LOG_EVERY_EPISODES: 每 N 個 episode 刷新一次統計（建議：20）

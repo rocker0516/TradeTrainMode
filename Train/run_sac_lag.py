@@ -27,7 +27,13 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 from Env.trading_env import TradingEnvironment
 from Env.wrappers import ActionRepeatWrapper, ActionSmoothClipWrapper
 from Train.sb3_cnn_policy import DualCnnFeatureExtractor
-from Train.lagrangian import SharedLagrangianController, LagrangianRewardWrapper, LagrangianCallback
+from Train.lagrangian import (
+    SharedLagrangianController,
+    MultiSharedLagrangianController,
+    LagrangianChannelConfig,
+    LagrangianRewardWrapper,
+    LagrangianCallback,
+)
 from Train.train_config import TrainConfig
 
 
@@ -43,7 +49,7 @@ class EnvFactory:
         rank: int, 
         seed: int = 0, 
         config_overrides: Dict[str, Any] = None, 
-        controller: SharedLagrangianController = None
+        controller: Any = None
     ):
         self.rank = rank
         self.seed = seed
@@ -75,7 +81,7 @@ def make_env(
     rank: int, 
     seed: int = 0, 
     config_overrides: Dict[str, Any] = None,
-    controller: SharedLagrangianController = None
+    controller: Any = None
 ):
     """
     輔助函式：回傳 EnvFactory 實例。
@@ -90,7 +96,10 @@ def main() -> None:
     parser.add_argument("--symbol", type=str, default=TrainConfig.SYMBOL)
     parser.add_argument("--total_timesteps", type=int, default=TrainConfig.TOTAL_TIMESTEPS)
     parser.add_argument("--n_envs", type=int, default=TrainConfig.N_ENVS, help="Number of parallel environments")
-    parser.add_argument("--cost_limit", type=float, default=TrainConfig.COST_LIMIT, help="Average cost limit per step")
+    parser.add_argument("--cost_limit", type=float, default=TrainConfig.COST_LIMIT, help="Average cost limit per step (legacy single-lambda)")
+    parser.add_argument("--risk_cost_limit", type=float, default=TrainConfig.RISK_COST_LIMIT, help="risk cost limit per step (death)")
+    parser.add_argument("--fric_cost_limit", type=float, default=TrainConfig.FRIC_COST_LIMIT, help="fric cost limit per step (fee/equity)")
+    parser.add_argument("--sl_buf_cost_limit", type=float, default=TrainConfig.SL_BUF_COST_LIMIT, help="sl_buf cost limit per step (stop buffer, 0~1)")
     parser.add_argument("--device", type=str, default=TrainConfig.DEVICE)
     parser.add_argument("--log_every_episodes", type=int, default=TrainConfig.LOG_EVERY_EPISODES, help="每 N 回合輸出交易統計")
     parser.add_argument("--update_lambda_every_steps", type=int, default=TrainConfig.UPDATE_LAMBDA_EVERY_STEPS, help="每 N steps 更新一次 lambda")
@@ -104,13 +113,14 @@ def main() -> None:
     # 進度條與 SB3 的表格 logger 會互相干擾，因此預設：開進度條時 verbose=0
     sb3_verbose = int(args.verbose) if args.verbose is not None else (0 if show_progress_bar else 1)
 
-    # 1. 初始化 Shared Lagrangian Controller
-    # 設定 cost_limit=0.05，代表我們容許每步平均產生 0.05 的風險成本 (約等於 5% 的風險程度)
-    lag_controller = SharedLagrangianController(
-        cost_limit=args.cost_limit,
-        kp=0.1,          # P-gain
-        lambda_init=0.0,
-        lambda_max=5.0   # Clamp 上限，防躺平
+    # 1. 初始化 Multi Lagrangian Controller（分三條成本線：risk / fric / sl_buf）
+    # 注意：仍保留 --cost_limit 參數供舊模式/相容性，但預設訓練會走 multi-lambda。
+    lag_controller: Any = MultiSharedLagrangianController(
+        {
+            "risk": LagrangianChannelConfig(cost_limit=float(args.risk_cost_limit), kp=0.1, lambda_init=0.0, lambda_max=5.0),
+            "fric": LagrangianChannelConfig(cost_limit=float(args.fric_cost_limit), kp=0.1, lambda_init=0.0, lambda_max=5.0),
+            "sl_buf": LagrangianChannelConfig(cost_limit=float(args.sl_buf_cost_limit), kp=0.1, lambda_init=0.0, lambda_max=5.0),
+        }
     )
     
     # 2. 建立並行環境 (SubprocVecEnv)
@@ -176,7 +186,11 @@ def main() -> None:
     )
 
     print(f"Start training SAC-Lagrangian on {args.symbol} with {args.n_envs} envs...")
-    print(f"Cost Limit: {args.cost_limit}, Lambda Max: {lag_controller.lambda_max}")
+    print(
+        "Cost Limits (per step): "
+        f"risk={args.risk_cost_limit}, fric={args.fric_cost_limit}, sl_buf={args.sl_buf_cost_limit} "
+        f"(legacy cost_limit={args.cost_limit})"
+    )
     
     model.learn(
         total_timesteps=args.total_timesteps, 

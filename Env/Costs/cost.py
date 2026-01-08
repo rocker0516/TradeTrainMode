@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict
+from typing import Any, Dict
 
 @dataclass(frozen=True)
 class CostWeights:
@@ -51,6 +51,7 @@ class CostCalculator:
             - cost: 總正規化成本 (供單一 Lambda 使用)
             - cost_risk: 死亡成本 (1.0 or 0.0)
             - cost_fric: 摩擦成本 (Fee / Equity)
+            - cost_sl_buf: 止損安全緩衝成本（密集、0~1、ATR 無量綱）
             - cost_breakdown: 詳細分項
         """
         # 防除以零保護：使用 min_balance 或極小值做為分母下限
@@ -67,17 +68,48 @@ class CostCalculator:
         # c_fric = Fee_t / E_t
         c_fric = step_fee / safe_equity
 
+        # 3. Stop-Buffer Cost（止損成本線）
+        # 定義距離（以 ATR 正規化）：d_t = |P_t - SL_t| / ATR_t
+        # 成本：c_sl_buf = clip( max(0, d_min - d_t) / d_scale, 0, 1 )
+        #
+        # 語義：不是罰虧損，而是罰「你把倉位放在快撞止損的地方還不撤」。
+        # 若持倉但缺少 SL 或 ATR 無法估計，視為不安全 -> stop_missing_cost = 1.0。
+        has_position = bool(kwargs.get("has_position", False))
+        current_price = float(kwargs.get("current_price", 0.0) or 0.0)
+        stop_loss_price = float(kwargs.get("stop_loss_price", 0.0) or 0.0)
+        atr = float(kwargs.get("atr", 0.0) or 0.0)
+        d_min = float(kwargs.get("stop_buffer_d_min", 0.3))
+        d_scale = float(kwargs.get("stop_buffer_d_scale", max(d_min, 1e-12)))
+        d_scale_safe = max(d_scale, 1e-12)
+
+        sl_buf_cost = 0.0
+        stop_missing_cost = 0.0
+        if has_position:
+            # stop_loss_price==0 表示未設定；atr<=0 表示無法估計（資料不足或極端情況）
+            if stop_loss_price <= 0.0 or atr <= 1e-12:
+                stop_missing_cost = 1.0
+            else:
+                d_t = abs(current_price - stop_loss_price) / atr
+                raw = max(0.0, d_min - d_t) / d_scale_safe
+                sl_buf_cost = min(1.0, max(0.0, raw))
+
+        # channel 值：若缺 SL，直接視為最大不安全；否則使用 buffer 公式
+        c_sl_buf = max(sl_buf_cost, stop_missing_cost)
+
         # 總成本 (若訓練端只支援單一 cost channel，則相加)
         # 通常死亡成本 (1.0) 會遠大於摩擦成本 (e.g. 0.001)，
         # 所以直接相加在數學上是合理的 (死亡是主導項)。
-        total_cost = c_death + c_fric
+        total_cost = c_death + c_fric + c_sl_buf
 
         return {
             "cost": float(total_cost),       # 總和 (供 Env.info['cost'] 使用)
             "cost_risk": float(c_death),     # 獨立通道 (供多 Lambda 使用)
             "cost_fric": float(c_fric),      # 獨立通道 (供多 Lambda 使用)
+            "cost_sl_buf": float(c_sl_buf),  # 獨立通道 (供多 Lambda 使用)
             "cost_breakdown": {
                 "death_cost": float(c_death),
                 "fric_cost": float(c_fric),
+                "sl_buf_cost": float(sl_buf_cost),
+                "stop_missing_cost": float(stop_missing_cost),
             },
         }
