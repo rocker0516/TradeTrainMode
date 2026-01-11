@@ -36,16 +36,16 @@ class Config:
 
     # ---- 訓練/執行 Wrapper 參數（單一來源）----
     # ActionClipWrapper：硬限制最大目標倉位（不做 action smoothing）
+    # 作用：提供「環境側/通用」的預設 clip 上限（-P~P）。
+    #
+    # 重要：
+    # - `TradingEnvironment` 本身不會自動使用這個值做 clip；只有你在外部建立 `ActionClipWrapper` 並把
+    #   `max_position_pct=Config.MAX_POSITION_PCT` 傳進去時才會生效。
+    # - 若你用 `Train/run_sac_lag.py` 訓練，實際生效的是 `TrainConfig.MAX_POSITION_PCT`
+    #   （訓練端建立 wrapper 時顯式傳參），因此訓練端優先。
     MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（-P~P）0.8 代表 80%
     # ActionRepeatWrapper：降低決策頻率（Frame Skip）
     ACTION_REPEAT: int = 1
-
-    # ---- 風險 / Flip 預算 ----
-    FLIP_BUDGET_MAX: float = 1.0
-    FLIP_COST: float = 0.25
-    FLIP_THRESHOLD: float = 0.0
-    FLIP_RECOVERY_RATE: float = 0.01
-    FLIP_PROFIT_RECOVERY_RATE: float = 0.1
 
     # ---- 手續費限制 ----
     FEE_LIMIT_ENABLED: bool = False
@@ -64,12 +64,12 @@ class Config:
     # 建議：
     # - d_min: 安全緩衝門檻（常見量級 0.2~0.5 ATR）
     # - d_scale: 線性縮放（建議先用 d_min，讓 d_t=0 時成本=1）
-    STOP_BUFFER_D_MIN: float = 1
-    STOP_BUFFER_D_SCALE: float = 1
+    STOP_BUFFER_D_MIN: float = 0.5
+    STOP_BUFFER_D_SCALE: float = 0.2 # 0.2 代表 20% 
     
     # 這些閾值保留供 Observation 特徵使用 (near_liq, near_stop)，但不參與 Cost 計算
-    LIQUIDATION_WARN_PCT: float = 0.2 # 清算警告比例  0.05 代表 5%
-    STOP_LOSS_WARN_PCT: float = 0.1 # 止損警告比例 0.02 代表 2%
+    LIQUIDATION_WARN_PCT: float = 0.3 # 清算警告比例  0.05 代表 5%
+    STOP_LOSS_WARN_PCT: float = 0.2 # 止損警告比例 0.02 代表 2%
 
     # ---- Cost (Lagrangian Constraints) - REFACTORED ----
     # 舊的固定權重已移除 (COST_W_LIQ_EVENT 等)。

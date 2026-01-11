@@ -31,7 +31,7 @@ class TrainConfig:
     RISK_COST_LIMIT: float = 0.000005 # 0.000005 代表 0.0005% 死亡風險(容許極小風險)
     FRIC_COST_LIMIT: float = 0.0002 # 0.0002：代表允許每步平均手續費佔權益 0.2%
     # Stop-Buffer Cost（0~1）：建議先設很小的平均步成本上限，因為「接近止損」應該是短暫狀態
-    SL_BUF_COST_LIMIT: float = 0.01 # 0.1：代表允許每步平均止損緩衝成本佔權益 10%
+    SL_BUF_COST_LIMIT: float = 0.001 # 0.1：代表允許每步平均止損緩衝成本佔權益 10%
     
     UPDATE_LAMBDA_EVERY_STEPS: int = 1000 
     # 交易統計輸出：
@@ -61,7 +61,10 @@ class TrainConfig:
     # 訓練時建議用「更強的降頻/降換手」設定，否則手續費與 turnover 會把主線 log-return 磨成長期負值。
     # 這些會由 Train/run_sac_lag.py 以 CLI 參數覆寫（不必動 Env/config.py 的全域預設）。
     ACTION_REPEAT: int = 1 # 5 代表 5 步一決策
-    MAX_POSITION_PCT: float = 0.8
+    # 作用：訓練入口 `Train/run_sac_lag.py` 會用這個值建立 `ActionClipWrapper`，
+    # 用來限制 agent 的「目標持倉百分比」在 [-MAX_POSITION_PCT, +MAX_POSITION_PCT]。
+    # 優先順序：在 run_sac_lag 訓練流程中，此值會「覆蓋」Env.config.Config.MAX_POSITION_PCT（因為此處是顯式傳參）。
+    MAX_POSITION_PCT: float = 0.5
     MIN_POSITION_CHANGE: float = 0.2
 
     # ---- 環境參數 ----

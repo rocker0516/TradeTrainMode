@@ -3,34 +3,27 @@ import numpy as np
 class ActionProcessor:
     """
     負責動作處理邏輯：
-    1. 反手策略 (Flip Strategy) 檢查與預算扣除
+    1. 翻倉偵測 (Flip Detection)（僅標記 is_flip；不做預算限制）
     2. 單步倉位變化限制 (Max Step Position Change)
     3. 最小調倉幅度過濾 (Deadband)
     """
     def __init__(self, 
                  leverage: float, 
-                 flip_budget_max: float, 
-                 flip_cost: float, 
-                 flip_threshold: float, 
                  max_step_pos_change_pct: float,
                  min_position_change: float):
         self.leverage = float(leverage)
-        self.flip_budget_max = float(flip_budget_max)
-        self.flip_cost = float(flip_cost)
-        self.flip_threshold = float(flip_threshold)
         self.max_step_pos_change_pct = float(max_step_pos_change_pct)
         self.min_position_change = float(min_position_change)
 
     def process_action(self, 
                        action_raw: np.ndarray, 
                        executor, 
-                       current_price: float, 
-                       risk_budget: float) -> tuple:
+                       current_price: float) -> tuple:
         """
-        處理原始動作，應用反手限制。
+        處理原始動作，並偵測是否為翻倉（不再做 flip 預算限制）。
         
         Returns:
-            (target_pos_pct, new_risk_budget, flip_blocked, flip_budget_spent)
+            (target_pos_pct, is_flip)
         """
         # 1. Clip raw action
         action_val = float(np.clip(action_raw[0], -1.0, 1.0))
@@ -44,27 +37,9 @@ class ActionProcessor:
             current_pos_val = executor.position.size * current_price
             current_pos_pct = current_pos_val / max_nominal
 
-        # 3. Flip Check
-        is_flip = (target_pos_pct * current_pos_pct < -0.01) # Crossing zero significantly
-        flip_blocked = False
-        flip_budget_spent = 0.0
-        new_risk_budget = risk_budget
-
-        if is_flip:
-             cost = self.flip_cost
-             # Large flip check logic (optional, if threshold > 0)
-             # if abs(target_pos_pct - current_pos_pct) > self.flip_threshold: ...
-
-             if new_risk_budget >= cost:
-                 new_risk_budget -= cost
-                 flip_budget_spent = cost
-             else:
-                 # Budget exhausted, block flip. 
-                 # Strategy: force to 0.0 (close) instead of allowing flip
-                 target_pos_pct = 0.0
-                 flip_blocked = True 
-
-        return target_pos_pct, new_risk_budget, flip_blocked, flip_budget_spent, is_flip
+        # 3. Flip Detect（只標記，不限制）
+        is_flip = (target_pos_pct * current_pos_pct < -0.01)  # Crossing zero significantly
+        return target_pos_pct, bool(is_flip)
 
     def calculate_effective_action(self, 
                                    target_pos_pct: float, 

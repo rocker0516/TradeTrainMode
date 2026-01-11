@@ -23,30 +23,42 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
         - avg_fee
         - avg_liq
         - avg_dd
+        - max_dd: 視窗內最大 drawdown（不排除任何回合）
+        - max_dd_excl_liq: 排除「曾發生強平」回合後的視窗內最大 drawdown
+        - max_dd_excl_stop_loss: 排除「曾發生止損」回合後的視窗內最大 drawdown
         - avg_long_entries
         - avg_short_entries
         - avg_long_closes
         - avg_short_closes
         - avg_stop_loss
+        - avg_holding_steps
+        - avg_trade_count
         - avg_active_exits
         - stop_loss_rate_pct
         - active_exit_rate_pct
         - exit_coverage_rate_pct: (active_exit + stop_loss) / total_closes
+        - stop_loss_per_entry_pct: stop_loss / total_entries（越高通常代表止損偏緊或訊號品質偏差）
     """
     if not ep_infos:
         return {
             "avg_fee": 0.0,
             "avg_liq": 0.0,
             "avg_dd": 0.0,
+            "max_dd": 0.0,
+            "max_dd_excl_liq": 0.0,
+            "max_dd_excl_stop_loss": 0.0,
             "avg_long_entries": 0.0,
             "avg_short_entries": 0.0,
             "avg_long_closes": 0.0,
             "avg_short_closes": 0.0,
             "avg_stop_loss": 0.0,
+            "avg_holding_steps": 0.0,
+            "avg_trade_count": 0.0,
             "avg_active_exits": 0.0,
             "stop_loss_rate_pct": 0.0,
             "active_exit_rate_pct": 0.0,
             "exit_coverage_rate_pct": 0.0,
+            "stop_loss_per_entry_pct": 0.0,
         }
 
     total_fees = [float(x.get("total_fees", 0.0)) for x in ep_infos]
@@ -58,6 +70,21 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
     short_closes = [int(x.get("short_close_count", 0)) for x in ep_infos]
     stop_losses = [int(x.get("episode_stop_loss_count", 0)) for x in ep_infos]
     active_exits = [int(x.get("episode_active_exit_count", 0)) for x in ep_infos]
+    holding_steps = [int(x.get("episode_holding_steps", 0)) for x in ep_infos]
+    trade_counts = [int(x.get("episode_trade_count", 0)) for x in ep_infos]
+
+    # --- max drawdown variants ---
+    # 「排除」定義：整個 episode 只要曾發生過 해당事件，就把該 episode 從 max_dd 計算樣本排除。
+    dd_pairs = list(zip(max_dds, liq_counts, stop_losses))
+    def _safe_max(xs: List[float]) -> float:
+        if not xs:
+            return 0.0
+        return float(np.max(xs))
+
+    max_dd_all = _safe_max(list(max_dds))
+    max_dd_excl_liq = _safe_max([dd for dd, liq, _sl in dd_pairs if int(liq) <= 0])
+    # 你要求的口徑：排除止損「同時也排除強平」=> 僅保留 (stop_loss==0 且 liq==0) 的回合
+    max_dd_excl_stop_loss = _safe_max([dd for dd, liq, sl in dd_pairs if int(sl) <= 0 and int(liq) <= 0])
 
     total_stop_losses = int(np.sum(stop_losses)) if stop_losses else 0
     total_active_exits = int(np.sum(active_exits)) if active_exits else 0
@@ -74,20 +101,32 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
         exit_coverage_rate_pct = (total_exits / total_closes) * 100.0
     else:
         exit_coverage_rate_pct = 0.0
+    
+    total_entries = int(np.sum(long_entries) + np.sum(short_entries)) if (long_entries or short_entries) else 0
+    if total_entries > 0:
+        stop_loss_per_entry_pct = (total_stop_losses / total_entries) * 100.0
+    else:
+        stop_loss_per_entry_pct = 0.0
 
     return {
         "avg_fee": float(np.mean(total_fees)) if total_fees else 0.0,
         "avg_liq": float(np.mean(liq_counts)) if liq_counts else 0.0,
         "avg_dd": float(np.mean(max_dds)) if max_dds else 0.0,
+        "max_dd": float(max_dd_all),
+        "max_dd_excl_liq": float(max_dd_excl_liq) if np.isfinite(max_dd_excl_liq) else 0.0,
+        "max_dd_excl_stop_loss": float(max_dd_excl_stop_loss) if np.isfinite(max_dd_excl_stop_loss) else 0.0,
         "avg_long_entries": float(np.mean(long_entries)) if long_entries else 0.0,
         "avg_short_entries": float(np.mean(short_entries)) if short_entries else 0.0,
         "avg_long_closes": float(np.mean(long_closes)) if long_closes else 0.0,
         "avg_short_closes": float(np.mean(short_closes)) if short_closes else 0.0,
         "avg_stop_loss": float(np.mean(stop_losses)) if stop_losses else 0.0,
+        "avg_holding_steps": float(np.mean(holding_steps)) if holding_steps else 0.0,
+        "avg_trade_count": float(np.mean(trade_counts)) if trade_counts else 0.0,
         "avg_active_exits": float(np.mean(active_exits)) if active_exits else 0.0,
         "stop_loss_rate_pct": float(stop_loss_rate_pct),
         "active_exit_rate_pct": float(active_exit_rate_pct),
         "exit_coverage_rate_pct": float(exit_coverage_rate_pct),
+        "stop_loss_per_entry_pct": float(stop_loss_per_entry_pct),
     }
 
 
@@ -290,6 +329,12 @@ class LagrangianRewardWrapper(gym.Wrapper):
         super().__init__(env)
         self.controller = controller
         self.reward_scale = float(reward_scale)
+
+        # --- Cross-process lambda sync (for SubprocVecEnv / Windows spawn) ---
+        # 在 SubprocVecEnv（spawn）情境下，controller 的共享值不一定會在各子進程保持同步。
+        # 因此允許 Callback 透過 VecEnv.env_method() 將最新 λ 明確同步到每個子進程的 wrapper。
+        self._synced_lambdas: Dict[str, float] | None = None
+        self._synced_lambda: float | None = None
         
         # 累計當前回合數據 (for statistics)
         self.ep_ret_orig = 0.0
@@ -311,6 +356,21 @@ class LagrangianRewardWrapper(gym.Wrapper):
         self.ep_cost_penalty_total = 0.0
         self.ep_cost_penalty_breakdown.clear()
         return self.env.reset(**kwargs)
+
+    def set_lagrangian_lambdas(self, lambdas: Dict[str, float]) -> None:
+        """
+        由主進程 Callback 呼叫，用於同步 multi-lambda 到子進程。
+
+        Args:
+            lambdas: e.g. {"risk": 0.01, "fric": 0.0, "sl_buf": 0.02}
+        """
+        self._synced_lambdas = {str(k): float(v) for k, v in dict(lambdas).items()}
+
+    def set_lagrangian_lambda(self, lam: float) -> None:
+        """
+        由主進程 Callback 呼叫，用於同步 single-lambda 到子進程。
+        """
+        self._synced_lambda = float(lam)
         
     def step(self, action: Any) -> Tuple[Any, float, bool, bool, Dict[str, Any]]:
         obs, reward, terminated, truncated, info = self.env.step(action)
@@ -333,7 +393,8 @@ class LagrangianRewardWrapper(gym.Wrapper):
 
         # --- multi-lambda path ---
         if isinstance(self.controller, MultiSharedLagrangianController):
-            lams = self.controller.current_lambdas
+            # 優先使用 callback 同步過來的 λ（避免子進程讀到的 shared 值不同步）
+            lams = self._synced_lambdas if self._synced_lambdas is not None else self.controller.current_lambdas
             channel_costs = {
                 k: float(info.get(f"cost_{k}", 0.0))
                 for k in self.controller.channel_configs.keys()
@@ -363,7 +424,7 @@ class LagrangianRewardWrapper(gym.Wrapper):
             info["lag_lambda"] = float(lam_sum)
         else:
             # --- single-lambda path ---
-            lam = float(getattr(self.controller, "current_lambda", 0.0))
+            lam = float(self._synced_lambda) if self._synced_lambda is not None else float(getattr(self.controller, "current_lambda", 0.0))
             modified_reward = (raw_reward * self.reward_scale) - (lam * cost)
             self.ep_ret_total += float(modified_reward)
             self.ep_cost_penalty_total += float(lam) * float(cost)
@@ -502,6 +563,16 @@ class LagrangianCallback(BaseCallback):
                         f"lagrangian/cost_violation_{k}",
                         avg_c - float(self.controller.channel_configs[k].cost_limit),
                     )
+
+                # --- Sync lambdas to sub-process envs (Route B) ---
+                # SubprocVecEnv（spawn）下，子進程可能讀不到主進程更新後的 shared λ；
+                # 這裡用 VecEnv.env_method 明確同步到每個 LagrangianRewardWrapper。
+                try:
+                    if getattr(self, "training_env", None) is not None:
+                        self.training_env.env_method("set_lagrangian_lambdas", dict(new_lams))
+                except Exception:
+                    # 同步失敗不應中斷訓練（例如 unit test 沒有 vec env）
+                    pass
             else:
                 if len(self.cost_buffer) > 0:
                     avg_cost = np.mean(self.cost_buffer)
@@ -513,6 +584,13 @@ class LagrangianCallback(BaseCallback):
                     self.logger.record("lagrangian/avg_cost_step", avg_cost)
                     self.logger.record("lagrangian/avg_cost", avg_cost)
                     self.logger.record("lagrangian/cost_violation", avg_cost - self.controller.cost_limit)
+
+                    # --- Sync single lambda to sub-process envs (Route B) ---
+                    try:
+                        if getattr(self, "training_env", None) is not None:
+                            self.training_env.env_method("set_lagrangian_lambda", float(new_lambda))
+                    except Exception:
+                        pass
 
         # 4. 定期顯示統計 (每 log_freq 回合)
         # 檢查是否累積了足夠的新回合
@@ -604,7 +682,10 @@ class LagrangianCallback(BaseCallback):
         avg_profit = np.mean(profits) if profits else 0.0
         avg_fee = float(trade_stats["avg_fee"])
         avg_liq = float(trade_stats["avg_liq"])
-        avg_dd = float(trade_stats["avg_dd"])
+        # Drawdown：三條口徑（你要求的拆分）
+        max_dd = float(trade_stats.get("max_dd", trade_stats.get("avg_dd", 0.0)))
+        max_dd_excl_liq = float(trade_stats.get("max_dd_excl_liq", 0.0))
+        max_dd_excl_stop_loss = float(trade_stats.get("max_dd_excl_stop_loss", 0.0))
         avg_long_entries = float(trade_stats["avg_long_entries"])
         avg_short_entries = float(trade_stats["avg_short_entries"])
         avg_long_closes = float(trade_stats["avg_long_closes"])
@@ -614,6 +695,9 @@ class LagrangianCallback(BaseCallback):
         stop_loss_rate_pct = float(trade_stats["stop_loss_rate_pct"])
         active_exit_rate_pct = float(trade_stats["active_exit_rate_pct"])
         exit_coverage_rate_pct = float(trade_stats["exit_coverage_rate_pct"])
+        stop_loss_per_entry_pct = float(trade_stats.get("stop_loss_per_entry_pct", 0.0))
+        avg_holding_steps = float(trade_stats.get("avg_holding_steps", 0.0))
+        avg_trade_count = float(trade_stats.get("avg_trade_count", 0.0))
 
         end_stats = compute_end_result_stats(list(self.ep_infos))
         terminated_count = int(end_stats["terminated_count"])
@@ -633,7 +717,10 @@ class LagrangianCallback(BaseCallback):
         # --- 3. 顯示排版 ---
         # 使用 print 直接輸出到 console，方便查看
         print("\n" + "="*60)
-        print(f"  STATS (Last {len(self.ep_infos)} Episodes) @ Global Step {self.num_timesteps}")
+        print(
+            f"  STATS (Last {len(self.ep_infos)} Episodes | Total Episodes {self.total_episodes}) "
+            f"@ Global Step {self.num_timesteps}"
+        )
         print("="*60)
         
         # Section 1: Main Reward (Training Objective)
@@ -713,7 +800,9 @@ class LagrangianCallback(BaseCallback):
         
         # Section 4: Trade Execution Stats
         print(f"[{'TRADE STATS':^20}]")
-        print(f"  Avg Max Drawdown            : {avg_dd*100:8.2f} %")
+        print(f"  Max Drawdown (Window)       : {max_dd*100:8.2f} %  [all episodes]")
+        print(f"  Max DD Excl. Liquidation    : {max_dd_excl_liq*100:8.2f} %")
+        print(f"  Max DD Excl. Stop Loss      : {max_dd_excl_stop_loss*100:8.2f} %")
         print(f"  Avg Liq Count               : {avg_liq:8.4f}")
         print(f"  Avg Fees                    : {avg_fee:8.2f}")
         print(f"  Avg Long Entries            : {avg_long_entries:8.4f}")
@@ -722,6 +811,10 @@ class LagrangianCallback(BaseCallback):
         print(f"  Avg Short Close Count       : {avg_short_closes:8.4f}")
         print(f"  Avg Active Exit Count       : {avg_active_exits:8.4f} ({active_exit_rate_pct:5.1f}%)")
         print(f"  Avg Stop Loss Count         : {avg_stop_loss:8.4f} ({stop_loss_rate_pct:5.1f}%)")
+        # 讓你判斷「止損線是否過緊」的輔助指標（越高通常越緊）
+        print(f"  Stop Loss / Entry Rate      : {stop_loss_per_entry_pct:8.2f} %")
+        print(f"  Avg Holding Steps           : {avg_holding_steps:8.2f}")
+        print(f"  Avg Trade Steps (traded)    : {avg_trade_count:8.2f}")
         print(f"  Exit Coverage (AE+SL)/Close  : {exit_coverage_rate_pct:8.2f} %")
         print("-" * 60)
 
@@ -760,7 +853,12 @@ class LagrangianCallback(BaseCallback):
         self.logger.record("custom/q_mean", q_mean)
         self.logger.record("custom/ep_cost", avg_cost)
         self.logger.record("custom/avg_fee", avg_fee)
-        self.logger.record("custom/avg_dd", avg_dd)
+        # 相容保留：avg_dd 仍記錄「平均 episode_max_dd」
+        self.logger.record("custom/avg_dd", float(trade_stats.get("avg_dd", 0.0)))
+        # 新增：視窗內最大 DD（你要求的口徑）
+        self.logger.record("custom/max_dd", max_dd)
+        self.logger.record("custom/max_dd_excl_liq", max_dd_excl_liq)
+        self.logger.record("custom/max_dd_excl_stop_loss", max_dd_excl_stop_loss)
         self.logger.record("custom/avg_liq", avg_liq)
         self.logger.record("custom/avg_long_entries", avg_long_entries)
         self.logger.record("custom/avg_short_entries", avg_short_entries)
@@ -768,9 +866,13 @@ class LagrangianCallback(BaseCallback):
         self.logger.record("custom/avg_active_exits", avg_active_exits)
         self.logger.record("custom/stop_loss_rate_pct", stop_loss_rate_pct)
         self.logger.record("custom/active_exit_rate_pct", active_exit_rate_pct)
+        self.logger.record("custom/stop_loss_per_entry_pct", stop_loss_per_entry_pct)
+        self.logger.record("custom/avg_holding_steps", avg_holding_steps)
+        self.logger.record("custom/avg_trade_count", avg_trade_count)
         self.logger.record("custom/avg_long_closes", avg_long_closes)
         self.logger.record("custom/avg_short_closes", avg_short_closes)
         self.logger.record("custom/exit_coverage_rate_pct", exit_coverage_rate_pct)
+        self.logger.record("custom/total_episodes", int(self.total_episodes))
         self.logger.record("custom/terminated_rate", terminated_rate)
         self.logger.record("custom/truncated_rate", truncated_rate)
         self.logger.record("custom/avg_episode_len", avg_episode_len)

@@ -76,9 +76,6 @@ class TradingEnvironment(gym.Env):
         # Action Processor
         self.action_processor = ActionProcessor(
             leverage=self.leverage,
-            flip_budget_max=Config.FLIP_BUDGET_MAX,
-            flip_cost=Config.FLIP_COST,
-            flip_threshold=Config.FLIP_THRESHOLD,
             max_step_pos_change_pct=float(kwargs.get("max_step_pos_change_pct", Config.MAX_STEP_POS_CHANGE_PCT)),
             min_position_change=self.min_position_change
         )
@@ -132,7 +129,8 @@ class TradingEnvironment(gym.Env):
         self.current_step = 0
         self.episode_steps = 0
         self.done = False
-        self.risk_budget = 0.0
+        # Flip budget 機制已移除；保留 risk_budget 欄位供觀測/相容性使用（固定為 1.0）
+        self.risk_budget = 1.0
         self.last_equity_for_budget = 0.0
         self.max_equity_so_far = 0.0
         # Episode-level max drawdown (0~1). Used for trade stats (e.g., last 100 episodes max DD).
@@ -190,7 +188,8 @@ class TradingEnvironment(gym.Env):
         self.tracker.prev_total_fees = 0.0
         
         # 3. Reset State Variables
-        self.risk_budget = Config.FLIP_BUDGET_MAX
+        # Flip budget 機制已移除：risk_budget 固定為 1.0（僅供觀測/相容性）
+        self.risk_budget = 1.0
         self.last_equity_for_budget = self.initial_balance
         self.max_equity_so_far = self.initial_balance
         self.episode_max_dd = 0.0
@@ -214,6 +213,14 @@ class TradingEnvironment(gym.Env):
             "predicted_available_balance_after_action": 0.0,
             "predicted_liq_distance_after_action": 0.0,
             "predicted_stop_distance_after_action": 0.0,
+            # --- action vs execution discrepancy (for next obs) ---
+            "cooldown_remaining_norm": 0.0,
+            "action_overridden_flag": 0.0,
+            "last_action_raw": 0.0,
+            "last_action_used": 0.0,
+            "last_target_pos_pct": 0.0,
+            "last_final_pos_pct": 0.0,
+            "trade_executed_flag": 0.0,
         }
 
         # 4. Initial Observation
@@ -456,7 +463,7 @@ class TradingEnvironment(gym.Env):
         action: np.ndarray,
         last_equity: float,
         prices: _StepPrices,
-    ) -> Tuple[float, float, float, bool, np.ndarray]:
+    ) -> Tuple[float, float, float, bool, np.ndarray, float, bool]:
         """
         動作處理（含限制/翻倉預算）+ 手續費預估 + 實際下單執行。
 
@@ -466,16 +473,18 @@ class TradingEnvironment(gym.Env):
             prices: 本 step 價格資訊
 
         Returns:
-            (final_pos_pct, expected_fee, prev_wallet, is_flip, action_used)
+            (final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, action_overridden_flag)
         """
         action_used = self._apply_stop_loss_cooldown(action)
+        # action 是否被 env 覆寫（目前主要是 cooldown）
+        try:
+            action_overridden_flag = bool(abs(float(action_used[0]) - float(action[0])) > 1e-8)
+        except (TypeError, ValueError, IndexError):
+            action_overridden_flag = False
 
-        target_pos_pct, new_risk_budget, _flip_blocked, _flip_budget_spent, is_flip = (
-            self.action_processor.process_action(
-                action_used, self.executor, prices.current_price, self.risk_budget
-            )
+        target_pos_pct, is_flip = self.action_processor.process_action(
+            action_used, self.executor, prices.current_price
         )
-        self.risk_budget = new_risk_budget
 
         final_pos_pct = self.action_processor.calculate_effective_action(
             target_pos_pct, self.executor, prices.current_price, self.daily_risk_base
@@ -498,7 +507,15 @@ class TradingEnvironment(gym.Env):
             risk_base=self.daily_risk_base,
         )
 
-        return float(final_pos_pct), float(expected_fee), float(prev_wallet), bool(is_flip), action_used
+        return (
+            float(final_pos_pct),
+            float(expected_fee),
+            float(prev_wallet),
+            bool(is_flip),
+            action_used,
+            float(target_pos_pct),
+            bool(action_overridden_flag),
+        )
 
     def _estimate_expected_fee(
         self,
@@ -517,6 +534,50 @@ class TradingEnvironment(gym.Env):
         desired_size = desired_notional / float(current_price) if current_price > 0 else 0.0
         fee_rate_pct = float(self.executor.get_fee_rate())
         return abs(desired_size - current_size) * float(current_price) * (fee_rate_pct / 100.0)
+
+    def _estimate_add_only_fee(
+        self,
+        *,
+        prev_size: float,
+        new_size: float,
+        current_price: float,
+    ) -> float:
+        """
+        估算「只計入加碼/加曝險」的手續費（排除減倉/平倉）。
+
+        用途：
+        - 供 cost_fric（摩擦成本線）使用：只在加碼/加曝險時才計入摩擦成本。
+
+        定義：
+        - 若同向（未翻倉）：add_qty = max(0, |new| - |prev|)
+        - 若翻倉（跨 0 且新舊皆非 0）：只計入「新方向開倉」的部分 => add_qty = |new|
+
+        Args:
+            prev_size: 上一步的持倉 size
+            new_size: 本步執行後的持倉 size
+            current_price: 本步當下價格（用於估算名目）
+
+        Returns:
+            add_only_fee（>=0）
+        """
+        price = float(current_price)
+        if not (price > 0.0):
+            return 0.0
+
+        prev = float(prev_size)
+        new = float(new_size)
+        prev_nz = abs(prev) > 1e-8
+        new_nz = abs(new) > 1e-8
+
+        # Flip：只計入新方向「開倉」的名目（排除關倉名目）
+        if prev_nz and new_nz and (prev * new < 0.0):
+            add_qty = abs(new)
+        else:
+            add_qty = max(0.0, abs(new) - abs(prev))
+
+        add_notional = float(add_qty) * price
+        fee_rate_pct = float(self.executor.get_fee_rate())
+        return float(abs(add_notional) * (fee_rate_pct / 100.0))
 
     def _update_action_effects_cache(self, *, expected_fee: float, current_price: float) -> None:
         """
@@ -592,14 +653,9 @@ class TradingEnvironment(gym.Env):
 
     def _recover_risk_budget(self, *, new_equity: float) -> None:
         """
-        風險預算恢復邏輯（抽離 step 內的細節，行為不變）。
+        已停用：Flip budget 機制移除後，不再回復/消耗 risk_budget。
+        保留函式僅為相容性（避免舊程式碼呼叫時出錯）。
         """
-        self.risk_budget = min(Config.FLIP_BUDGET_MAX, self.risk_budget + Config.FLIP_RECOVERY_RATE)
-        if new_equity > self.last_equity_for_budget:
-            gain_ratio = (new_equity - self.last_equity_for_budget) / max(1.0, self.initial_balance)
-            self.risk_budget = min(
-                Config.FLIP_BUDGET_MAX, self.risk_budget + gain_ratio * Config.FLIP_PROFIT_RECOVERY_RATE
-            )
         self.last_equity_for_budget = float(new_equity)
 
     def _compute_reward_features(
@@ -663,7 +719,7 @@ class TradingEnvironment(gym.Env):
         prev_size = float(self._last_position_size)
 
         # 2. Process action + execute
-        final_pos_pct, expected_fee, prev_wallet, is_flip, action_used = self._process_action_and_execute(
+        final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, action_overridden_flag = self._process_action_and_execute(
             action=action,
             last_equity=last_equity,
             prices=prices,
@@ -671,6 +727,18 @@ class TradingEnvironment(gym.Env):
 
         # 3. Post execution updates (for next obs + accounting)
         self._update_action_effects_cache(expected_fee=expected_fee, current_price=prices.current_price)
+        # --- store action discrepancy fields for next obs ---
+        try:
+            self._last_action_effects["last_action_raw"] = float(action[0]) if hasattr(action, "__len__") else float(action)
+        except (TypeError, ValueError, IndexError):
+            self._last_action_effects["last_action_raw"] = 0.0
+        try:
+            self._last_action_effects["last_action_used"] = float(action_used[0]) if hasattr(action_used, "__len__") else float(action_used)
+        except (TypeError, ValueError, IndexError):
+            self._last_action_effects["last_action_used"] = 0.0
+        self._last_action_effects["last_target_pos_pct"] = float(target_pos_pct)
+        self._last_action_effects["last_final_pos_pct"] = float(final_pos_pct)
+        self._last_action_effects["action_overridden_flag"] = 1.0 if bool(action_overridden_flag) else 0.0
         new_size = float(self.executor.position.size)
         self._update_position_entry(new_size=new_size)
         step_fee, safe_equity = self._update_fee_tracking(current_price=prices.current_price)
@@ -678,7 +746,7 @@ class TradingEnvironment(gym.Env):
         # 4. Mark-to-market (use NEXT close)
         mark_price, new_equity = self._mark_to_market()
 
-        # 5. Risk budget recovery
+        # 5. Risk budget recovery（已停用；保留呼叫不影響）
         self._recover_risk_budget(new_equity=new_equity)
 
         # 6. Reward features + episode events
@@ -687,6 +755,12 @@ class TradingEnvironment(gym.Env):
             last_equity=last_equity,
             new_equity=new_equity,
             new_size=new_size,
+        )
+        # Add-only friction fee（排除減倉/平倉；翻倉只算新方向開倉）
+        step_fee_add_only = self._estimate_add_only_fee(
+            prev_size=float(prev_size),
+            new_size=float(new_size),
+            current_price=float(prices.current_price),
         )
         # Episode metrics: turnover / holding / trade count
         try:
@@ -707,6 +781,15 @@ class TradingEnvironment(gym.Env):
             # Should never break training due to a stats field
             pass
         stop_loss_triggered, liq_triggered = self._update_episode_event_counters()
+        # traded flag（供下一個 observation 使用）
+        self._last_action_effects["trade_executed_flag"] = 1.0 if bool(traded) else 0.0
+        # cooldown remaining norm（供下一個 observation 使用）
+        try:
+            cd = float(getattr(self, "stop_loss_cooldown", 0) or 0)
+            cd_max = float(max(1, int(getattr(Config, "STOP_LOSS_COOLDOWN_STEPS", 0) or 0)))
+            self._last_action_effects["cooldown_remaining_norm"] = float(np.clip(cd / cd_max, 0.0, 1.0))
+        except (TypeError, ValueError):
+            self._last_action_effects["cooldown_remaining_norm"] = 0.0
         # Episode metrics: 主動出場次數（平倉到 0 且非 stop loss / liq）
         try:
             closed_to_flat = (abs(prev_size) > 1e-8) and (abs(float(new_size)) <= 1e-8)
@@ -775,6 +858,8 @@ class TradingEnvironment(gym.Env):
             equity=float(new_equity),
             min_balance=float(self.min_balance),
             step_fee=float(step_fee),
+            # cost_fric 專用：只計入加碼/加曝險的手續費（排除減倉/平倉）
+            step_fee_add_only=float(step_fee_add_only),
             # kwargs 傳遞以保留擴充性，但目前 cost.py 主要只用上述四個
             step_fee_ratio=step_fee_ratio,
             turnover_ratio=float(turnover_ratio),

@@ -56,7 +56,10 @@ class TradingObserver:
         return {
             'time_state': spaces.Box(low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32),
             'rhythm_state': spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
-            'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(19,), dtype=np.float32)
+            # cost_state (27):
+            # 0~18: 原有成本/風險/預測效果特徵
+            # 19~26: 行為「偏差揭露」特徵（讓 agent 知道 raw action 是否被覆寫/限幅/未成交）
+            'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(27,), dtype=np.float32)
         }
 
     def compute_risk_signals(self, executor: TradeExecutor, current_price: float, step_idx: int, total_steps: int) -> dict:
@@ -300,8 +303,8 @@ class TradingObserver:
         rhythm_state[0] = float(atr_ratio)
         rhythm_state[1] = float(np.clip(metrics['rv_ratio'], 0.0, 10.0))
         
-        # --- Cost State (19) ---
-        cost_state = np.zeros(19, dtype=np.float32)
+        # --- Cost State (27) ---
+        cost_state = np.zeros(27, dtype=np.float32)
         last_step_fee = account_metrics.get('last_step_fee', 0.0)
         rolling_fee_sum = account_metrics.get('rolling_fee_sum', 0.0)
         fee_limit_ratio = account_metrics.get('fee_limit_ratio', 1.0)
@@ -362,6 +365,26 @@ class TradingObserver:
         cost_state[16] = float(effects.get("predicted_available_balance_after_action", 0.0))
         cost_state[17] = float(effects.get("predicted_liq_distance_after_action", 0.0))
         cost_state[18] = float(effects.get("predicted_stop_distance_after_action", 0.0))
+
+        # ---- Action vs Execution discrepancy (8) ----
+        # 19) cooldown_remaining_norm: 下一步是否會強制 action=0（0~1）
+        cost_state[19] = float(effects.get("cooldown_remaining_norm", 0.0))
+        # 20) action_overridden_flag: 上一步 action 是否被 env 覆寫（0/1）
+        cost_state[20] = float(effects.get("action_overridden_flag", 0.0))
+        # 21) last_action_raw: policy 原始輸出（-1~1）
+        cost_state[21] = float(effects.get("last_action_raw", 0.0))
+        # 22) last_action_used: 實際送入 processor/executor 的 action（-1~1；例如 cooldown 會變 0）
+        cost_state[22] = float(effects.get("last_action_used", 0.0))
+        # 23) last_target_pos_pct: processor 的 target_pos_pct（-1~1）
+        cost_state[23] = float(effects.get("last_target_pos_pct", 0.0))
+        # 24) last_final_pos_pct: 經 max_step_pos_change 等限制後的最終執行目標（-1~1）
+        cost_state[24] = float(effects.get("last_final_pos_pct", 0.0))
+        # 25) executed_pos_pct: 由實際持倉 size 反推的 signed exposure pct（-1~1）
+        max_cap = max(float(equity) * float(executor.leverage), 1e-12)
+        executed_pos_pct = (float(size) * float(current_price)) / max_cap
+        cost_state[25] = float(np.clip(executed_pos_pct, -1.0, 1.0))
+        # 26) trade_executed_flag: 本步是否真的成交/改變持倉（0/1；由 env 計算後注入）
+        cost_state[26] = float(effects.get("trade_executed_flag", 0.0))
         
         return {
             'time_state': time_state,

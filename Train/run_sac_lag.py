@@ -62,6 +62,9 @@ class EnvFactory:
         
         # 2. 動作截斷 (Action Clip)
         # 防止 Agent 輸出極端動作導致手續費暴增
+        # 重要：這裡「實際生效」的上限以 TrainConfig.MAX_POSITION_PCT 為主，
+        # 因為 wrapper 是在訓練端建立並把參數顯式傳入。
+        # Env.config.Config.MAX_POSITION_PCT 只是 env 層的「預設參考值」，除非你在別處用它來建 wrapper。
         env = ActionClipWrapper(env, max_position_pct=TrainConfig.MAX_POSITION_PCT)
         
         # 3. 動作重複 (Action Repeat)

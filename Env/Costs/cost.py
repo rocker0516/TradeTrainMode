@@ -44,7 +44,8 @@ class CostCalculator:
             liq_triggered: 是否觸發爆倉
             equity: 當前權益 (E_t)
             min_balance: 最低資金門檻
-            step_fee: 本步產生的手續費 (絕對金額)
+            step_fee: 本步產生的手續費 (絕對金額；包含加倉/減倉/平倉)
+            step_fee_add_only: （可選，從 kwargs 傳入）僅計入「加碼/加曝險」的手續費，用於排除減倉/平倉的摩擦成本線
 
         Returns:
             Dict:
@@ -66,7 +67,15 @@ class CostCalculator:
         # 2. 摩擦/換手成本 (c_fric)
         # 定義：手續費佔當前權益的比例
         # c_fric = Fee_t / E_t
-        c_fric = step_fee / safe_equity
+        #
+        # 重要：若外部提供 step_fee_add_only，則 cost_fric 會「排除減倉/平倉」，
+        # 只在加碼/加曝險時才計入摩擦成本。
+        fee_for_fric = kwargs.get("step_fee_add_only", step_fee)
+        try:
+            fee_for_fric = float(fee_for_fric)
+        except (TypeError, ValueError):
+            fee_for_fric = float(step_fee)
+        c_fric = fee_for_fric / safe_equity
 
         # 3. Stop-Buffer Cost（止損成本線）
         # 定義距離（以 ATR 正規化）：d_t = |P_t - SL_t| / ATR_t

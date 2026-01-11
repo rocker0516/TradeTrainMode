@@ -87,6 +87,14 @@ def test_observer_observation_shapes(make_synth_market) -> None:
         "predicted_available_balance_after_action": 0.0,
         "predicted_liq_distance_after_action": 0.0,
         "predicted_stop_distance_after_action": 0.0,
+        # action vs execution discrepancy (new)
+        "cooldown_remaining_norm": 0.0,
+        "action_overridden_flag": 0.0,
+        "last_action_raw": 0.0,
+        "last_action_used": 0.0,
+        "last_target_pos_pct": 0.0,
+        "last_final_pos_pct": 0.0,
+        "trade_executed_flag": 0.0,
     }
 
     out = obs.get_observation(
@@ -103,7 +111,7 @@ def test_observer_observation_shapes(make_synth_market) -> None:
     assert out["account_state"].shape == (27,)
     assert out["time_state"].shape == (7,)
     assert out["rhythm_state"].shape == (2,)
-    assert out["cost_state"].shape == (19,)
+    assert out["cost_state"].shape == (27,)
 
 
 def test_reward_calculator_log_return_only() -> None:

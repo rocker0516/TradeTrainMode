@@ -72,14 +72,13 @@ def _scenarios() -> List[Scenario]:
             expect={"pos_zero": True, "done": False},
         ),
         Scenario(
-            name="flip_allowed_spends_budget",
+            name="flip_allowed",
             actions=[1.0, -1.0],
-            expect={"is_flip": True, "risk_budget_lt_1": True},
-        ),
-        Scenario(
-            name="flip_blocked_forces_close",
-            actions=[1.0, -1.0],
-            expect={"is_flip": True, "pos_zero": True},
+            # Flip budget 機制移除後：至少應標記 is_flip，且不應因 budget 強制阻擋。
+            #（此情境會另外在 env_kwargs 把 stop_loss_atr=0，避免止損干擾）
+            # 注意：由於 ActionProcessor 的 max_step_pos_change_pct 限制，flip 可能會先「縮倉到 0」，
+            # 需要下一步才會真正開到反向倉位；因此這裡只驗證會平倉而不是被 budget 阻擋。
+            expect={"is_flip": True, "pos_zero": True, "done": False},
         ),
         Scenario(
             name="max_step_change_limits_build_up",
@@ -197,6 +196,9 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
         env_kwargs["max_step_pos_change_pct"] = 0.05
     if sc.name == "min_position_change_deadband_skips_tiny_trade":
         env_kwargs["min_position_change"] = 0.2
+    if sc.name == "flip_allowed":
+        # 避免止損/追蹤止損干擾 flip 行為測試
+        env_kwargs["stop_loss_atr"] = 0.0
     if sc.name == "stop_loss_triggers" or sc.name == "stop_loss_cooldown_forces_no_trade_next_step":
         env_kwargs["stop_loss_atr"] = 2.0
     # 注意：TradingEnvironment.__init__ 目前不吃 kwargs 的 max_episode_steps（固定取 Config.MAX_EPISODE_STEPS）。
@@ -220,19 +222,7 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
         env.max_episode_steps = 2
     obs0, _ = env.reset(seed=1)
 
-    # flip_blocked：手動把 risk_budget 壓低到 < flip_cost
-    if sc.name == "flip_blocked_forces_close":
-        # 先做第 1 步開倉，再在第 2 步前壓低 budget
-        env.step(np.array([sc.actions[0]], dtype=np.float32))
-        env.risk_budget = 0.1
-        tail_actions = sc.actions[1:]
-        last = None
-        for a in tail_actions:
-            last = env.step(np.array([a], dtype=np.float32))
-        assert last is not None
-        obs, reward, terminated, truncated, info = last
-    else:
-        obs, reward, terminated, truncated, info = _run_actions(env, sc.actions)
+    obs, reward, terminated, truncated, info = _run_actions(env, sc.actions)
 
     done = bool(terminated or truncated)
 
@@ -293,8 +283,7 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
     # --- flip / budget checks ---
     if sc.expect.get("is_flip"):
         assert info.get("is_flip", False) is True
-    if sc.expect.get("risk_budget_lt_1"):
-        assert float(info["risk_budget"]) < 1.0
+    # Flip budget 機制已移除：不再檢查 risk_budget 變動
 
     # --- fees checks ---
     if sc.expect.get("fee_zero"):

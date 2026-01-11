@@ -24,9 +24,6 @@ def test_action_processor_flip_spends_budget_when_available() -> None:
     ex = _make_executor()
     ap = ActionProcessor(
         leverage=10.0,
-        flip_budget_max=1.0,
-        flip_cost=0.25,
-        flip_threshold=0.0,
         max_step_pos_change_pct=1.0,
         min_position_change=0.0,
     )
@@ -42,56 +39,16 @@ def test_action_processor_flip_spends_budget_when_available() -> None:
         risk_base=1000.0,
     )
 
-    target, new_budget, blocked, spent, is_flip = ap.process_action(
-        np.array([-1.0], dtype=np.float32), ex, 100.0, 1.0
-    )
+    target, is_flip = ap.process_action(np.array([-1.0], dtype=np.float32), ex, 100.0)
 
     assert is_flip is True
-    assert blocked is False
-    assert spent == 0.25
-    assert new_budget == 0.75
     assert target == -1.0
-
-
-def test_action_processor_flip_blocked_when_budget_insufficient() -> None:
-    ex = _make_executor()
-    ap = ActionProcessor(
-        leverage=10.0,
-        flip_budget_max=1.0,
-        flip_cost=0.25,
-        flip_threshold=0.0,
-        max_step_pos_change_pct=1.0,
-        min_position_change=0.0,
-    )
-
-    ex.execute(
-        position_percent=1.0,
-        current_price=100.0,
-        high=101.0,
-        low=99.0,
-        equity=ex.equity(100.0),
-        atr=0.0,
-        risk_base=1000.0,
-    )
-
-    target, new_budget, blocked, spent, is_flip = ap.process_action(
-        np.array([-1.0], dtype=np.float32), ex, 100.0, 0.1
-    )
-
-    assert is_flip is True
-    assert blocked is True
-    assert spent == 0.0
-    assert new_budget == 0.1
-    assert target == 0.0  # 被強制關倉而不是翻倉
 
 
 def test_action_processor_max_step_change_limits_position_build_up() -> None:
     ex = _make_executor()
     ap = ActionProcessor(
         leverage=10.0,
-        flip_budget_max=1.0,
-        flip_cost=0.25,
-        flip_threshold=0.0,
         max_step_pos_change_pct=0.05,  # 單步最多 5% capacity
         min_position_change=0.0,
     )
