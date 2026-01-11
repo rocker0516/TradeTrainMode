@@ -31,13 +31,12 @@ class Config:
     # 最小調倉幅度（Deadband, 0.0 ~ 1.0）
     # 預設使用 0.0：讓「單步倉位變化限制(max_step_pos_change_pct)」可以逐步累積倉位，
     # 需要抑制微小調倉刷手續費時，再由外部 kwargs 覆寫（例如 0.2 代表 20%）。
-    MIN_POSITION_CHANGE: float = 0.2 # 最小調倉幅度 0.2 代表 20%
+    MIN_POSITION_CHANGE: float = 0.0 # 最小調倉幅度（預設不啟用 deadband）
     MAX_STEP_POS_CHANGE_PCT: float = 0.5 # 最大單步持倉比例變化 0.5 代表 50%
 
     # ---- 訓練/執行 Wrapper 參數（單一來源）----
-    # ActionSmoothClipWrapper：先硬限制最大目標倉位，再做動作平滑，抑制高頻翻倉刷手續費
+    # ActionClipWrapper：硬限制最大目標倉位（不做 action smoothing）
     MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（-P~P）0.8 代表 80%
-    ACTION_SMOOTH_ALPHA: float = 0.5  # 0~1；越小越平滑
     # ActionRepeatWrapper：降低決策頻率（Frame Skip）
     ACTION_REPEAT: int = 1
 
@@ -65,8 +64,8 @@ class Config:
     # 建議：
     # - d_min: 安全緩衝門檻（常見量級 0.2~0.5 ATR）
     # - d_scale: 線性縮放（建議先用 d_min，讓 d_t=0 時成本=1）
-    STOP_BUFFER_D_MIN: float = 0.5
-    STOP_BUFFER_D_SCALE: float = 0.3
+    STOP_BUFFER_D_MIN: float = 1
+    STOP_BUFFER_D_SCALE: float = 1
     
     # 這些閾值保留供 Observation 特徵使用 (near_liq, near_stop)，但不參與 Cost 計算
     LIQUIDATION_WARN_PCT: float = 0.2 # 清算警告比例  0.05 代表 5%

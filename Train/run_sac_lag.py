@@ -25,7 +25,7 @@ from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
 from stable_baselines3.common.callbacks import CheckpointCallback
 
 from Env.trading_env import TradingEnvironment
-from Env.wrappers import ActionRepeatWrapper, ActionSmoothClipWrapper
+from Env.wrappers import ActionRepeatWrapper, ActionClipWrapper
 from Train.sb3_cnn_policy import DualCnnFeatureExtractor
 from Train.lagrangian import (
     SharedLagrangianController,
@@ -60,9 +60,9 @@ class EnvFactory:
         # 1. 基礎環境
         env = TradingEnvironment(env_id=self.rank, random_start=True, **self.config_overrides)
         
-        # 2. 動作平滑與截斷 (Action Smooth & Clip)
+        # 2. 動作截斷 (Action Clip)
         # 防止 Agent 輸出極端動作導致手續費暴增
-        env = ActionSmoothClipWrapper(env, max_position_pct= TrainConfig.MAX_POSITION_PCT, smoothing_alpha=TrainConfig.ACTION_SMOOTH_ALPHA)
+        env = ActionClipWrapper(env, max_position_pct=TrainConfig.MAX_POSITION_PCT)
         
         # 3. 動作重複 (Action Repeat)
         # 降低決策頻率，穩定訓練

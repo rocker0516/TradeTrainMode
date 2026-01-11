@@ -61,8 +61,7 @@ class TrainConfig:
     # 訓練時建議用「更強的降頻/降換手」設定，否則手續費與 turnover 會把主線 log-return 磨成長期負值。
     # 這些會由 Train/run_sac_lag.py 以 CLI 參數覆寫（不必動 Env/config.py 的全域預設）。
     ACTION_REPEAT: int = 1 # 5 代表 5 步一決策
-    MAX_POSITION_PCT: float = 0.3
-    ACTION_SMOOTH_ALPHA: float = 0.2
+    MAX_POSITION_PCT: float = 0.8
     MIN_POSITION_CHANGE: float = 0.2
 
     # ---- 環境參數 ----

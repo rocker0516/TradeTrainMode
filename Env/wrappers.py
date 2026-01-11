@@ -60,32 +60,24 @@ class ActionRepeatWrapper(gym.Wrapper):
         return obs, total_reward, done, truncated, info
 
 
-class ActionSmoothClipWrapper(gym.ActionWrapper):
+class ActionClipWrapper(gym.ActionWrapper):
     """
-    先對動作做持倉硬上限裁剪，再做指數平滑，降低高頻翻倉與換手。
+    動作截斷（Clip）Wrapper
+
+    用途：
+    - 限制 Agent 的「目標持倉百分比」上限（-P ~ P），避免輸出極端動作造成手續費暴增或不穩定。
+
+    注意：
+    - 本 Wrapper **不做 Action smoothing**（已移除 EMA 平滑邏輯）。
     
     max_position_pct: 目標持倉百分比上限（-P~P）
-    smoothing_alpha: 平滑係數；越小越平滑，0.3~0.5 常用
     """
-    def __init__(self, env, *, max_position_pct: float, smoothing_alpha: float = 0.3):
+    def __init__(self, env, *, max_position_pct: float):
         super().__init__(env)
         assert max_position_pct > 0.0, "max_position_pct must be positive"
-        assert 0.0 < smoothing_alpha <= 1.0, "smoothing_alpha must be in (0, 1]"
         self.max_position_pct = float(max_position_pct)
-        self.smoothing_alpha = float(smoothing_alpha)
-        # 為每個環境維持上一動作，用同型態/shape 初始化
-        self.prev_action = np.zeros(self.action_space.shape, dtype=np.float32)
-
-    def reset(self, **kwargs):
-        self.prev_action = np.zeros(self.action_space.shape, dtype=np.float32)
-        return super().reset(**kwargs)
 
     def action(self, action):
-        # clip -> smooth，輸出保持 float32
+        # clip，輸出保持 float32
         clipped = np.clip(action, -self.max_position_pct, self.max_position_pct)
-        smoothed = (
-            self.smoothing_alpha * clipped
-            + (1.0 - self.smoothing_alpha) * self.prev_action
-        )
-        self.prev_action = smoothed.astype(np.float32)
-        return self.prev_action
+        return clipped.astype(np.float32)

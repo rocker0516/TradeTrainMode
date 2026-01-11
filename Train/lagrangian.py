@@ -415,6 +415,8 @@ class LagrangianCallback(BaseCallback):
         self.log_freq = log_freq
         self.window_size = window_size
         self.reward_scale = float(reward_scale)
+        # 允許測試或外部覆寫 logger（SB3 BaseCallback.logger 預設為唯讀 property）
+        self._logger_override = None
         
         # Lambda Update Buffer
         self.cost_buffer: Deque[float] = deque(maxlen=int(update_freq))
@@ -431,6 +433,35 @@ class LagrangianCallback(BaseCallback):
         # Global counters
         self.total_episodes: int = 0
         self.last_log_episode: int = 0
+
+    @property
+    def logger(self):  # type: ignore[override]
+        """
+        取得 logger。
+
+        - 預設：沿用 SB3 BaseCallback 行為（從 self.model.logger 取得）。
+        - 測試/注入：若外部指定 callback.logger = xxx，則優先回傳覆寫值。
+        """
+        if self._logger_override is not None:
+            return self._logger_override
+        return super().logger
+
+    @logger.setter
+    def logger(self, value) -> None:  # type: ignore[override]
+        self._logger_override = value
+
+    def on_step(self) -> bool:  # type: ignore[override]
+        """
+        兼容性 on_step：
+
+        - 正常 SB3 訓練流程：model 會提供 num_timesteps，行為與 BaseCallback.on_step 等價。
+        - 單元測試/Mock：允許 model 缺少 num_timesteps，避免測試因 SB3 內部細節崩潰。
+        """
+        self.n_calls += 1
+        if hasattr(self.model, "num_timesteps"):
+            # SB3 期望的欄位：用於 log / scheduler 等
+            self.num_timesteps = int(getattr(self.model, "num_timesteps"))
+        return bool(self._on_step())
         
     def _on_step(self) -> bool:
         # SB3 的 locals['infos'] 包含所有並行環境的 info
