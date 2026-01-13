@@ -254,6 +254,10 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
             "current_dd",
             # cost / breakdown（供 Lagrangian 或解析使用）
             "cost",
+            # multi-lambda channels（訓練端會用到）
+            "cost_risk",
+            "cost_fric",
+            "cost_sl_buf",
             "cost_breakdown",
         ):
             assert k in info
@@ -314,6 +318,13 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
         assert truncated is bool(sc.expect["truncated"])
     if "termination_reason" in sc.expect:
         assert info.get("termination_reason") == sc.expect["termination_reason"]
+
+    # --- death cost consistency (terminated episodes) ---
+    # 重要：若回合是因為 liq_triggered / balance_insufficient 終止，
+    # 則 death_cost 與 cost_risk 應該在該 step 直接為 1.0，避免「有死亡但 risk cost=0」。
+    if info.get("termination_reason") in ("liq_triggered", "balance_insufficient"):
+        assert float(info.get("cost_risk", 0.0)) == 1.0
+        assert float(info.get("cost_breakdown", {}).get("death_cost", 0.0)) == 1.0
 
     # --- reward ---
     if sc.expect.get("reward_positive"):

@@ -53,19 +53,33 @@ class Config:
     FEE_ROLLING_WINDOW: int = 288
 
     # ---- 止損 / 清算提醒（供 Observer 或外部使用）----
-    STOP_LOSS_ATR: float = 2
+    # STOP_LOSS_ATR：止損距離的「ATR 倍數」。
+    # - Executor 設定止損時：stop_distance = ATR * STOP_LOSS_ATR
+    # - 直覺：越大 => 止損越遠（更不容易被洗出場；但單次虧損可能更大）
+    # - 建議範圍（5m 常見）：1.5 ~ 3.0；2.0 屬於中庸值
+    STOP_LOSS_ATR: float = 3
     STOP_LOSS_LIQ_BUFFER_PCT: float = 0.05 # 止損相對強平價的安全緩衝（比例） 0.05 代表 5%
     STOP_LOSS_COOLDOWN_STEPS: int = 30 / 5 # 止損冷卻步數
 
     # ---- Stop-Buffer Cost（止損安全緩衝成本線）----
-    # 定義：d_t = |P_t - SL_t| / ATR_t（無量綱）
-    # 成本：c_sl_buf = clip( max(0, d_min - d_t) / d_scale, 0, 1 )
+    # 目標：不是罰虧損，而是罰「你把倉位放在快撞止損的地方還不撤」。
     #
-    # 建議：
-    # - d_min: 安全緩衝門檻（常見量級 0.2~0.5 ATR）
-    # - d_scale: 線性縮放（建議先用 d_min，讓 d_t=0 時成本=1）
-    STOP_BUFFER_D_MIN: float = 0.5
-    STOP_BUFFER_D_SCALE: float = 0.2 # 0.2 代表 20% 
+    # 定義（ATR 正規化、無量綱）：
+    #   d_t = |P_t - SL_t| / ATR_t
+    #
+    # 成本（0~1，線性爬升 + clip）：
+    #   c_sl_buf = clip( max(0, d_min - d_t) / d_scale, 0, 1 )
+    #
+    # 怎麼選參數（不用猜）：
+    # - 先決定你想在距離止損多少 ATR 開始罰：d_min
+    # - 再決定你想在距離止損多少 ATR 視為「非常危險（cost=1）」：d_crit
+    #   則：d_scale = d_min - d_crit
+    #
+    # 你選擇「更近一點」的版本（更不干擾主線）：
+    # - d_min=0.3：只有當「距離止損 < 0.3 ATR」才開始被罰 
+    # - d_scale=0.3：罰得較溫和;越大代表 cost 變化越慢；理論上要到 d_t≈0（幾乎撞到止損）才會接近 cost=1 
+    STOP_BUFFER_D_MIN: float = 0.3
+    STOP_BUFFER_D_SCALE: float = 0.6
     
     # 這些閾值保留供 Observation 特徵使用 (near_liq, near_stop)，但不參與 Cost 計算
     LIQUIDATION_WARN_PCT: float = 0.3 # 清算警告比例  0.05 代表 5%

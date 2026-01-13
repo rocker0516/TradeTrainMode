@@ -476,10 +476,15 @@ class LagrangianCallback(BaseCallback):
         self.log_freq = log_freq
         self.window_size = window_size
         self.reward_scale = float(reward_scale)
+        # SubprocVecEnv 下，每個 global step 會收到 n_envs 筆 info。
+        # 若 cost buffer 的 maxlen 只用 update_freq，會等效變成只看 (update_freq / n_envs) 個 steps，
+        # 導致 avg_cost 視窗過短而常常趨近 0，進而讓 λ 被拉回 0（看起來像「成本失效」）。
+        self._cost_buffer_n_envs: int | None = None
         # 允許測試或外部覆寫 logger（SB3 BaseCallback.logger 預設為唯讀 property）
         self._logger_override = None
         
         # Lambda Update Buffer
+        # 先用 update_freq 當 base；實際 maxlen 會在 _on_step() 依 n_envs 動態擴充為 update_freq*n_envs
         self.cost_buffer: Deque[float] = deque(maxlen=int(update_freq))
         self.cost_buffers: Dict[str, Deque[float]] = {}
         if isinstance(self.controller, MultiSharedLagrangianController):
@@ -527,6 +532,22 @@ class LagrangianCallback(BaseCallback):
     def _on_step(self) -> bool:
         # SB3 的 locals['infos'] 包含所有並行環境的 info
         infos = self.locals.get("infos", [])
+
+        # --- Ensure cost buffer window matches global steps (handles n_envs) ---
+        try:
+            n_envs = max(1, int(len(infos)))
+        except (TypeError, ValueError):
+            n_envs = 1
+        if self._cost_buffer_n_envs != n_envs:
+            target_maxlen = int(self.update_freq) * int(n_envs)
+            target_maxlen = max(1, target_maxlen)
+            if isinstance(self.controller, MultiSharedLagrangianController):
+                for k in self.controller.channel_configs.keys():
+                    old = self.cost_buffers.get(k)
+                    self.cost_buffers[k] = deque(old or [], maxlen=target_maxlen)
+            else:
+                self.cost_buffer = deque(self.cost_buffer, maxlen=target_maxlen)
+            self._cost_buffer_n_envs = int(n_envs)
         
         for info in infos:
             # 1. 收集 Cost (Step level, for Lambda update)
@@ -716,6 +737,22 @@ class LagrangianCallback(BaseCallback):
         
         # --- 3. 顯示排版 ---
         # 使用 print 直接輸出到 console，方便查看
+        def _fmt_small(x: float, *, fixed: int = 6, sci: int = 2, sci_threshold: float = 1e-6) -> str:
+            """
+            讓 console 顯示更穩定：
+            - 數值夠大：用固定小數（例如 0.012345）
+            - 數值很小但非 0：用科學記號避免印成 0.000000（例如 1.23e-08）
+            """
+            try:
+                v = float(x)
+            except (TypeError, ValueError):
+                return str(x)
+            if v == 0.0:
+                return f"{0.0:.{fixed}f}"
+            if abs(v) < float(sci_threshold):
+                return f"{v:.{sci}e}"
+            return f"{v:.{fixed}f}"
+
         print("\n" + "="*60)
         print(
             f"  STATS (Last {len(self.ep_infos)} Episodes | Total Episodes {self.total_episodes}) "
@@ -746,25 +783,35 @@ class LagrangianCallback(BaseCallback):
         avg_cost_per_step = avg_cost / max(1.0, avg_episode_len)
         if isinstance(self.controller, MultiSharedLagrangianController):
             lams = self.controller.current_lambdas
-            print(f"[{'COST LINES':^20}] Lambdas (sum={sum(lams.values()):.6f})")
+            print(f"[{'COST LINES':^20}] Lambdas (sum={_fmt_small(sum(lams.values()))})")
             for k in self.controller.channel_configs.keys():
                 limit = float(self.controller.channel_configs[k].cost_limit)
                 avg_c = 0.0
                 if k in self.cost_buffers and len(self.cost_buffers[k]) > 0:
                     avg_c = float(np.mean(self.cost_buffers[k]))
                 vio = avg_c - limit
-                print(
-                    f"  - {k:<8} λ={lams.get(k, 0.0):.6f}  limit={limit:.6f}  avg={avg_c:.6f}  "
-                    f"[{'OK' if vio <= 0 else 'VIOLATION'}]"
-                )
+                # 說明：這裡的 avg 是「最近 update_freq steps 的 per-step 平均」。
+                # death_cost 通常只在回合終止那一步 =1，因此即使 death rate 很高，短視窗內也可能出現 avg=0。
+                if str(k) == "risk":
+                    death_rate_ep = float(avg_breakdown.get("death_cost", 0.0)) * 100.0
+                    print(
+                        f"  - {k:<8} λ={_fmt_small(lams.get(k, 0.0))}  limit={_fmt_small(limit)}  avg={_fmt_small(avg_c)}  "
+                        f"death_rate_ep={death_rate_ep:6.2f}%  "
+                        f"[{'OK' if vio <= 0 else 'VIOLATION'}]"
+                    )
+                else:
+                    print(
+                        f"  - {k:<8} λ={_fmt_small(lams.get(k, 0.0))}  limit={_fmt_small(limit)}  avg={_fmt_small(avg_c)}  "
+                        f"[{'OK' if vio <= 0 else 'VIOLATION'}]"
+                    )
             # 仍顯示 aggregated cost（方便對照舊圖表）
-            print(f"  Avg Cost (Per Step)         : {avg_cost_per_step:.6f}  [aggregate]")
+            print(f"  Avg Cost (Per Step)         : {_fmt_small(avg_cost_per_step)}  [aggregate]")
         else:
             cost_limit = float(self.controller.cost_limit)
             violation = avg_cost_per_step - cost_limit
-            print(f"[{'COST LINE':^20}] Lambda: {self.controller.current_lambda:.6f}")
-            print(f"  Cost Limit (Per Step)       : {cost_limit:.6f}")
-            print(f"  Avg Cost (Per Step)         : {avg_cost_per_step:.6f}  [{'OK' if violation <= 0 else 'VIOLATION'}]")
+            print(f"[{'COST LINE':^20}] Lambda: {_fmt_small(float(self.controller.current_lambda))}")
+            print(f"  Cost Limit (Per Step)       : {_fmt_small(cost_limit)}")
+            print(f"  Avg Cost (Per Step)         : {_fmt_small(avg_cost_per_step)}  [{'OK' if violation <= 0 else 'VIOLATION'}]")
         print(f"  Avg Cost (Episode Total)    : {avg_cost:8.4f}")
         
         if avg_breakdown:
