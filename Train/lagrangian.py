@@ -753,6 +753,11 @@ class LagrangianCallback(BaseCallback):
                 return f"{v:.{sci}e}"
             return f"{v:.{fixed}f}"
 
+        # λ 的顯示用更高門檻切到科學記號：
+        # 目的：避免 0.000008 這種「看起來像 0」的數字不夠醒目。
+        def _fmt_lambda(x: float) -> str:
+            return _fmt_small(x, fixed=6, sci=2, sci_threshold=1e-4)
+
         print("\n" + "="*60)
         print(
             f"  STATS (Last {len(self.ep_infos)} Episodes | Total Episodes {self.total_episodes}) "
@@ -783,7 +788,7 @@ class LagrangianCallback(BaseCallback):
         avg_cost_per_step = avg_cost / max(1.0, avg_episode_len)
         if isinstance(self.controller, MultiSharedLagrangianController):
             lams = self.controller.current_lambdas
-            print(f"[{'COST LINES':^20}] Lambdas (sum={_fmt_small(sum(lams.values()))})")
+            print(f"[{'COST LINES':^20}] Lambdas (sum={_fmt_lambda(sum(lams.values()))})")
             for k in self.controller.channel_configs.keys():
                 limit = float(self.controller.channel_configs[k].cost_limit)
                 avg_c = 0.0
@@ -792,18 +797,12 @@ class LagrangianCallback(BaseCallback):
                 vio = avg_c - limit
                 # 說明：這裡的 avg 是「最近 update_freq steps 的 per-step 平均」。
                 # death_cost 通常只在回合終止那一步 =1，因此即使 death rate 很高，短視窗內也可能出現 avg=0。
-                if str(k) == "risk":
-                    death_rate_ep = float(avg_breakdown.get("death_cost", 0.0)) * 100.0
-                    print(
-                        f"  - {k:<8} λ={_fmt_small(lams.get(k, 0.0))}  limit={_fmt_small(limit)}  avg={_fmt_small(avg_c)}  "
-                        f"death_rate_ep={death_rate_ep:6.2f}%  "
-                        f"[{'OK' if vio <= 0 else 'VIOLATION'}]"
-                    )
-                else:
-                    print(
-                        f"  - {k:<8} λ={_fmt_small(lams.get(k, 0.0))}  limit={_fmt_small(limit)}  avg={_fmt_small(avg_c)}  "
-                        f"[{'OK' if vio <= 0 else 'VIOLATION'}]"
-                    )
+                death_rate_ep = float(avg_breakdown.get("death_cost", 0.0)) * 100.0
+                print(
+                    f"  - {k:<8} λ={_fmt_lambda(lams.get(k, 0.0))}  limit={_fmt_small(limit)}  avg={_fmt_small(avg_c)}  "
+                    f"death_rate_ep={death_rate_ep:6.2f}%  "
+                    f"[{'OK' if vio <= 0 else 'VIOLATION'}]"
+                )
             # 仍顯示 aggregated cost（方便對照舊圖表）
             print(f"  Avg Cost (Per Step)         : {_fmt_small(avg_cost_per_step)}  [aggregate]")
         else:

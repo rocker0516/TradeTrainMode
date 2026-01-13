@@ -100,12 +100,17 @@ class TradeExecutor:
         if liq_price is None or liq_price <= 0.0:
             return
 
+        # stop_loss_liq_buffer_pct 的語意：
+        # - 不是「liq_price * (1+buffer)」這種會在高槓桿下變得不可能的比例，
+        # - 而是「在 liq_price 與 current_price 之間保留 buffer_pct 的安全緩衝」。
+        #   例：long，liq=90, current=100, buffer=0.2 => min_sl = 90 + 0.2*(100-90)=92
         buffer_pct = max(0.0, float(self.stop_loss_liq_buffer_pct))
         eps = max(1e-8, float(abs(current_price)) * 1e-9)
 
         if self.position.size > 0.0:
             # 多單：止損必須在強平價之上（較早觸發）
-            min_sl = float(liq_price) * (1.0 + buffer_pct) + eps
+            # clamp 到 (liq_price, current_price) 之間的緩衝位置，避免 buffer_pct 太大導致 min_sl > current_price
+            min_sl = float(liq_price) + buffer_pct * (float(current_price) - float(liq_price)) + eps
             if self.position.stop_loss_price < min_sl:
                 # 避免 stop 反而高於現價造成立即「邏輯不一致」；若接近爆倉，讓止損貼近現價即可。
                 cap = float(current_price) - eps
@@ -113,7 +118,7 @@ class TradeExecutor:
                 self._update_max_stop_loss_distance_metric()
         else:
             # 空單：止損必須在強平價之下（較早觸發）
-            max_sl = float(liq_price) * (1.0 - buffer_pct) - eps
+            max_sl = float(liq_price) - buffer_pct * (float(liq_price) - float(current_price)) - eps
             if self.position.stop_loss_price > max_sl:
                 cap = float(current_price) + eps
                 self.position.stop_loss_price = float(max(max_sl, cap))

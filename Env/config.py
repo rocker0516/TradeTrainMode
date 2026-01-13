@@ -57,8 +57,8 @@ class Config:
     # - Executor 設定止損時：stop_distance = ATR * STOP_LOSS_ATR
     # - 直覺：越大 => 止損越遠（更不容易被洗出場；但單次虧損可能更大）
     # - 建議範圍（5m 常見）：1.5 ~ 3.0；2.0 屬於中庸值
-    STOP_LOSS_ATR: float = 3
-    STOP_LOSS_LIQ_BUFFER_PCT: float = 0.05 # 止損相對強平價的安全緩衝（比例） 0.05 代表 5%
+    STOP_LOSS_ATR: float = 2
+    STOP_LOSS_LIQ_BUFFER_PCT: float = 0.2 # 止損相對強平價的安全緩衝（比例） 0.2 代表 20%
     STOP_LOSS_COOLDOWN_STEPS: int = 30 / 5 # 止損冷卻步數
 
     # ---- Stop-Buffer Cost（止損安全緩衝成本線）----
@@ -78,12 +78,12 @@ class Config:
     # 你選擇「更近一點」的版本（更不干擾主線）：
     # - d_min=0.3：只有當「距離止損 < 0.3 ATR」才開始被罰 
     # - d_scale=0.3：罰得較溫和;越大代表 cost 變化越慢；理論上要到 d_t≈0（幾乎撞到止損）才會接近 cost=1 
-    STOP_BUFFER_D_MIN: float = 0.3
-    STOP_BUFFER_D_SCALE: float = 0.6
+    STOP_BUFFER_D_MIN: float = 0.7
+    STOP_BUFFER_D_SCALE: float = 0.8
     
     # 這些閾值保留供 Observation 特徵使用 (near_liq, near_stop)，但不參與 Cost 計算
     LIQUIDATION_WARN_PCT: float = 0.3 # 清算警告比例  0.05 代表 5%
-    STOP_LOSS_WARN_PCT: float = 0.2 # 止損警告比例 0.02 代表 2%
+    STOP_LOSS_WARN_PCT: float = 0.2 # 止損警告比例 0.1 代表 10%
 
     # ---- Cost (Lagrangian Constraints) - REFACTORED ----
     # 舊的固定權重已移除 (COST_W_LIQ_EVENT 等)。

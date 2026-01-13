@@ -41,7 +41,8 @@ def test_observer_risk_signals_are_zero_when_flat(make_synth_market) -> None:
     )
 
     price = md.get_market_metrics(10)["close"]
-    risk = obs.compute_risk_signals(ex, float(price), 10, len(md.df_5m))
+    atr_est = float(md.get_market_metrics(10)["atr_ratio"]) * float(price)
+    risk = obs.compute_risk_signals(ex, float(price), atr_est, 10, len(md.df_5m))
     assert risk["liq_price"] == 0.0
     assert risk["near_liq"] is False
     assert risk["stop_loss_missing"] == 0.0
@@ -65,8 +66,10 @@ def test_observer_observation_shapes(make_synth_market) -> None:
     )
 
     step_idx = 10
-    price = float(md.get_market_metrics(step_idx)["close"])
-    risk = obs.compute_risk_signals(ex, price, step_idx, len(md.df_5m))
+    m = md.get_market_metrics(step_idx)
+    price = float(m["close"])
+    atr_est = float(m["atr_ratio"]) * float(price)
+    risk = obs.compute_risk_signals(ex, price, atr_est, step_idx, len(md.df_5m))
 
     account_metrics = {
         "initial_balance": 1000.0,

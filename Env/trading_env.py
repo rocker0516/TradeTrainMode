@@ -234,9 +234,10 @@ class TradingEnvironment(gym.Env):
         # 準備 Observation 需要的各類 metrics
         metrics = self.market_data.get_market_metrics(self.current_step)
         current_price = metrics['close']
+        atr_est = float(metrics.get("atr_ratio", 0.0)) * float(current_price)
         
         risk_signals = self.observer.compute_risk_signals(
-            self.executor, current_price, self.current_step, len(self.market_data.df_5m)
+            self.executor, current_price, atr_est, self.current_step, len(self.market_data.df_5m)
         )
         
         account_metrics = {
@@ -848,7 +849,7 @@ class TradingEnvironment(gym.Env):
         # 我們使用「當下價格」計算風險訊號（含 stop_loss_missing / 距離爆倉 / margin_ratio 等），
         # 並把總 cost 與分項寫入 info，方便訓練端做 Lagrangian 更新與 debug。
         risk_post = self.observer.compute_risk_signals(
-            self.executor, prices.current_price, self.current_step, len(self.market_data.df_5m)
+            self.executor, prices.current_price, prices.atr_est, self.current_step, len(self.market_data.df_5m)
         )
         step_fee_ratio = float(step_fee / self.initial_balance) if self.initial_balance > 0 else 0.0
         

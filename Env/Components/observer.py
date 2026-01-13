@@ -62,7 +62,14 @@ class TradingObserver:
             'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(27,), dtype=np.float32)
         }
 
-    def compute_risk_signals(self, executor: TradeExecutor, current_price: float, step_idx: int, total_steps: int) -> dict:
+    def compute_risk_signals(
+        self,
+        executor: TradeExecutor,
+        current_price: float,
+        atr_est: float,
+        step_idx: int,
+        total_steps: int,
+    ) -> dict:
         """
         計算即時風險指標，包含強平價、距離、保證金率與止損距離。
         """
@@ -75,6 +82,9 @@ class TradingObserver:
                 'abs_gap_pct': 0.0,
                 'margin_ratio': 0.0,
                 'sl_gap_pct': 0.0,
+                # sl_gap_atr：以 ATR 正規化的止損距離（signed；同向為正，越大越安全）
+                'sl_gap_atr': 0.0,
+                'abs_sl_gap_atr': 0.0,
                 'stop_loss_missing': 0.0,
                 'near_liq': False,
                 'near_margin': False,
@@ -107,6 +117,19 @@ class TradingObserver:
             sl_gap_pct = (current_price - stop_price) / current_price
             near_stop = abs(sl_gap_pct) <= stop_warn_pct
 
+        # --- ATR-normalized stop distance (aligns with sl_buf semantics) ---
+        # d_t = |P - SL| / ATR
+        # Here we provide a signed variant so that "safe side" is always positive:
+        # - long:  (P - SL)/ATR
+        # - short: (SL - P)/ATR  (implemented via signed = sign(position))
+        sl_gap_atr = 0.0
+        abs_sl_gap_atr = 0.0
+        atr_est = float(atr_est) if atr_est is not None else 0.0
+        if has_stop and atr_est > 1e-12:
+            signed = 1.0 if size > 0.0 else -1.0
+            sl_gap_atr = signed * ((current_price - stop_price) / atr_est)
+            abs_sl_gap_atr = abs(sl_gap_atr)
+
         stop_loss_missing = float(1.0 if (pos_notional > 0 and not has_stop) else 0.0)
 
         return {
@@ -116,6 +139,8 @@ class TradingObserver:
             'abs_gap_pct': abs_gap_pct,
             'margin_ratio': margin_ratio,
             'sl_gap_pct': sl_gap_pct,
+            'sl_gap_atr': float(sl_gap_atr),
+            'abs_sl_gap_atr': float(abs_sl_gap_atr),
             'stop_loss_missing': stop_loss_missing,
             'near_liq': bool(near_liq),
             'near_margin': bool(near_margin),
@@ -353,7 +378,9 @@ class TradingObserver:
         cost_state[6] = np.clip(risk_signals['gap_pct'], -5.0, 5.0)
         cost_state[7] = np.clip(risk_signals['abs_gap_pct'], 0.0, 5.0)
         cost_state[8] = np.clip(risk_signals['margin_ratio'], 0.0, 5.0)
-        cost_state[9] = np.clip(risk_signals['sl_gap_pct'], -5.0, 5.0)
+        # 止損距離：改用 ATR-normalized（讓 agent 能直接對齊 sl_buf / 波動 regime）
+        # sl_gap_atr > 0 表示在「安全側」且距離止損越遠；接近 0 表示貼近止損。
+        cost_state[9] = np.clip(float(risk_signals.get('sl_gap_atr', 0.0)), -10.0, 10.0)
         cost_state[10] = float(risk_signals['stop_loss_missing'])
         cost_state[11] = float(risk_signals['near_liq'])
         cost_state[12] = float(risk_signals['near_margin'])
