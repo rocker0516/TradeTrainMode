@@ -139,11 +139,19 @@ def _cases() -> List[Case]:
 @pytest.mark.parametrize("case", _cases(), ids=lambda c: c.name)
 def test_feature_shapes_are_fixed_and_safe(case: Case) -> None:
     df_5m, df_1d = _build_case_market(case)
-    md = MarketData(df_5m, df_1d, window_size=32, window_size_1d=10, target_symbol=case.target_symbol)
+    # 測試預設只使用單一 symbol（相容舊行為），但特徵集合可能擴充（例如結構化趨勢/廣度）。
+    md = MarketData(
+        df_5m,
+        df_1d,
+        window_size=32,
+        window_size_1d=10,
+        target_symbol=case.target_symbol,
+        feature_symbols=[case.target_symbol],
+    )
 
-    # 5m 必須固定 14 通道
-    assert md.price_seq_features_dim == 14
-    assert md.cols_5m == list(FeatureTransformer.PRICE_SEQ_COLS)
+    # 5m 必須固定 shape（對於同一組 feature_symbols），且 cols 必須與 transformer 輸出一致
+    assert md.price_seq_features_dim == len(md.cols_5m)
+    assert md.price_seq_features_dim > 0
 
     # 1d 必須固定 11 通道（7 symbol-specific + 4 macro）
     assert md.features_1d_dim == 11
@@ -153,7 +161,7 @@ def test_feature_shapes_are_fixed_and_safe(case: Case) -> None:
     # 任意 step 的序列 shape 必須一致
     seq_5m = md.get_price_seq(40)
     seq_1d = md.get_1d_seq(40, window_size_1d=10)
-    assert seq_5m.shape == (32, 14)
+    assert seq_5m.shape == (32, md.price_seq_features_dim)
     assert seq_1d.shape == (10, 11)
     assert seq_5m.dtype == np.float32
     assert seq_1d.dtype == np.float32
@@ -161,6 +169,44 @@ def test_feature_shapes_are_fixed_and_safe(case: Case) -> None:
     # 不允許 NaN/inf（SAC 會直接爆）
     assert np.isfinite(seq_5m).all()
     assert np.isfinite(seq_1d).all()
+
+
+def test_feature_symbols_expands_5m_dim_but_keeps_shape_fixed() -> None:
+    """
+    驗證：加入多幣 feature_symbols 會擴充 5m 特徵維度（包含跨市場摘要），但輸出仍然固定 shape 且無 NaN/inf。
+    """
+    df_5m = _mk_base_5m_df(n=400)
+    df_1d = _mk_base_1d_df(n=80)
+    # 模擬 multi-symbol 欄位（用同一份基礎資料複製並加前綴）
+    sym_main = "BTCUSDT"
+    alts = ["ETHUSDT", "SOLUSDT", "DOGEUSDT", "1000PEPEUSDT"]
+    df_5m_pref = _prefix(df_5m, symbol=sym_main)
+    for s in alts:
+        df_5m_pref = pd.merge(df_5m_pref, _prefix(df_5m, symbol=s), on="timestamp", how="inner")
+    df_1d_pref = _prefix(df_1d, symbol=sym_main)
+
+    md_single = MarketData(
+        df_5m_pref,
+        df_1d_pref,
+        window_size=64,
+        window_size_1d=10,
+        target_symbol=sym_main,
+        feature_symbols=[sym_main],
+    )
+    md_multi = MarketData(
+        df_5m_pref,
+        df_1d_pref,
+        window_size=64,
+        window_size_1d=10,
+        target_symbol=sym_main,
+        feature_symbols=[sym_main] + alts,
+    )
+
+    assert md_multi.price_seq_features_dim > md_single.price_seq_features_dim
+    seq = md_multi.get_price_seq(100)
+    assert seq.shape == (64, md_multi.price_seq_features_dim)
+    assert seq.dtype == np.float32
+    assert np.isfinite(seq).all()
 
 
 def test_1d_alignment_is_previous_closed_bar_B() -> None:

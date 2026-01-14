@@ -16,12 +16,15 @@ class MarketData:
     - 1d 對齊採用策略 B：上一根已收盤日線（避免日內偷看未收盤資訊）
     """
     def __init__(self, df_5m: pd.DataFrame, df_1d: pd.DataFrame, window_size: int, window_size_1d: int, 
-                 market_state_cols: list[str] = None, target_symbol: str = 'BTCUSDT'):
+                 market_state_cols: list[str] = None, target_symbol: str = 'BTCUSDT', feature_symbols: list[str] | None = None):
         self.df_5m = df_5m.copy()
         self.df_1d = df_1d.copy()
         self.window_size = int(window_size)
         self.window_size_1d = int(window_size_1d)
         self.target_symbol = target_symbol
+        # feature_symbols：決定 5m 跨市場摘要要納入哪些幣（固定順序、固定維度）。
+        # - None 代表只使用 target_symbol（相容舊行為）
+        self.feature_symbols = feature_symbols
         self.feature_lookback = int(max(288, self.window_size))
         self.feature_lookback_1d = int(max(30, self.window_size_1d))
         self._transformer = FeatureTransformer()
@@ -122,6 +125,7 @@ class MarketData:
             atr_ratio_arr=self.atr_ratio_arr,
             rv_ratio_arr=self.rv_ratio_arr,
             z_window=self.feature_lookback,
+            feature_symbols=self.feature_symbols,
         )
         self.features_1d_arr, self.cols_1d = self._transformer.build_1d_features(
             self.df_1d,

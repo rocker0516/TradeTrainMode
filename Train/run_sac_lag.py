@@ -131,6 +131,8 @@ def main() -> None:
         "target_symbol": args.symbol,
         "window_size": TrainConfig.WINDOW_SIZE_5M,
         "window_size_1d": TrainConfig.WINDOW_SIZE_1D,
+        # 固定特徵 symbols：讓 obs 維度包含 ETH/SOL/DOGE/1000PEPE 的跨市場摘要（5m）
+        "feature_symbols": list(TrainConfig.FEATURE_SYMBOLS),
         # 這裡可以覆寫 Env/config.py 的預設值
     }
     

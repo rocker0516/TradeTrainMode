@@ -71,13 +71,16 @@ def test_vecenv_can_stack_dict_observations_without_shape_mismatch(monkeypatch) 
     obs = venv.reset()
 
     # reset 後 obs 已經被 stack 成 batch，驗證關鍵 key shape
-    assert obs["price_seq"].shape == (4, 32, 14)
-    assert obs["price_seq_1d"].shape == (4, 30, 11)
+    # 不要硬編碼特徵維度：feature set 可能擴充（例如加入結構化趨勢 + 跨市場摘要）。
+    seq_5m_dim = int(venv.observation_space["price_seq"].shape[1])
+    seq_1d_dim = int(venv.observation_space["price_seq_1d"].shape[1])
+    assert obs["price_seq"].shape == (4, 32, seq_5m_dim)
+    assert obs["price_seq_1d"].shape == (4, 30, seq_1d_dim)
 
     # step 一次也要能 stack
     actions = np.zeros((4, 1), dtype=np.float32)
     obs2, rewards, dones, infos = venv.step(actions)
-    assert obs2["price_seq"].shape == (4, 32, 14)
-    assert obs2["price_seq_1d"].shape == (4, 30, 11)
+    assert obs2["price_seq"].shape == (4, 32, seq_5m_dim)
+    assert obs2["price_seq_1d"].shape == (4, 30, seq_1d_dim)
 
 

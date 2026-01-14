@@ -5,8 +5,8 @@ SB3（stable-baselines3）用的多輸入觀測編碼器：雙分支 CNN + 向�
 
 為什麼要這樣做？
 - 你的 observation 是 Dict：
-  - price_seq: (window_size, 14)     # 5m 序列（主幹）
-  - price_seq_1d: (window_size_1d, 11)  # 1d 序列（regime 背景）
+  - price_seq: (window_size, F_5m)     # 5m 序列（主幹；F_5m 會隨特徵集合擴充）
+  - price_seq_1d: (window_size_1d, F_1d)  # 1d 序列（regime 背景）
   - account_state/time_state/rhythm_state/cost_state: 向量特徵
 - 我們希望「5m / 1d 使用不同 CNN 設計」：
   - 5m 序列長（288），用稍深一點的 CNN 抽型態
@@ -79,7 +79,7 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
         super().__init__(observation_space, features_dim=int(out_dim))
 
         # ---- 解析 observation_space ----
-        # price_seq: (window, 14)
+        # price_seq: (window, F_5m)
         seq_5m_shape = observation_space.spaces["price_seq"].shape
         seq_1d_shape = observation_space.spaces["price_seq_1d"].shape
         if seq_5m_shape is None or seq_1d_shape is None:

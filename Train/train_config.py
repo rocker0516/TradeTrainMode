@@ -18,6 +18,10 @@ class TrainConfig:
 
     # ---- 基本訓練參數 ----
     SYMBOL: str = "BTCUSDT"
+    # 特徵 symbols（固定順序、固定維度）：
+    # - 用於 5m 跨市場摘要 +（後續可擴充）多幣 1d regime
+    # - 注意：Gym observation_space 必須固定 shape，因此這裡用「固定清單」，而不是隨 Data 目錄動態增減。
+    FEATURE_SYMBOLS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "1000PEPEUSDT")
     TOTAL_TIMESTEPS: int = 30_000_000
     N_ENVS: int = 32
     DEVICE: str = "auto"  # "cuda" / "cpu" / "auto"

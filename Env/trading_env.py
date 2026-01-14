@@ -59,6 +59,9 @@ class TradingEnvironment(gym.Env):
         self.min_position_change = float(kwargs.get("min_position_change", Config.MIN_POSITION_CHANGE))
         self.random_start = kwargs.get('random_start', True)
         self.target_symbol = kwargs.get('target_symbol', 'BTCUSDT') # 預設交易對
+        # 固定的特徵 symbols 清單（決定 5m 跨市場摘要的維度）
+        # - 若不傳，維持相容：只用 target_symbol（但仍會包含主市場結構化/廣度特徵）
+        self.feature_symbols = kwargs.get("feature_symbols", None)
         self.margin_mode = 'isolated'
         self.min_trade_qty = 0.001 
 
@@ -67,7 +70,14 @@ class TradingEnvironment(gym.Env):
 
         # 2. 初始化組件
         # Market Data (傳入兩個 DataFrame，並指定目標交易對)
-        self.market_data = MarketData(self.df_5m, self.df_1d, self.window_size, self.window_size_1d, target_symbol=self.target_symbol)
+        self.market_data = MarketData(
+            self.df_5m,
+            self.df_1d,
+            self.window_size,
+            self.window_size_1d,
+            target_symbol=self.target_symbol,
+            feature_symbols=self.feature_symbols,
+        )
         
         # Observer
         self.observer = TradingObserver(self.window_size, self.window_size_1d, self.market_data)
