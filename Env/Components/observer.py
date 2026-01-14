@@ -10,11 +10,25 @@ class TradingObserver:
     負責構建觀察空間 (Observation Space) 與生成觀察值 (Observation)。
     包含風險指標計算 (Risk Signals)。
     """
-    def __init__(self, window_size: int, window_size_1d: int, market_data: MarketData):
+    def __init__(self, window_size: int, window_size_1d: int, market_data: MarketData, *, obs_dtype: str | np.dtype | None = None):
         self.window_size = window_size
         self.window_size_1d = window_size_1d
         self.price_seq_features_dim = market_data.price_seq_features_dim
         self.features_1d_dim = market_data.features_1d_dim
+
+        # obs dtype（預設採用 Config.OBS_DTYPE）
+        if obs_dtype is None:
+            obs_dtype = getattr(Config, "OBS_DTYPE", "float32")
+        if isinstance(obs_dtype, str):
+            obs_dtype = obs_dtype.lower().strip()
+            if obs_dtype == "float16":
+                self.obs_dtype = np.float16
+            elif obs_dtype == "float32":
+                self.obs_dtype = np.float32
+            else:
+                raise ValueError(f"Unsupported obs_dtype: {obs_dtype}")
+        else:
+            self.obs_dtype = np.dtype(obs_dtype)
         
         # 建立各個子空間
         market_space = self._build_market_space()
@@ -35,31 +49,31 @@ class TradingObserver:
                 low=-np.inf, 
                 high=np.inf, 
                 shape=(self.window_size, self.price_seq_features_dim), 
-                dtype=np.float32
+                dtype=self.obs_dtype
             ),
             'price_seq_1d': spaces.Box(
                 low=-np.inf, 
                 high=np.inf, 
                 shape=(self.window_size_1d, self.features_1d_dim), 
-                dtype=np.float32
+                dtype=self.obs_dtype
             )
         }
 
     def _build_account_space(self) -> dict:
         """定義帳戶狀態相關的觀察空間"""
         return {
-            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(27,), dtype=np.float32)
+            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(27,), dtype=self.obs_dtype)
         }
 
     def _build_context_space(self) -> dict:
         """定義環境狀態、時間與成本風險相關的觀察空間"""
         return {
-            'time_state': spaces.Box(low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32),
-            'rhythm_state': spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
+            'time_state': spaces.Box(low=-np.inf, high=np.inf, shape=(7,), dtype=self.obs_dtype),
+            'rhythm_state': spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=self.obs_dtype),
             # cost_state (27):
             # 0~18: 原有成本/風險/預測效果特徵
             # 19~26: 行為「偏差揭露」特徵（讓 agent 知道 raw action 是否被覆寫/限幅/未成交）
-            'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(27,), dtype=np.float32)
+            'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(27,), dtype=self.obs_dtype)
         }
 
     def compute_risk_signals(
@@ -175,17 +189,19 @@ class TradingObserver:
             atr_ratio=atr_ratio,
         )
         
-        return {
-            **market_obs,
-            **account_obs,
-            **context_obs
-        }
+        out = {**market_obs, **account_obs, **context_obs}
+        # 確保所有 key dtype 與 observation_space 一致（預設 float16 以省 replay buffer RAM）
+        if self.obs_dtype != np.float32:
+            for k, v in list(out.items()):
+                if isinstance(v, np.ndarray) and v.dtype != self.obs_dtype:
+                    out[k] = v.astype(self.obs_dtype, copy=False)
+        return out
 
     def _get_market_obs(self, step_idx: int, market_data: MarketData) -> dict:
         """生成市場數據觀察值"""
         return {
-            'price_seq': market_data.get_price_seq(step_idx),
-            'price_seq_1d': market_data.get_1d_seq(step_idx, self.window_size_1d)
+            'price_seq': market_data.get_price_seq(step_idx).astype(self.obs_dtype, copy=False),
+            'price_seq_1d': market_data.get_1d_seq(step_idx, self.window_size_1d).astype(self.obs_dtype, copy=False),
         }
 
     def _get_account_obs(
@@ -321,7 +337,7 @@ class TradingObserver:
             liq_distance_pct,
             stop_distance_pct,
             fee_rate_pct,
-        ], dtype=np.float32)
+        ], dtype=self.obs_dtype)
         
         return {'account_state': account_state}
 
@@ -340,7 +356,7 @@ class TradingObserver:
         """生成環境與成本狀態觀察值"""
         
         # --- Time State (7) ---
-        time_state = np.zeros(7, dtype=np.float32)
+        time_state = np.zeros(7, dtype=self.obs_dtype)
         hour = market_data.hour_arr[step_idx]
         dow = market_data.dow_arr[step_idx]
         is_weekend = market_data.is_weekend_arr[step_idx]
@@ -355,14 +371,14 @@ class TradingObserver:
         time_state[6] = is_weekend
         
         # --- Rhythm State (2) ---
-        rhythm_state = np.zeros(2, dtype=np.float32)
+        rhythm_state = np.zeros(2, dtype=self.obs_dtype)
         rhythm_state[0] = float(atr_ratio)
         # rv_ratio 不必再從 metrics 讀（已在 env 的 market_data 裡快取），避免重複 get_market_metrics
         rv_ratio = float(market_data.rv_ratio_arr[step_idx]) if step_idx < len(market_data.rv_ratio_arr) else 0.0
         rhythm_state[1] = float(np.clip(rv_ratio, 0.0, 10.0))
         
         # --- Cost State (27) ---
-        cost_state = np.zeros(27, dtype=np.float32)
+        cost_state = np.zeros(27, dtype=self.obs_dtype)
         last_step_fee = account_metrics.get('last_step_fee', 0.0)
         rolling_fee_sum = account_metrics.get('rolling_fee_sum', 0.0)
         fee_limit_ratio = account_metrics.get('fee_limit_ratio', 1.0)

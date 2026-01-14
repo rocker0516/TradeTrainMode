@@ -112,6 +112,7 @@ def test_cnn_price_seq_features_are_normalized_and_bounded(symbols: Tuple[str, .
     feats = md.features_5m_arr
     cols = md.cols_5m
 
+    # MarketData 內部使用 float32；env 輸出 obs 會轉成 float16 以省 RAM
     assert feats.dtype == np.float32
     assert feats.shape[0] == len(df_5m)
     assert feats.shape[1] == len(cols)

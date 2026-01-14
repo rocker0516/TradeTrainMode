@@ -102,5 +102,12 @@ class Config:
     # 舊版程式/測試可能會期待此屬性存在；目前 MarketData 會自行從 df 欄位推導 features。
     MARKET_STATE_COLS: list[str] = []
 
+    # ---- Observation dtype（訓練 RAM 優化）----
+    # 注意：
+    # - Gym/SB3 需要 observation_space dtype 與實際 obs dtype 一致。
+    # - 為了降低 replay buffer RAM，我們允許輸出 float16 obs；
+    #   訓練端 feature extractor 會將 tensor cast 回 float32 做卷積/MLP，維持穩定。
+    OBS_DTYPE: str = "float16"  # "float16" | "float32"
+
     # ---- 其他（測試/相容性用）----
     TURNOVER_NOTIONAL_SCALE: float = 1.0

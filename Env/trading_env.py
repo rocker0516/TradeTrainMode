@@ -80,7 +80,8 @@ class TradingEnvironment(gym.Env):
         )
         
         # Observer
-        self.observer = TradingObserver(self.window_size, self.window_size_1d, self.market_data)
+        obs_dtype = kwargs.get("obs_dtype", getattr(Config, "OBS_DTYPE", "float32"))
+        self.observer = TradingObserver(self.window_size, self.window_size_1d, self.market_data, obs_dtype=obs_dtype)
         self.observation_space = self.observer.observation_space
         
         # Action Processor

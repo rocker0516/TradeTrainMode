@@ -105,6 +105,7 @@ def test_cnn_5m_features_are_normalized_on_real_data_head(symbols: Tuple[str, ..
     cols = md.cols_5m
     idx = _col_index(cols)
 
+    # MarketData 內部使用 float32；env 輸出 obs 會轉成 float16 以省 RAM
     assert feats.dtype == np.float32
     assert feats.shape[0] == len(df_5m)
     assert feats.shape[1] == len(cols)

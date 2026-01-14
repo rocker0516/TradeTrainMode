@@ -16,6 +16,9 @@ def test_market_data_sequences_have_expected_shapes(make_synth_market) -> None:
     seq_1d = md.get_1d_seq(10, window_size_1d=7)
     assert seq_5m.shape == (10, md.price_seq_features_dim)
     assert seq_1d.shape == (7, md.features_1d_dim)
+    # MarketData 內部特徵矩陣用 float32（計算穩定）；env 輸出 obs 可能轉成 float16 以省 RAM
+    assert seq_5m.dtype == np.float32
+    assert seq_1d.dtype == np.float32
 
     m = md.get_market_metrics(10)
     assert set(m.keys()) >= {"close", "high", "low", "atr_ratio", "rv_ratio", "trend_score"}
@@ -51,6 +54,7 @@ def test_observer_risk_signals_are_zero_when_flat(make_synth_market) -> None:
 def test_observer_observation_shapes(make_synth_market) -> None:
     market = make_synth_market(n_5m=120, n_1d=50)
     md = MarketData(market.df_5m, market.df_1d, window_size=10, window_size_1d=7, target_symbol="BTCUSDT")
+    # Observer 預設使用 Config.OBS_DTYPE（現為 float16）
     obs = TradingObserver(window_size=10, window_size_1d=7, market_data=md)
 
     ex = TradeExecutor(
@@ -115,6 +119,9 @@ def test_observer_observation_shapes(make_synth_market) -> None:
     assert out["time_state"].shape == (7,)
     assert out["rhythm_state"].shape == (2,)
     assert out["cost_state"].shape == (27,)
+    # dtype 必須與 observation_space 一致（預設 float16）
+    assert out["price_seq"].dtype == obs.observation_space["price_seq"].dtype
+    assert out["account_state"].dtype == obs.observation_space["account_state"].dtype
 
 
 def test_reward_calculator_log_return_only() -> None:

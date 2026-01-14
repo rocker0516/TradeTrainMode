@@ -76,11 +76,14 @@ def test_vecenv_can_stack_dict_observations_without_shape_mismatch(monkeypatch) 
     seq_1d_dim = int(venv.observation_space["price_seq_1d"].shape[1])
     assert obs["price_seq"].shape == (4, 32, seq_5m_dim)
     assert obs["price_seq_1d"].shape == (4, 30, seq_1d_dim)
+    # obs dtype 應與 observation_space 一致（預設 float16）
+    assert obs["price_seq"].dtype == venv.observation_space["price_seq"].dtype
 
     # step 一次也要能 stack
     actions = np.zeros((4, 1), dtype=np.float32)
     obs2, rewards, dones, infos = venv.step(actions)
     assert obs2["price_seq"].shape == (4, 32, seq_5m_dim)
     assert obs2["price_seq_1d"].shape == (4, 30, seq_1d_dim)
+    assert obs2["price_seq"].dtype == venv.observation_space["price_seq"].dtype
 
 
