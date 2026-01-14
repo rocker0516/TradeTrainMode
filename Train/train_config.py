@@ -23,7 +23,7 @@ class TrainConfig:
     # - 注意：Gym observation_space 必須固定 shape，因此這裡用「固定清單」，而不是隨 Data 目錄動態增減。
     FEATURE_SYMBOLS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "1000PEPEUSDT")
     TOTAL_TIMESTEPS: int = 30_000_000
-    N_ENVS: int = 32
+    N_ENVS: int = 64
     DEVICE: str = "auto"  # "cuda" / "cpu" / "auto"
 
     # ---- Lagrangian / 約束 ----
@@ -48,7 +48,7 @@ class TrainConfig:
     # ---- SB3 SAC 超參數 ----
     LEARNING_RATE: float = 1e-4
     BUFFER_SIZE: int = 400_000
-    BATCH_SIZE: int = 256
+    BATCH_SIZE: int = 128
     ENT_COEF: str = "auto"
     TRAIN_FREQ: int = 1
     GRADIENT_STEPS: int = 1
@@ -72,8 +72,8 @@ class TrainConfig:
     MIN_POSITION_CHANGE: float = 0.1
 
     # ---- 環境參數 ----
-    WINDOW_SIZE_5M: int = 288 * 3
-    WINDOW_SIZE_1D: int = 21
+    WINDOW_SIZE_5M: int = 288 * 2
+    WINDOW_SIZE_1D: int = 7
 
     # ---- Log / Checkpoint ----
     TENSORBOARD_LOG_DIR: str = "logs/sac_lag_tb"

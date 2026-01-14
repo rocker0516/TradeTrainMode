@@ -26,6 +26,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 
 from Env.trading_env import TradingEnvironment
 from Env.wrappers import ActionRepeatWrapper, ActionClipWrapper
+from Train.optimized_dict_replay_buffer import OptimizedDictReplayBuffer
 from Train.sb3_cnn_policy import DualCnnFeatureExtractor
 from Train.lagrangian import (
     SharedLagrangianController,
@@ -164,6 +165,13 @@ def main() -> None:
         policy_kwargs=policy_kwargs,
         learning_rate=float(TrainConfig.LEARNING_RATE),
         buffer_size=int(TrainConfig.BUFFER_SIZE),  # 經驗回放池大小
+        # SB3 memory optimization: reduce replay buffer RAM
+        # - Avoid storing next_obs in a separate buffer (saves significant memory for large Dict obs)
+        optimize_memory_usage=True,
+        replay_buffer_class=OptimizedDictReplayBuffer,
+        # Required when optimize_memory_usage=True: disable timeout-specific handling.
+        # (Same constraint as SB3 ReplayBuffer; avoids known bug with timeouts + optimized storage)
+        replay_buffer_kwargs={"handle_timeout_termination": False},
         batch_size=int(TrainConfig.BATCH_SIZE),
         ent_coef=TrainConfig.ENT_COEF,
         train_freq=int(TrainConfig.TRAIN_FREQ),
