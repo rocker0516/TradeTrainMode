@@ -46,18 +46,18 @@ class TrainConfig:
     REWARD_SCALE: float = 1.0 # 獎勵尺度 1.0 代表獎勵不放大
 
     # ---- SB3 SAC 超參數 ----
-    LEARNING_RATE: float = 3e-4
-    BUFFER_SIZE: int = 300_000
-    BATCH_SIZE: int = 64
+    LEARNING_RATE: float = 1e-4
+    BUFFER_SIZE: int = 400_000
+    BATCH_SIZE: int = 256
     ENT_COEF: str = "auto"
     TRAIN_FREQ: int = 1
     GRADIENT_STEPS: int = 1
 
     # ---- Policy / 網路結構 ----
-    EMB_5M: int = 128
-    EMB_1D: int = 64
+    EMB_5M: int = 256
+    EMB_1D: int = 128
     EMB_VEC: int = 128
-    OUT_DIM: int = 256
+    OUT_DIM: int = 384
     PI_ARCH: tuple[int, int] = (256, 256)
     QF_ARCH: tuple[int, int] = (256, 256)
 
@@ -69,7 +69,7 @@ class TrainConfig:
     # 用來限制 agent 的「目標持倉百分比」在 [-MAX_POSITION_PCT, +MAX_POSITION_PCT]。
     # 優先順序：在 run_sac_lag 訓練流程中，此值會「覆蓋」Env.config.Config.MAX_POSITION_PCT（因為此處是顯式傳參）。
     MAX_POSITION_PCT: float = 0.5
-    MIN_POSITION_CHANGE: float = 0.2
+    MIN_POSITION_CHANGE: float = 0.1
 
     # ---- 環境參數 ----
     WINDOW_SIZE_5M: int = 288 * 3

@@ -155,10 +155,25 @@ class TradingObserver:
                         risk_signals: dict,
                         last_action_effects: dict
                         ) -> dict:
-        
+        # 重要：避免同一步重複呼叫 get_market_metrics（以前 account/context 各呼叫一次，context 甚至呼叫兩次）
+        metrics = market_data.get_market_metrics(step_idx)
+        current_price = float(metrics["close"])
+        atr_ratio = float(metrics.get("atr_ratio", 0.0))
+
         market_obs = self._get_market_obs(step_idx, market_data)
-        account_obs = self._get_account_obs(step_idx, executor, market_data, account_metrics, risk_signals)
-        context_obs = self._get_context_obs(step_idx, executor, market_data, account_metrics, risk_signals, last_action_effects)
+        account_obs = self._get_account_obs(
+            step_idx, executor, market_data, account_metrics, risk_signals, current_price=current_price, atr_ratio=atr_ratio
+        )
+        context_obs = self._get_context_obs(
+            step_idx,
+            executor,
+            market_data,
+            account_metrics,
+            risk_signals,
+            last_action_effects,
+            current_price=current_price,
+            atr_ratio=atr_ratio,
+        )
         
         return {
             **market_obs,
@@ -173,11 +188,18 @@ class TradingObserver:
             'price_seq_1d': market_data.get_1d_seq(step_idx, self.window_size_1d)
         }
 
-    def _get_account_obs(self, step_idx: int, executor: TradeExecutor, market_data: MarketData, account_metrics: dict, risk_signals: dict) -> dict:
+    def _get_account_obs(
+        self,
+        step_idx: int,
+        executor: TradeExecutor,
+        market_data: MarketData,
+        account_metrics: dict,
+        risk_signals: dict,
+        *,
+        current_price: float,
+        atr_ratio: float,
+    ) -> dict:
         """生成帳戶狀態觀察值"""
-        metrics = market_data.get_market_metrics(step_idx)
-        current_price = metrics['close']
-        atr_ratio = metrics['atr_ratio']
         
         initial_balance = account_metrics['initial_balance']
         max_equity_so_far = account_metrics['max_equity_so_far']
@@ -303,10 +325,19 @@ class TradingObserver:
         
         return {'account_state': account_state}
 
-    def _get_context_obs(self, step_idx: int, executor: TradeExecutor, market_data: MarketData, account_metrics: dict, risk_signals: dict, last_action_effects: dict) -> dict:
+    def _get_context_obs(
+        self,
+        step_idx: int,
+        executor: TradeExecutor,
+        market_data: MarketData,
+        account_metrics: dict,
+        risk_signals: dict,
+        last_action_effects: dict,
+        *,
+        current_price: float,
+        atr_ratio: float,
+    ) -> dict:
         """生成環境與成本狀態觀察值"""
-        metrics = market_data.get_market_metrics(step_idx)
-        atr_ratio = metrics['atr_ratio']
         
         # --- Time State (7) ---
         time_state = np.zeros(7, dtype=np.float32)
@@ -326,7 +357,9 @@ class TradingObserver:
         # --- Rhythm State (2) ---
         rhythm_state = np.zeros(2, dtype=np.float32)
         rhythm_state[0] = float(atr_ratio)
-        rhythm_state[1] = float(np.clip(metrics['rv_ratio'], 0.0, 10.0))
+        # rv_ratio 不必再從 metrics 讀（已在 env 的 market_data 裡快取），避免重複 get_market_metrics
+        rv_ratio = float(market_data.rv_ratio_arr[step_idx]) if step_idx < len(market_data.rv_ratio_arr) else 0.0
+        rhythm_state[1] = float(np.clip(rv_ratio, 0.0, 10.0))
         
         # --- Cost State (27) ---
         cost_state = np.zeros(27, dtype=np.float32)
@@ -337,8 +370,6 @@ class TradingObserver:
         
         # Need equity and pos_notional again here, or pass it? 
         # For simplicity recalculate (cheap)
-        metrics = market_data.get_market_metrics(step_idx)
-        current_price = metrics['close']
         equity = executor.equity(current_price)
         size = executor.position.size
         pos_notional = abs(size) * current_price
