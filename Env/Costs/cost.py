@@ -50,9 +50,10 @@ class CostCalculator:
         Returns:
             Dict:
             - cost: 總正規化成本 (供單一 Lambda 使用)
-            - cost_risk: 死亡成本 (1.0 or 0.0)
+            - cost_risk: 死亡成本 (1.0 or 0.0)（不包含止損事件）
             - cost_fric: 摩擦成本 (Fee / Equity)
             - cost_sl_buf: 止損安全緩衝成本（密集、0~1、ATR 無量綱）
+            - cost_sl_event: 止損事件成本（事件型；獨立成本線）
             - cost_breakdown: 詳細分項
         """
         # 防除以零保護：使用 min_balance 或極小值做為分母下限
@@ -63,6 +64,21 @@ class CostCalculator:
         # 定義：發生死亡事件 = 100% 權益損失風險實現 -> Cost = 1.0
         is_dead = liq_triggered or (equity <= min_balance)
         c_death = 1.0 if is_dead else 0.0
+
+        # 1b. 止損事件成本（事件型；獨立成本線，不屬於 risk/sl_buf）
+        # 定義：若本 step 觸發止損，給一個固定成本（0~1）。
+        # 注意：若本 step 同時是死亡事件，death_cost 已主導；此事件成本在該步視為 0（避免重複懲罰）。
+        stop_loss_triggered = bool(kwargs.get("stop_loss_triggered", False))
+        stop_loss_event_cost = kwargs.get("stop_loss_event_cost", 0.0)
+        try:
+            stop_loss_event_cost = float(stop_loss_event_cost)
+        except (TypeError, ValueError):
+            stop_loss_event_cost = 0.0
+        stop_loss_event_cost = float(min(1.0, max(0.0, stop_loss_event_cost)))
+        c_stop_event = stop_loss_event_cost if (stop_loss_triggered and not is_dead) else 0.0
+
+        # 風險通道：只代表死亡事件（你要求「止損獨立出來不能涵蓋在 risk」）。
+        c_risk = float(c_death)
 
         # 2. 摩擦/換手成本 (c_fric)
         # 定義：手續費佔當前權益的比例
@@ -108,15 +124,18 @@ class CostCalculator:
         # 總成本 (若訓練端只支援單一 cost channel，則相加)
         # 通常死亡成本 (1.0) 會遠大於摩擦成本 (e.g. 0.001)，
         # 所以直接相加在數學上是合理的 (死亡是主導項)。
-        total_cost = c_death + c_fric + c_sl_buf
+        # 注意：stop_loss_event_cost 不屬於 sl_buf，因此總成本要把事件成本也加進去。
+        total_cost = c_death + c_fric + c_sl_buf + c_stop_event
 
         return {
             "cost": float(total_cost),       # 總和 (供 Env.info['cost'] 使用)
-            "cost_risk": float(c_death),     # 獨立通道 (供多 Lambda 使用)
+            "cost_risk": float(c_risk),      # 獨立通道 (供多 Lambda 使用)
             "cost_fric": float(c_fric),      # 獨立通道 (供多 Lambda 使用)
             "cost_sl_buf": float(c_sl_buf),  # 獨立通道 (供多 Lambda 使用)
+            "cost_sl_event": float(c_stop_event),  # 獨立通道 (供多 Lambda 使用)
             "cost_breakdown": {
                 "death_cost": float(c_death),
+                "stop_loss_event_cost": float(c_stop_event),
                 "fric_cost": float(c_fric),
                 "sl_buf_cost": float(sl_buf_cost),
                 "stop_missing_cost": float(stop_missing_cost),

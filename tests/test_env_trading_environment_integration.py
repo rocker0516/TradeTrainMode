@@ -258,12 +258,13 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
             "cost_risk",
             "cost_fric",
             "cost_sl_buf",
+            "cost_sl_event",
             "cost_breakdown",
         ):
             assert k in info
         assert isinstance(info["cost_breakdown"], dict)
         # 核心分項 key
-        for k in ("death_cost", "fric_cost", "sl_buf_cost", "stop_missing_cost"):
+        for k in ("death_cost", "stop_loss_event_cost", "fric_cost", "sl_buf_cost", "stop_missing_cost"):
             assert k in info["cost_breakdown"]
 
     # --- position checks ---

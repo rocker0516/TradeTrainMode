@@ -227,3 +227,59 @@ def test_trade_executor_liquidation_price_is_non_negative(margin_mode: str) -> N
     assert math.isfinite(liq)
 
 
+def test_trade_executor_isolated_used_margin_tracks_entry_after_adding_at_lower_price() -> None:
+    """
+    isolated 下：同向加倉後 used_margin 應與「平均 entry」一致。
+
+    這是用來防止一個常見 bug：
+    - 若用 current_price 估 required margin，當價格大幅下跌時，
+      可能出現「加倉後 required_margin 反而變小」=> additional_margin=0，
+      造成 used_margin 被低估，進而讓 liq_price 計算失真（常見為 long 的 liq 跑到 entry 之上）。
+    """
+    ex = TradeExecutor(
+        initial_balance=1000.0,
+        fee_rate=0.0,
+        leverage=10.0,
+        min_trade_qty=0.001,
+        maintenance_margin_rate=0.005,
+        margin_mode="isolated",
+        stop_loss_atr=0.0,
+        stop_loss_liq_buffer_pct=0.0,
+        min_position_change=0.0,
+    )
+
+    # Step1: 高價少量開多
+    ex.execute(
+        position_percent=0.05,
+        current_price=100.0,
+        high=101.0,
+        low=99.0,
+        equity=ex.equity(100.0),
+        atr=0.0,
+        risk_base=1000.0,
+    )
+    size1 = float(ex.position.size)
+    entry1 = float(ex.position.entry_price)
+    assert size1 > 0.0
+    assert entry1 == pytest.approx(100.0, abs=1e-9)
+
+    # Step2: 價格下跌但仍高於強平價，再加碼（同向）
+    # - 對 leverage=10 / mmr=0.005 而言，long 的 liq 約在 entry*0.9045
+    # - 這裡選 current_price=91、low=90.6（> liq），確保不會在 step 開頭就被強平平倉。
+    ex.execute(
+        # 讓 target_size 只比原本大一點點（同向加碼）
+        position_percent=0.04732,
+        current_price=91.0,
+        high=91.2,
+        low=90.6,
+        equity=ex.equity(91.0),
+        atr=0.0,
+        risk_base=1000.0,
+    )
+
+    assert ex.position.size > size1
+    assert ex.position.entry_price > 0.0
+    expected_used = abs(float(ex.position.size)) * float(ex.position.entry_price) / float(ex.leverage)
+    assert ex.used_margin == pytest.approx(expected_used, rel=0, abs=1e-6)
+
+

@@ -16,7 +16,7 @@ class Config:
     """交易環境的預設參數集合（類似常數容器）。"""
 
     # ---- 基本資金與交易成本 ----
-    INITIAL_BALANCE: float = 10000.0
+    INITIAL_BALANCE: float = 1000.0
     TRANSACTION_FEE: float = 0.01  # (%) 手續費百分比（例如 0.04 代表 0.04%）
 
     # ---- 視窗大小 ----
@@ -45,7 +45,7 @@ class Config:
     #   （訓練端建立 wrapper 時顯式傳參），因此訓練端優先。
     MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（-P~P）0.8 代表 80%
     # ActionRepeatWrapper：降低決策頻率（Frame Skip）
-    ACTION_REPEAT: int = 1
+    ACTION_REPEAT: int = 3
 
     # ---- 手續費限制 ----
     FEE_LIMIT_ENABLED: bool = False
@@ -60,6 +60,15 @@ class Config:
     STOP_LOSS_ATR: float = 2
     STOP_LOSS_LIQ_BUFFER_PCT: float = 0.2 # 止損相對強平價的安全緩衝（比例） 0.2 代表 20%
     STOP_LOSS_COOLDOWN_STEPS: int = 30 / 5 # 止損冷卻步數
+    # 止損事件成本（事件型，非密集）：當本 step 觸發止損時，額外給一個固定成本（0~1）。
+    #
+    # 語義：
+    # - sl_buf：只罰「持倉時貼近止損卻不撤」（密集型）
+    # - stop_loss_event_cost：罰「真的被止損打掉」（事件型）
+    #
+    # 建議：
+    # - 先用小值（例如 0.01~0.05），避免其主導 reward；再看統計調整。
+    STOP_LOSS_EVENT_COST: float = 0.02 # 0.02 代表 2%
 
     # ---- Stop-Buffer Cost（止損安全緩衝成本線）----
     # 目標：不是罰虧損，而是罰「你把倉位放在快撞止損的地方還不撤」。
@@ -78,12 +87,12 @@ class Config:
     # 你選擇「更近一點」的版本（更不干擾主線）：
     # - d_min=0.3：只有當「距離止損 < 0.3 ATR」才開始被罰 
     # - d_scale=0.3：罰得較溫和;越大代表 cost 變化越慢；理論上要到 d_t≈0（幾乎撞到止損）才會接近 cost=1 
-    STOP_BUFFER_D_MIN: float = 0.7
-    STOP_BUFFER_D_SCALE: float = 0.8
+    STOP_BUFFER_D_MIN: float = 0.4
+    STOP_BUFFER_D_SCALE: float = 0.6
     
     # 這些閾值保留供 Observation 特徵使用 (near_liq, near_stop)，但不參與 Cost 計算
     LIQUIDATION_WARN_PCT: float = 0.3 # 清算警告比例  0.05 代表 5%
-    STOP_LOSS_WARN_PCT: float = 0.2 # 止損警告比例 0.1 代表 10%
+    STOP_LOSS_WARN_PCT: float = 0.6 # 止損警告比例 0.1 代表 10%
 
     # ---- Cost (Lagrangian Constraints) - REFACTORED ----
     # 舊的固定權重已移除 (COST_W_LIQ_EVENT 等)。

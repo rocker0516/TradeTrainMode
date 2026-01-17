@@ -195,6 +195,14 @@ class TradingObserver:
             for k, v in list(out.items()):
                 if isinstance(v, np.ndarray) and v.dtype != self.obs_dtype:
                     out[k] = v.astype(self.obs_dtype, copy=False)
+
+        # 防呆：任何觀測出現 NaN/Inf 都可能讓 policy 輸出 NaN 而直接炸訓練（你 terminal 的錯誤即屬此類）。
+        # 這裡做「最後一道」清洗，不改變 shape，只確保數值是 finite。
+        for k, v in list(out.items()):
+            if isinstance(v, np.ndarray):
+                # inplace 轉換：inf/-inf/nan -> 0
+                # 注意：此步驟應避免產生額外 copy（copy=False）。
+                out[k] = np.nan_to_num(v, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         return out
 
     def _get_market_obs(self, step_idx: int, market_data: MarketData) -> dict:
@@ -434,11 +442,34 @@ class TradingObserver:
         cost_state[13] = float(risk_signals['near_stop'])
         
         effects = last_action_effects
-        cost_state[14] = float(effects.get("expected_fee_if_trade", 0.0))
-        cost_state[15] = float(effects.get("predicted_used_margin_after_action", 0.0))
-        cost_state[16] = float(effects.get("predicted_available_balance_after_action", 0.0))
-        cost_state[17] = float(effects.get("predicted_liq_distance_after_action", 0.0))
-        cost_state[18] = float(effects.get("predicted_stop_distance_after_action", 0.0))
+
+        # ---- Action Effects (5) ----
+        # 重要：這些欄位若直接用「USDT 絕對值」在 float16 下很容易 overflow -> inf，
+        # 進而讓 policy / replay buffer 出現 NaN，導致 SB3 actor 直接崩潰。
+        # 因此改用「相對權益比例」表示，並做有限值/clip 保護。
+        safe_equity = float(max(float(equity), 1e-8))
+
+        def _safe_ratio(x: object, *, denom: float, low: float, high: float) -> float:
+            """將任意輸入轉成 (x/denom) 並 clip，若不可轉或非有限值則回傳 0。"""
+            try:
+                v = float(x) / float(denom)
+            except (TypeError, ValueError, ZeroDivisionError):
+                return 0.0
+            if not np.isfinite(v):
+                return 0.0
+            return float(np.clip(v, float(low), float(high)))
+
+        # 14) expected_fee_if_trade_ratio: 預估手續費 / equity（0~0.2）
+        cost_state[14] = _safe_ratio(effects.get("expected_fee_if_trade", 0.0), denom=safe_equity, low=0.0, high=0.2)
+        # 15) predicted_used_margin_ratio: used_margin / equity（0~10）
+        cost_state[15] = _safe_ratio(effects.get("predicted_used_margin_after_action", 0.0), denom=safe_equity, low=0.0, high=10.0)
+        # 16) predicted_available_balance_ratio: available_balance / equity（-10~10）
+        cost_state[16] = _safe_ratio(effects.get("predicted_available_balance_after_action", 0.0), denom=safe_equity, low=-10.0, high=10.0)
+
+        # 17) predicted_liq_distance_after_action: 已在 env 端做過 clip，但仍做 finite/clip 防呆（0~5）
+        cost_state[17] = _safe_ratio(effects.get("predicted_liq_distance_after_action", 0.0), denom=1.0, low=0.0, high=5.0)
+        # 18) predicted_stop_distance_after_action: 已在 env 端做過 clip，但仍做 finite/clip 防呆（0~5）
+        cost_state[18] = _safe_ratio(effects.get("predicted_stop_distance_after_action", 0.0), denom=1.0, low=0.0, high=5.0)
 
         # ---- Action vs Execution discrepancy (8) ----
         # 19) cooldown_remaining_norm: 下一步是否會強制 action=0（0~1）

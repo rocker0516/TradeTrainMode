@@ -67,6 +67,7 @@ def test_action_repeat_wrapper_accumulates_cost_channels_and_breakdown() -> None
                 "cost_risk": 0.1,
                 "cost_fric": 0.2,
                 "cost_sl_buf": 0.3,
+                "cost_sl_event": 0.4,
                 "cost_breakdown": {"death_cost": 0.1, "fric_cost": 0.2, "sl_buf_cost": 0.3},
             }
             terminated = False
@@ -83,6 +84,7 @@ def test_action_repeat_wrapper_accumulates_cost_channels_and_breakdown() -> None
     assert info["cost_risk"] == pytest.approx(0.3)
     assert info["cost_fric"] == pytest.approx(0.6)
     assert info["cost_sl_buf"] == pytest.approx(0.9)
+    assert info["cost_sl_event"] == pytest.approx(1.2)
     assert isinstance(info.get("cost_breakdown"), dict)
     assert info["cost_breakdown"]["death_cost"] == pytest.approx(0.3)
     assert info["cost_breakdown"]["fric_cost"] == pytest.approx(0.6)

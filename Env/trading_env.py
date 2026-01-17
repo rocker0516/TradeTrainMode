@@ -879,6 +879,7 @@ class TradingEnvironment(gym.Env):
             current_dd=float(current_dd),
             risk_signals=risk_post,
             stop_loss_triggered=bool(stop_loss_triggered),
+            stop_loss_event_cost=float(getattr(Config, "STOP_LOSS_EVENT_COST", 0.0)),
             # Stop-Buffer Cost inputs
             has_position=bool(abs(float(new_size)) > 1e-8),
             current_price=float(prices.current_price),
@@ -919,6 +920,8 @@ class TradingEnvironment(gym.Env):
             info["cost_fric"] = float(cost_out["cost_fric"])
         if "cost_sl_buf" in cost_out:
             info["cost_sl_buf"] = float(cost_out["cost_sl_buf"])
+        if "cost_sl_event" in cost_out:
+            info["cost_sl_event"] = float(cost_out["cost_sl_event"])
         info["cost_breakdown"] = dict(cost_out["cost_breakdown"])
 
         log_payload = self._build_log_payload(

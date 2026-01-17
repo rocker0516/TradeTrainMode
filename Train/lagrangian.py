@@ -407,6 +407,7 @@ class LagrangianRewardWrapper(gym.Wrapper):
             # penalty breakdown：依元件對應通道（未知元件 -> 使用 λ 總和）
             component_to_channel = {
                 "death_cost": "risk",
+                "stop_loss_event_cost": "sl_event",
                 "fric_cost": "fric",
                 "sl_buf_cost": "sl_buf",
                 "stop_missing_cost": "sl_buf",
@@ -753,10 +754,19 @@ class LagrangianCallback(BaseCallback):
                 return f"{v:.{sci}e}"
             return f"{v:.{fixed}f}"
 
-        # λ 的顯示用更高門檻切到科學記號：
-        # 目的：避免 0.000008 這種「看起來像 0」的數字不夠醒目。
+        # λ 一律用科學記號（你要求：明確顯示 COST LINES 的 Lambdas 數值）。
         def _fmt_lambda(x: float) -> str:
-            return _fmt_small(x, fixed=6, sci=2, sci_threshold=1e-4)
+            try:
+                return f"{float(x):.3e}"
+            except (TypeError, ValueError):
+                return str(x)
+
+        # COST LINES 裡的 avg/limit 也一律用科學記號（避免 0.000100 看起來不夠醒目）。
+        def _fmt_cost_scalar(x: float) -> str:
+            try:
+                return f"{float(x):.3e}"
+            except (TypeError, ValueError):
+                return str(x)
 
         print("\n" + "="*60)
         print(
@@ -799,18 +809,18 @@ class LagrangianCallback(BaseCallback):
                 # death_cost 通常只在回合終止那一步 =1，因此即使 death rate 很高，短視窗內也可能出現 avg=0。
                 death_rate_ep = float(avg_breakdown.get("death_cost", 0.0)) * 100.0
                 print(
-                    f"  - {k:<8} λ={_fmt_lambda(lams.get(k, 0.0))}  limit={_fmt_small(limit)}  avg={_fmt_small(avg_c)}  "
-                    f"death_rate_ep={death_rate_ep:6.2f}%  "
+                    f"  - {k:<8} λ={_fmt_lambda(lams.get(k, 0.0))}  limit={_fmt_cost_scalar(limit)}  avg={_fmt_cost_scalar(avg_c)}  "
+                   # f"death_rate_ep={death_rate_ep:6.2f}%  "
                     f"[{'OK' if vio <= 0 else 'VIOLATION'}]"
                 )
             # 仍顯示 aggregated cost（方便對照舊圖表）
-            print(f"  Avg Cost (Per Step)         : {_fmt_small(avg_cost_per_step)}  [aggregate]")
+            print(f"  Avg Cost (Per Step)         : {_fmt_cost_scalar(avg_cost_per_step)}  [aggregate]")
         else:
             cost_limit = float(self.controller.cost_limit)
             violation = avg_cost_per_step - cost_limit
-            print(f"[{'COST LINE':^20}] Lambda: {_fmt_small(float(self.controller.current_lambda))}")
-            print(f"  Cost Limit (Per Step)       : {_fmt_small(cost_limit)}")
-            print(f"  Avg Cost (Per Step)         : {_fmt_small(avg_cost_per_step)}  [{'OK' if violation <= 0 else 'VIOLATION'}]")
+            print(f"[{'COST LINE':^20}] Lambda: {_fmt_lambda(float(self.controller.current_lambda))}")
+            print(f"  Cost Limit (Per Step)       : {_fmt_cost_scalar(cost_limit)}")
+            print(f"  Avg Cost (Per Step)         : {_fmt_cost_scalar(avg_cost_per_step)}  [{'OK' if violation <= 0 else 'VIOLATION'}]")
         print(f"  Avg Cost (Episode Total)    : {avg_cost:8.4f}")
         
         if avg_breakdown:

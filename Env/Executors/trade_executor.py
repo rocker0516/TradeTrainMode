@@ -277,6 +277,26 @@ class TradeExecutor:
             liq_price = self._calc_liquidation_price(current_price=current_price)
             if liq_price is not None and liq_price > 0.0:
                 if (self.position.size > 0 and low <= liq_price) or (self.position.size < 0 and high >= liq_price):
+                    # Debug: 強平發生時，印出當下止損價（注意：平倉後 position 會被 reset，所以一定要在 close 前抓）
+                    try:
+                        sl = float(self.position.stop_loss_price)
+                        size = float(self.position.size)
+                        entry = float(self.position.entry_price)
+                        required_margin_now = (abs(size) * entry / float(self.leverage)) if float(self.leverage) > 0.0 else 0.0
+                       # print(
+                       #     "[LIQ_TRIGGERED] "
+                       #     f"stop_loss_price={sl:.8f} "
+                       #     f"liq_price={float(liq_price):.8f} "
+                       #     f"current_price={float(current_price):.8f} "
+                       #     f"high={float(high):.8f} low={float(low):.8f} "
+                       #     f"size={size:.8f} entry={entry:.8f} "
+                       #     f"margin_mode={self.margin_mode} leverage={float(self.leverage):.2f} "
+                       #     f"wallet_balance={float(self.wallet_balance):.4f} used_margin={float(self.used_margin):.4f} "
+                       #     f"required_margin_now={float(required_margin_now):.6f}"
+                       # )
+                    except (TypeError, ValueError):
+                        # debug print 不應中斷訓練流程
+                        pass
                     self._close_position(liq_price)
                     self.liq_triggered = True
                     return
@@ -294,6 +314,9 @@ class TradeExecutor:
             base_amount = max(0.0, base_amount)
 
             target_size = (base_amount * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
+            # 若目標倉位小於交易所最小下單量，視為 0（避免產生「永遠無法成交/平掉」的小倉位）
+            if abs(target_size) < self.min_trade_qty:
+                target_size = 0.0
 
             # 檢查最小調倉幅度 (避免微小變動刷手續費)
             # 計算最大可持倉數量 (Max Capacity) based on base_amount
@@ -351,47 +374,82 @@ class TradeExecutor:
 
     # 加倉
     def _increase_position(self, *, delta_size: float, price: float, atr: float = 0.0) -> None:
+        """
+        同向加倉（或空倉 -> 開倉）。
+
+        重要（修正點）：
+        - 舊版用 `required_margin(desired_size, current_price) - used_margin` 估算 additional_margin。
+          在價格大幅波動時（尤其是「在更低價位加多 / 更高價位加空」），
+          可能出現 required_margin 反而變小，導致 additional_margin=0，
+          使 `used_margin` 嚴重低估，進而讓 isolated 的強平價計算失真。
+        - 新版改為：以「加倉前/後」的倉位（size + 平均 entry）計算 required margin，
+          並同步 `used_margin = required_margin_after`，確保帳務一致。
+        """
+        if abs(delta_size) < self.min_trade_qty:
+            return
+        if not (price > 0.0) or not (self.leverage > 0.0):
+            return
+
         # 確保可用資金足以覆蓋新增保證金與手續費
         was_flat = (self.position.size == 0.0)
-        desired_size = self.position.size + delta_size
-        additional_margin = max(0.0, self._required_margin(desired_size, price) - self.used_margin)
-        trade_notional = abs(delta_size) * price
-        fee = self._fee(trade_notional)
+        old_size = float(self.position.size)
+        old_entry = float(self.position.entry_price)
+
+        # 先把 used_margin 同步到「目前倉位」應有的初始保證金（避免 drift）
+        required_before = 0.0
+        if abs(old_size) > 1e-12 and old_entry > 0.0:
+            required_before = float(self._required_margin(old_size, old_entry))
+        self.used_margin = float(max(0.0, required_before))
+
+        def _weighted_entry(*, prev_size: float, prev_entry: float, add_size: float, add_price: float) -> float:
+            if abs(prev_size) <= 1e-12:
+                return float(add_price)
+            total = abs(prev_size + add_size)
+            if total <= 0.0:
+                return 0.0
+            old_notional = abs(prev_size) * float(prev_entry)
+            new_notional = abs(add_size) * float(add_price)
+            return float((old_notional + new_notional) / total)
+
+        desired_size = float(old_size + float(delta_size))
+        new_entry = _weighted_entry(prev_size=old_size, prev_entry=old_entry, add_size=float(delta_size), add_price=float(price))
+        required_after = float(self._required_margin(desired_size, new_entry)) if (abs(desired_size) > 1e-12 and new_entry > 0.0) else 0.0
+        additional_margin = float(max(0.0, required_after - required_before))
+
+        trade_notional = abs(float(delta_size)) * float(price)
+        fee = float(self._fee(trade_notional))
 
         if self.available_balance() < additional_margin + fee:
-            # 依可用資金上限縮小加倉數量
-            cap = self.available_balance() - fee
-            if cap <= 0:
+            # 依可用資金上限縮小加倉數量（margin + fee 都要算進去）
+            avail = float(self.available_balance())
+            # 每 1 單位 size（資產單位）的「保證金+手續費」消耗（以本次成交價估算，線性上界）
+            cost_per_size = float(price) * ((1.0 / float(self.leverage)) + (float(self.fee_rate) / 100.0))
+            if cost_per_size <= 0.0 or avail <= 0.0:
                 return
-            max_notional_add = cap * self.leverage
-            max_size_add = max_notional_add / price if price > 0 else 0.0
-            
-            # 正確修正 delta_size 方向
-            if delta_size > 0:
-                delta_size = max_size_add
-            else:
-                delta_size = -max_size_add
-                
-            trade_notional = abs(delta_size) * price
-            additional_margin = max(0.0, self._required_margin(self.position.size + delta_size, price) - self.used_margin)
-            fee = self._fee(trade_notional)
+            max_size_add = float(avail / cost_per_size)
+
+            # 正確修正 delta_size 方向（同向加碼）
+            sign = 1.0 if float(delta_size) > 0.0 else -1.0
+            delta_size = float(sign * min(abs(float(delta_size)), max_size_add))
             if abs(delta_size) < self.min_trade_qty:
                 return
 
-        # 執行加倉
-        if self.position.size == 0.0:
-            self.position.entry_price = price
-        else:
-            # 同向加倉：以加權平均更新進場價格
-            old_notional = abs(self.position.size) * self.position.entry_price
-            new_notional = abs(delta_size) * price
-            total_size = abs(self.position.size + delta_size)
-            if total_size > 0:
-                self.position.entry_price = (old_notional + new_notional) / total_size
+            desired_size = float(old_size + float(delta_size))
+            new_entry = _weighted_entry(prev_size=old_size, prev_entry=old_entry, add_size=float(delta_size), add_price=float(price))
+            required_after = float(self._required_margin(desired_size, new_entry)) if (abs(desired_size) > 1e-12 and new_entry > 0.0) else 0.0
+            additional_margin = float(max(0.0, required_after - required_before))
+            trade_notional = abs(float(delta_size)) * float(price)
+            fee = float(self._fee(trade_notional))
+            if self.available_balance() < additional_margin + fee:
+                # 仍不足就直接放棄（避免負資金/數值炸裂）
+                return
 
-        self.position.size += delta_size
-        self.used_margin += additional_margin
-        self.wallet_balance -= fee
+        # 執行加倉
+        self.position.entry_price = float(new_entry) if float(new_entry) > 0.0 else float(self.position.entry_price)
+        self.position.size = float(desired_size)
+        # 同步 used_margin（保證 isolated 強平價不會因低估 collateral 而失真）
+        self.used_margin = float(max(0.0, required_after))
+        self.wallet_balance = float(self.wallet_balance) - float(fee)
         self.total_fees += fee
 
         # 設定/更新止損價 (固定 ATR 倍數)
@@ -454,6 +512,7 @@ class TradeExecutor:
             new_size = - (abs(self.position.size) - close_size)
 
         fee = self._fee(close_size * price)
+        # 以 entry_price 為基準釋放初始保證金（並在最後同步 used_margin）
         margin_release = self._required_margin(close_size, current_entry_price)
 
         self.wallet_balance += realized_pnl - fee
@@ -465,6 +524,8 @@ class TradeExecutor:
         else:
             if self.position.stop_loss_price > 0.0:
                 self._clamp_stop_loss_before_liquidation(current_price=price)
+            # 同步 used_margin，避免因歷史 drift/釋放過量導致保證金失真
+            self.used_margin = float(max(0.0, self._required_margin(self.position.size, current_entry_price)))
         # 統計
         self.total_fees += fee
         if close_size > 0:

@@ -104,6 +104,7 @@ def main() -> None:
     parser.add_argument("--risk_cost_limit", type=float, default=TrainConfig.RISK_COST_LIMIT, help="risk cost limit per step (death)")
     parser.add_argument("--fric_cost_limit", type=float, default=TrainConfig.FRIC_COST_LIMIT, help="fric cost limit per step (fee/equity)")
     parser.add_argument("--sl_buf_cost_limit", type=float, default=TrainConfig.SL_BUF_COST_LIMIT, help="sl_buf cost limit per step (stop buffer, 0~1)")
+    parser.add_argument("--sl_event_cost_limit", type=float, default=TrainConfig.SL_EVENT_COST_LIMIT, help="sl_event cost limit per step (stop loss event)")
     parser.add_argument("--device", type=str, default=TrainConfig.DEVICE)
     parser.add_argument("--log_every_episodes", type=int, default=TrainConfig.LOG_EVERY_EPISODES, help="每 N 回合輸出交易統計")
     parser.add_argument("--update_lambda_every_steps", type=int, default=TrainConfig.UPDATE_LAMBDA_EVERY_STEPS, help="每 N steps 更新一次 lambda")
@@ -117,13 +118,14 @@ def main() -> None:
     # 進度條與 SB3 的表格 logger 會互相干擾，因此預設：開進度條時 verbose=0
     sb3_verbose = int(args.verbose) if args.verbose is not None else (0 if show_progress_bar else 1)
 
-    # 1. 初始化 Multi Lagrangian Controller（分三條成本線：risk / fric / sl_buf）
+    # 1. 初始化 Multi Lagrangian Controller（分四條成本線：risk / fric / sl_buf / sl_event）
     # 注意：仍保留 --cost_limit 參數供舊模式/相容性，但預設訓練會走 multi-lambda。
     lag_controller: Any = MultiSharedLagrangianController(
         {
             "risk": LagrangianChannelConfig(cost_limit=float(args.risk_cost_limit), kp=0.1, lambda_init=0.0, lambda_max=5.0),
             "fric": LagrangianChannelConfig(cost_limit=float(args.fric_cost_limit), kp=0.1, lambda_init=0.0, lambda_max=5.0),
             "sl_buf": LagrangianChannelConfig(cost_limit=float(args.sl_buf_cost_limit), kp=0.1, lambda_init=0.0, lambda_max=5.0),
+            "sl_event": LagrangianChannelConfig(cost_limit=float(args.sl_event_cost_limit), kp=0.1, lambda_init=0.0, lambda_max=5.0),
         }
     )
     
@@ -201,7 +203,7 @@ def main() -> None:
     print(f"Start training SAC-Lagrangian on {args.symbol} with {args.n_envs} envs...")
     print(
         "Cost Limits (per step): "
-        f"risk={args.risk_cost_limit}, fric={args.fric_cost_limit}, sl_buf={args.sl_buf_cost_limit} "
+        f"risk={args.risk_cost_limit}, fric={args.fric_cost_limit}, sl_buf={args.sl_buf_cost_limit}, sl_event={args.sl_event_cost_limit} "
         f"(legacy cost_limit={args.cost_limit})"
     )
     
