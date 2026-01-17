@@ -56,12 +56,12 @@ class TrainConfig:
     GRADIENT_STEPS: int = 1 # 1 代表每次更新參數時，只用一個 batch 的資料進行梯度下降
 
     # ---- Policy / 網路結構 ----
-    EMB_5M: int = 256
-    EMB_1D: int = 128
-    EMB_VEC: int = 128
-    OUT_DIM: int = 384
-    PI_ARCH: tuple[int, int] = (256, 256)
-    QF_ARCH: tuple[int, int] = (256, 256)
+    EMB_5M: int = 256 # 5m 特徵維度
+    EMB_1D: int = 128 # 1d 特徵維度
+    EMB_VEC: int = 128 # 向量特徵維度
+    OUT_DIM: int = 384 # 輸出維度
+    PI_ARCH: tuple[int, int] = (256, 256) # P 網路結構
+    QF_ARCH: tuple[int, int] = (256, 256) # Q 網路結構
 
     # ---- Wrapper（動作平滑/重複）----
     # 訓練時建議用「更強的降頻/降換手」設定，否則手續費與 turnover 會把主線 log-return 磨成長期負值。

@@ -170,8 +170,10 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
     # 情境調整（用 index 11 觸發 stop/liq 等）
     trigger_idx = int(sc.window_size + 1)
     if sc.name == "stop_loss_triggers" or sc.name == "stop_loss_cooldown_forces_no_trade_next_step":
-        # entry=100, atr≈2, stop_loss_atr=2 => stop≈96，下一根 low 觸發
-        market.df_5m.loc[trigger_idx, "low"] = 50.0
+        # entry=100, atr≈2, stop_loss_atr=2 => stop≈96
+        # 只觸發止損、不觸發強平：把 low 設在 (liq, stop) 之間。
+        # （在強平優先的邏輯下，若 low 直接穿越 liq，會視為爆倉而不是止損）
+        market.df_5m.loc[trigger_idx, "low"] = 95.0
     if sc.name == "liquidation_triggers_terminated":
         # 先關閉止損，避免「止損優先於強平」讓 liq 永遠觸發不到
         market.df_5m.loc[trigger_idx, "low"] = 1.0

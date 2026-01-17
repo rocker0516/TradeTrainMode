@@ -253,7 +253,7 @@ class TradeExecutor:
         low: float, # 當前最低價
         equity: float, # 當前權益
         atr: float = 0.0, # ATR（用於計算止損距離）
-        risk_base: float = None # 用於計算倉位大小的基準金額 (預設為 None，若 None 則使用 wallet_balance)
+        risk_base: float | None = None # 用於計算倉位大小的基準金額 (預設為 None，若 None 則使用 wallet_balance)
     ) -> None:
         # 重置本步觸發標記
         self.stop_loss_triggered = False
@@ -264,16 +264,11 @@ class TradeExecutor:
             # 0) 先用「上一根已完成 K」更新 trailing stop（避免同 K 線 high/low 前視）
             self._maybe_update_trailing_stop_from_prev_bar(atr=atr)
 
-            # 1) 優先檢查止損（先於清算）
-            if self.position.size != 0.0 and self.position.stop_loss_price > 0.0:
-                if (self.position.size > 0 and low <= self.position.stop_loss_price) or \
-                   (self.position.size < 0 and high >= self.position.stop_loss_price):
-                    # 觸發止損，強制平倉（回測假設：以 stop_loss_price 成交）
-                    self._close_position(self.position.stop_loss_price)
-                    self.stop_loss_triggered = True
-                    return  # 止損後不再執行其他邏輯
-
-            # 2) 檢查清算（極端情況兜底）
+            # 1) 優先檢查清算（強平優先於止損；更貼近「觸及維持保證金即強制平倉」的保守假設）
+            # 說明：
+            # - 本專案以「同一根 K」的 high/low 判斷是否觸及 liq_price/stop_loss_price；
+            #   若同一根 K 同時穿越 SL 與 LIQ，intrabar 的先後順序不可得。
+            # - 因此此處採保守假設：只要觸及強平價，就視為先被強平。
             liq_price = self._calc_liquidation_price(current_price=current_price)
             if liq_price is not None and liq_price > 0.0:
                 if (self.position.size > 0 and low <= liq_price) or (self.position.size < 0 and high >= liq_price):
@@ -300,6 +295,15 @@ class TradeExecutor:
                     self._close_position(liq_price)
                     self.liq_triggered = True
                     return
+
+            # 2) 檢查止損（強平未觸發時才檢查）
+            if self.position.size != 0.0 and self.position.stop_loss_price > 0.0:
+                if (self.position.size > 0 and low <= self.position.stop_loss_price) or \
+                   (self.position.size < 0 and high >= self.position.stop_loss_price):
+                    # 觸發止損，強制平倉（回測假設：以 stop_loss_price 成交）
+                    self._close_position(self.position.stop_loss_price)
+                    self.stop_loss_triggered = True
+                    return  # 止損後不再執行其他邏輯
 
             # 以指定基準(risk_base)計算目標倉位數量
             # 若未指定，預設使用 wallet_balance (舊邏輯)

@@ -95,8 +95,8 @@ def test_trade_executor_reduce_position_realizes_pnl_and_releases_margin() -> No
     assert last["realized_pnl"] > 0.0
 
 
-def test_trade_executor_stop_loss_triggers_before_liquidation() -> None:
-    """同一根 K 線同時穿越 SL 與 LIQ 時，必須優先止損（先於強平）。"""
+def test_trade_executor_liquidation_triggers_before_stop_loss_when_both_crossed() -> None:
+    """同一根 K 線同時穿越 SL 與 LIQ 時，強平應優先於止損（保守假設）。"""
     ex = TradeExecutor(
         initial_balance=1000.0,
         fee_rate=0.0,
@@ -123,7 +123,7 @@ def test_trade_executor_stop_loss_triggers_before_liquidation() -> None:
     liq = ex.get_liquidation_price(100.0)
     assert stop > liq
 
-    # 下一根：low 同時小於 stop 與 liq（極端），應先走 stop_loss close
+    # 下一根：low 同時小於 stop 與 liq（極端）；intrabar 先後不可得，採保守假設 -> 視為先強平
     ex.execute(
         position_percent=1.0,  # 動作不重要，因為先觸發 stop
         current_price=100.0,
@@ -134,8 +134,8 @@ def test_trade_executor_stop_loss_triggers_before_liquidation() -> None:
         risk_base=1000.0,
     )
 
-    assert ex.stop_loss_triggered is True
-    assert ex.liq_triggered is False
+    assert ex.stop_loss_triggered is False
+    assert ex.liq_triggered is True
     assert ex.position.size == 0.0
 
 
