@@ -22,7 +22,7 @@ class TrainConfig:
     # - 用於 5m 跨市場摘要 +（後續可擴充）多幣 1d regime
     # - 注意：Gym observation_space 必須固定 shape，因此這裡用「固定清單」，而不是隨 Data 目錄動態增減。
     FEATURE_SYMBOLS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "1000PEPEUSDT")
-    TOTAL_TIMESTEPS: int = 30_000_000
+    TOTAL_TIMESTEPS: int = 60_000_000
     N_ENVS: int = 64
     DEVICE: str = "auto"  # "cuda" / "cpu" / "auto"
 
@@ -49,7 +49,7 @@ class TrainConfig:
 
     # ---- SB3 SAC 超參數 ----
     LEARNING_RATE: float = 2e-4
-    BUFFER_SIZE: int = 500_000
+    BUFFER_SIZE: int = 1_000_000
     BATCH_SIZE: int = 256
     ENT_COEF: str = "auto"
     TRAIN_FREQ: int = 1 # 1 代表每次更新參數時，只用一個 batch 的資料
@@ -82,6 +82,38 @@ class TrainConfig:
     VEC_MONITOR_LOG_PREFIX: str = "logs/sac_lag"
     CHECKPOINT_SAVE_FREQ: int = 1_000_000
     CHECKPOINT_DIR_PREFIX: str = "models/sac_lag"
+
+    # ---- Periodic Evaluation / Validation（每 N steps 驗證）----
+    # 目的：
+    # - 訓練期間定期跑 eval episodes，輸出你關心的指標（止損/強平/交易頻率/進場/平均持倉/最終資金/收益率）
+    # - 依規則挑選並保存 best model
+    EVAL_ENABLED: bool = True
+    # 以「訓練總 timesteps」為基準（使用 SB3 的 model.num_timesteps），確保在 VecEnv 下語意正確
+    EVAL_EVERY_TIMESTEPS: int = 1_000_000
+    EVAL_N_EVAL_EPISODES: int = 10
+    EVAL_DETERMINISTIC: bool = True
+    # Eval 環境設定：避免隨機起點使指標不穩定（可重現）
+    EVAL_RANDOM_START: bool = False
+    # 為了避免 eval 回合過長拖慢訓練：允許在 eval 端覆寫 episode 上限
+    EVAL_MAX_EPISODE_STEPS: int = 288*31
+
+    # ---- Best model 保存 ----
+    EVAL_SAVE_BEST_MODEL: bool = True
+    # 實際保存路徑會在訓練入口用 symbol 組合（避免 TrainConfig 內直接格式化）
+    EVAL_BEST_MODEL_SUBDIR: str = "best_model"
+
+    # ---- Best model 規則：constraints_then_balance + 排除死亡事件 ----
+    # 1) 任何「死亡事件」出現 => 整次 eval 不合格（不更新 best）
+    # - termination_reason in {"liq_triggered", "balance_insufficient"}
+    # - 或 episode_liq_count > 0
+    EVAL_REJECT_IF_DEATH_EVENT: bool = True
+    # 2) 只在通過約束時才允許更新 best
+    EVAL_MAX_DD_LIMIT: float = 0.40 # 0.40 代表 40%
+    EVAL_MEAN_COST_LIMIT: float = 0.01 # 0.01 代表 1%
+
+    # ---- 指標口徑（固定）----
+    # - holding_ratio = episode_holding_steps / episode_steps
+    # - trades_per_step = episode_trade_count / episode_steps
 
     # ---- UI / Console ----
     # 進度條預設開啟；若你想讓 SB3 的表格輸出（verbose=1）更乾淨，可把預設 verbose 設 0

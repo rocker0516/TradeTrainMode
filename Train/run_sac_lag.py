@@ -21,11 +21,12 @@ if _PROJECT_ROOT not in sys.path:
 import gymnasium as gym
 import torch
 from stable_baselines3 import SAC
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor
 from stable_baselines3.common.callbacks import CheckpointCallback
 
 from Env.trading_env import TradingEnvironment
 from Env.wrappers import ActionRepeatWrapper, ActionClipWrapper
+from Train.eval_callback import ConstraintEvalCallback, EvalConfig, EvalConstraints
 from Train.optimized_dict_replay_buffer import OptimizedDictReplayBuffer
 from Train.sb3_cnn_policy import DualCnnFeatureExtractor
 from Train.lagrangian import (
@@ -200,6 +201,47 @@ def main() -> None:
         name_prefix="sac_lag"
     )
 
+    callbacks = [lag_callback, checkpoint_callback]
+
+    # 4.1 Periodic Evaluation（每 N steps 驗證 + 保存 best model）
+    eval_env = None
+    if bool(getattr(TrainConfig, "EVAL_ENABLED", False)):
+        def _make_eval_env() -> gym.Env:
+            # 與訓練環境維持一致的 wrappers（clip/repeat），但固定起點避免指標抖動
+            eval_kwargs = dict(env_kwargs)
+            eval_kwargs.update(
+                {
+                    "random_start": bool(TrainConfig.EVAL_RANDOM_START),
+                    "max_episode_steps": int(TrainConfig.EVAL_MAX_EPISODE_STEPS),
+                }
+            )
+            e = TradingEnvironment(env_id=9999, **eval_kwargs)
+            e = ActionClipWrapper(e, max_position_pct=TrainConfig.MAX_POSITION_PCT)
+            e = ActionRepeatWrapper(e, repeat=TrainConfig.ACTION_REPEAT)
+            return e
+
+        eval_env = DummyVecEnv([_make_eval_env])
+
+        best_model_base_dir = f"{TrainConfig.CHECKPOINT_DIR_PREFIX}_{args.symbol}"
+        best_model_path = os.path.join(best_model_base_dir, str(TrainConfig.EVAL_BEST_MODEL_SUBDIR), "best_model")
+        eval_cb = ConstraintEvalCallback(
+            eval_env=eval_env,
+            eval_config=EvalConfig(
+                enabled=True,
+                eval_every_timesteps=int(TrainConfig.EVAL_EVERY_TIMESTEPS),
+                n_eval_episodes=int(TrainConfig.EVAL_N_EVAL_EPISODES),
+                deterministic=bool(TrainConfig.EVAL_DETERMINISTIC),
+                reject_if_death_event=bool(TrainConfig.EVAL_REJECT_IF_DEATH_EVENT),
+                constraints=EvalConstraints(
+                    max_dd_limit=float(TrainConfig.EVAL_MAX_DD_LIMIT),
+                    mean_cost_limit=float(TrainConfig.EVAL_MEAN_COST_LIMIT),
+                ),
+                save_best_model=bool(TrainConfig.EVAL_SAVE_BEST_MODEL),
+                best_model_path=str(best_model_path),
+            ),
+        )
+        callbacks.append(eval_cb)
+
     print(f"Start training SAC-Lagrangian on {args.symbol} with {args.n_envs} envs...")
     print(
         "Cost Limits (per step): "
@@ -209,13 +251,15 @@ def main() -> None:
     
     model.learn(
         total_timesteps=args.total_timesteps, 
-        callback=[lag_callback, checkpoint_callback],
+        callback=callbacks,
         progress_bar=bool(show_progress_bar),
     )
     
     # 5. 存檔與關閉
     model.save(f"models/sac_lag_{args.symbol}/final_model")
     env.close()
+    if eval_env is not None:
+        eval_env.close()
     print("Training finished.")
 
 

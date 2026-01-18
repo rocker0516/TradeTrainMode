@@ -55,7 +55,9 @@ class TradingEnvironment(gym.Env):
         self.leverage = float(kwargs.get("leverage", Config.LEVERAGE))
         self.min_balance = float(kwargs.get("min_balance", Config.MIN_BALANCE))
         self.min_episode_steps = int(kwargs.get("min_episode_steps", Config.MIN_EPISODE_STEPS))
-        self.max_episode_steps = getattr(Config, 'MAX_EPISODE_STEPS', 1000000)
+        # 允許外部（訓練/評估端）用 kwargs 覆寫 episode 上限，避免評估回合過長拖慢訓練。
+        # 預設行為不變：若未提供 max_episode_steps，仍使用 Config.MAX_EPISODE_STEPS。
+        self.max_episode_steps = int(kwargs.get("max_episode_steps", getattr(Config, "MAX_EPISODE_STEPS", 1000000)))
         self.min_position_change = float(kwargs.get("min_position_change", Config.MIN_POSITION_CHANGE))
         self.random_start = kwargs.get('random_start', True)
         self.target_symbol = kwargs.get('target_symbol', 'BTCUSDT') # 預設交易對
