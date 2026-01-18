@@ -37,6 +37,8 @@ class EvalConfig:
     constraints: EvalConstraints
     save_best_model: bool
     best_model_path: str
+    print_each_episode: bool = False
+    print_prefix: str = "[EVAL]"
 
 
 class ConstraintEvalCallback(BaseCallback):
@@ -69,6 +71,7 @@ class ConstraintEvalCallback(BaseCallback):
         results = self._run_eval(
             n_episodes=int(self.eval_config.n_eval_episodes),
             deterministic=bool(self.eval_config.deterministic),
+            current_ts=current_ts,
         )
         self._log_eval_results(results, current_ts=current_ts)
 
@@ -98,7 +101,7 @@ class ConstraintEvalCallback(BaseCallback):
         os.makedirs(os.path.dirname(self.eval_config.best_model_path), exist_ok=True)
         self.model.save(self.eval_config.best_model_path)
 
-    def _run_eval(self, n_episodes: int, deterministic: bool) -> "EvalResults":
+    def _run_eval(self, n_episodes: int, deterministic: bool, current_ts: int) -> "EvalResults":
         # VecEnv 介面：n_envs 必須是 1（我們在訓練入口會用 DummyVecEnv 建立單環境 eval）
         n_envs = int(getattr(self.eval_env, "num_envs", 1))
         if n_envs != 1:
@@ -112,7 +115,7 @@ class ConstraintEvalCallback(BaseCallback):
         per_episode: List[EpisodeEval] = []
         any_death = False
 
-        for _ in range(int(n_episodes)):
+        for ep_idx in range(int(n_episodes)):
             obs = self.eval_env.reset()
 
             done = False
@@ -147,6 +150,13 @@ class ConstraintEvalCallback(BaseCallback):
 
             if ep.is_death_event:
                 any_death = True
+
+            if bool(getattr(self.eval_config, "print_each_episode", False)):
+                prefix = str(getattr(self.eval_config, "print_prefix", "[EVAL]"))
+                print(
+                    _format_episode_line(prefix=prefix, current_ts=int(current_ts), ep_idx=int(ep_idx), ep=ep),
+                    flush=True,
+                )
 
         return EvalResults.aggregate(per_episode=per_episode, any_death_event=any_death)
 
@@ -322,4 +332,35 @@ def _mean_or_none(values: List[Optional[float]]) -> Optional[float]:
     if not valid:
         return None
     return float(np.mean(valid))
+
+
+def _fmt_float(v: Optional[float], digits: int = 6) -> str:
+    if v is None:
+        return "NA"
+    try:
+        return f"{float(v):.{digits}f}"
+    except (TypeError, ValueError):
+        return "NA"
+
+
+def _fmt_int(v: Optional[int]) -> str:
+    if v is None:
+        return "NA"
+    try:
+        return str(int(v))
+    except (TypeError, ValueError):
+        return "NA"
+
+
+def _format_episode_line(prefix: str, current_ts: int, ep_idx: int, ep: EpisodeEval) -> str:
+    return (
+        f"{prefix} ts={current_ts} ep={ep_idx} "
+        f"death={int(bool(ep.is_death_event))} term={ep.termination_reason or 'NA'} "
+        f"final={_fmt_float(ep.final_balance, digits=2)} ret={_fmt_float(ep.ret, digits=6)} "
+        f"dd={_fmt_float(ep.episode_max_dd, digits=6)} cost={_fmt_float(ep.mean_cost, digits=8)} "
+        f"sl={_fmt_int(ep.stop_loss_count)} liq={_fmt_int(ep.liq_count)} "
+        f"trades_per_step={_fmt_float(ep.trades_per_step, digits=6)} "
+        f"long_entry={_fmt_int(ep.long_entry_count)} short_entry={_fmt_int(ep.short_entry_count)} "
+        f"holding_ratio={_fmt_float(ep.holding_ratio, digits=6)}"
+    )
 

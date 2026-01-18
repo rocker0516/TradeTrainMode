@@ -238,6 +238,8 @@ def main() -> None:
                 ),
                 save_best_model=bool(TrainConfig.EVAL_SAVE_BEST_MODEL),
                 best_model_path=str(best_model_path),
+                print_each_episode=bool(getattr(TrainConfig, "EVAL_PRINT_EACH_EPISODE", True)),
+                print_prefix=str(getattr(TrainConfig, "EVAL_PRINT_PREFIX", "[EVAL]")),
             ),
         )
         callbacks.append(eval_cb)

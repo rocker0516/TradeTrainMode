@@ -132,6 +132,7 @@ def test_eval_not_triggered_before_freq(tmp_path: Path) -> None:
             constraints=EvalConstraints(max_dd_limit=0.4, mean_cost_limit=0.001),
             save_best_model=True,
             best_model_path=str(best_dir / "best_model"),
+            print_each_episode=False,
         ),
     )
     cb.init_callback(model)
@@ -161,6 +162,7 @@ def test_eval_rejects_when_death_event_occurs(tmp_path: Path) -> None:
             constraints=EvalConstraints(max_dd_limit=0.4, mean_cost_limit=0.001),
             save_best_model=True,
             best_model_path=str(best_dir / "best_model"),
+            print_each_episode=False,
         ),
     )
     cb.init_callback(model)
@@ -187,6 +189,7 @@ def test_eval_saves_best_when_constraints_pass_and_no_death(tmp_path: Path) -> N
             constraints=EvalConstraints(max_dd_limit=0.4, mean_cost_limit=0.001),
             save_best_model=True,
             best_model_path=str(best_dir / "best_model"),
+            print_each_episode=False,
         ),
     )
     cb.init_callback(model)

@@ -96,6 +96,9 @@ class TrainConfig:
     EVAL_RANDOM_START: bool = False
     # 為了避免 eval 回合過長拖慢訓練：允許在 eval 端覆寫 episode 上限
     EVAL_MAX_EPISODE_STEPS: int = 288*31
+    # Eval 每回合在 Terminal 顯示一行摘要
+    EVAL_PRINT_EACH_EPISODE: bool = True
+    EVAL_PRINT_PREFIX: str = "[EVAL]"
 
     # ---- Best model 保存 ----
     EVAL_SAVE_BEST_MODEL: bool = True
