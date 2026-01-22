@@ -16,7 +16,7 @@ class Config:
     """交易環境的預設參數集合（類似常數容器）。"""
 
     # ---- 基本資金與交易成本 ----
-    INITIAL_BALANCE: float = 10_000.0
+    INITIAL_BALANCE: float = 1000.0
     TRANSACTION_FEE: float = 0.01  # (%) 手續費百分比（例如 0.04 代表 0.04%）
 
     # ---- 視窗大小 ----
@@ -26,8 +26,8 @@ class Config:
     # ---- 交易參數 ----
     LEVERAGE: float = 10.0
     MIN_BALANCE: float = INITIAL_BALANCE * 0.5 # 最小餘額 0. 5 代表 50%
-    MIN_EPISODE_STEPS: int = 288 * 31 # 最小步數 288 * 31 = 8928 步
-    MAX_EPISODE_STEPS: int = 288 * 31 # 最大步數 288 * 31 = 8928 步
+    MIN_EPISODE_STEPS: int = 288 * 31 * 6 # 最小步數 288 * 31 = 8928 步
+    MAX_EPISODE_STEPS: int = 288 * 31 * 6 # 最大步數 288 * 31 = 8928 步
     # 最小調倉幅度（Deadband, 0.0 ~ 1.0）
     # 預設使用 0.0：讓「單步倉位變化限制(max_step_pos_change_pct)」可以逐步累積倉位，
     # 需要抑制微小調倉刷手續費時，再由外部 kwargs 覆寫（例如 0.2 代表 20%）。

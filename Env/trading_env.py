@@ -3,7 +3,8 @@ import numpy as np
 import random
 from dataclasses import dataclass
 from gymnasium import spaces
-from typing import Optional, Dict, Tuple, Any
+from typing import Optional, Dict, Tuple, Any, Iterable
+import pandas as pd
 
 from Env.config import Config
 from Env.Executors.trade_executor import TradeExecutor
@@ -67,8 +68,30 @@ class TradingEnvironment(gym.Env):
         self.margin_mode = 'isolated'
         self.min_trade_qty = 0.001 
 
+        # ---- Train/Eval split (optional; to prevent data leakage) ----
+        # 語義：
+        # - data_split_enabled=True 且 data_mode="train"：使用「非最近 N 個月」資料
+        # - data_split_enabled=True 且 data_mode="eval" ：使用「最近 N 個月」資料
+        # - 其他：維持舊行為（用全部資料）
+        self.data_split_enabled = bool(kwargs.get("data_split_enabled", False))
+        self.data_mode = str(kwargs.get("data_mode", "full")).lower().strip()
+        self.holdout_months = int(kwargs.get("holdout_months", 3))
+        # Eval obs 必須填滿：起點至少在 warmup_steps 之後
+        # - 若使用 data_mode="eval"，預設強制啟用（除非你顯式傳 ensure_filled_obs=False）
+        ensure_filled_default = bool(self.data_mode == "eval")
+        self.ensure_filled_obs = bool(kwargs.get("ensure_filled_obs", ensure_filled_default))
+
         # 載入數據
         self.df_5m, self.df_1d = load_data()
+
+        # ---- Apply train/eval split by recent months ----
+        if self.data_split_enabled and self.data_mode in {"train", "eval"}:
+            self.df_5m, self.df_1d = self._split_train_eval_by_recent_months(
+                df_5m=self.df_5m,
+                df_1d=self.df_1d,
+                holdout_months=int(self.holdout_months),
+                mode=str(self.data_mode),
+            )
 
         # 2. 初始化組件
         # Market Data (傳入兩個 DataFrame，並指定目標交易對)
@@ -169,6 +192,67 @@ class TradingEnvironment(gym.Env):
         self.daily_risk_base = 0.0
         self.last_risk_base_update_step = 0
 
+    @staticmethod
+    def _split_train_eval_by_recent_months(
+        *,
+        df_5m: "pd.DataFrame",
+        df_1d: "pd.DataFrame",
+        holdout_months: int,
+        mode: str,
+    ) -> Tuple["pd.DataFrame", "pd.DataFrame"]:
+        """
+        依「最近 N 個月」切分資料，用於 Train/Eval 分離（避免資料洩漏）。
+
+        - eval: 取 df_*.timestamp >= eval_start
+        - train: 取 df_*.timestamp <  eval_start
+
+        注意：
+        - 這裡用 df_5m 的 max timestamp 決定 eval_start（避免 1d 某些來源晚開始造成切點偏移）
+        """
+        if "timestamp" not in df_5m.columns:
+            raise ValueError("df_5m must contain 'timestamp' column for train/eval split")
+        if "timestamp" not in df_1d.columns:
+            raise ValueError("df_1d must contain 'timestamp' column for train/eval split")
+        if int(holdout_months) <= 0:
+            raise ValueError("holdout_months must be > 0")
+
+        mode = str(mode).lower().strip()
+        if mode not in {"train", "eval"}:
+            raise ValueError("mode must be 'train' or 'eval'")
+
+        # ensure datetime dtype
+        if not pd.api.types.is_datetime64_any_dtype(df_5m["timestamp"]):
+            df_5m = df_5m.copy()
+            df_5m["timestamp"] = pd.to_datetime(df_5m["timestamp"])
+        if not pd.api.types.is_datetime64_any_dtype(df_1d["timestamp"]):
+            df_1d = df_1d.copy()
+            df_1d["timestamp"] = pd.to_datetime(df_1d["timestamp"])
+
+        max_ts = df_5m["timestamp"].max()
+        if pd.isna(max_ts):
+            raise ValueError("df_5m timestamp is empty; cannot split train/eval")
+
+        eval_start = pd.Timestamp(max_ts) - pd.DateOffset(months=int(holdout_months))
+
+        if mode == "eval":
+            df_5m_out = df_5m[df_5m["timestamp"] >= eval_start].copy()
+            df_1d_out = df_1d[df_1d["timestamp"] >= eval_start].copy()
+        else:
+            df_5m_out = df_5m[df_5m["timestamp"] < eval_start].copy()
+            df_1d_out = df_1d[df_1d["timestamp"] < eval_start].copy()
+
+        df_5m_out = df_5m_out.sort_values("timestamp").reset_index(drop=True)
+        df_1d_out = df_1d_out.sort_values("timestamp").reset_index(drop=True)
+
+        # Basic sanity: 5m must have enough rows to run at least one episode window.
+        if len(df_5m_out) < 10:
+            raise ValueError(
+                f"Split produced too few 5m rows for mode={mode}. "
+                f"holdout_months={holdout_months}, rows={len(df_5m_out)}"
+            )
+
+        return df_5m_out, df_1d_out
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         if seed is not None:
@@ -176,17 +260,26 @@ class TradingEnvironment(gym.Env):
             random.seed(seed)
             
         # 1. 決定起始點
+        # Eval obs 必須填滿：起點至少在 max(window_size_5m, window_size_1d*288) 之後
+        # - window_size_1d 用「天」計算，因此換算成 5m steps = window_size_1d * 288
+        # - 若資料不足，會退化成可用的最小起點，避免 randint 空範圍
+        warmup_steps = int(max(int(self.window_size), int(self.window_size_1d) * 288)) if bool(self.ensure_filled_obs) else int(self.window_size)
+        warmup_steps = max(1, warmup_steps)
+
         if self.random_start:
             max_start_index = len(self.market_data.df_5m) - self.min_episode_steps - 2
             # 若資料量不足以支援 min_episode_steps（常見於測試用合成資料），退化為固定起點，避免 randint 空範圍。
-            if int(max_start_index) <= int(self.window_size):
-                self.current_step = int(self.window_size)
+            if int(max_start_index) <= int(warmup_steps):
+                self.current_step = int(min(warmup_steps, max(1, len(self.market_data.df_5m) - 1)))
             else:
-                self.current_step = int(random.randint(self.window_size, max_start_index))
+                self.current_step = int(random.randint(int(warmup_steps), int(max_start_index)))
         else:
-            self.current_step = self.window_size 
+            self.current_step = int(min(warmup_steps, max(1, len(self.market_data.df_5m) - 1)))
             
         self.episode_start_step = self.current_step
+        # 供評估端追蹤「episode 起始時間」用（避免 callback 自己猜時間）
+        # 注意：timestamp 取自 MarketData.df_5m（已確保是 datetime）
+        self.episode_start_timestamp = self._get_timestamp_str(step_idx=int(self.episode_start_step))
         self.episode_max_steps = min(
             max(0, (len(self.market_data.df_5m) - 1) - self.episode_start_step),
             self.max_episode_steps
@@ -241,7 +334,153 @@ class TradingEnvironment(gym.Env):
         current_price = metrics['close']
         self.tracker.update_account_series(self.current_step, self.executor, current_price)
         
-        return self._get_observation(), {}
+        # Gymnasium reset() 允許回傳 info；我們把 episode 起始資訊放進去，方便評估端取用
+        return self._get_observation(), {
+            "episode_start_step": int(self.episode_start_step),
+            "episode_start_timestamp": self.episode_start_timestamp,
+        }
+
+    # ---------------------------------------------------------------------
+    # Public helpers (for EvalCallback / debugging)
+    # ---------------------------------------------------------------------
+    def get_current_step(self) -> int:
+        """取得環境目前的 step index（用於 eval/debug）。"""
+        return int(self.current_step)
+
+    def get_episode_steps(self) -> int:
+        """取得當前 episode 已走過的步數（環境內部步數）。"""
+        return int(self.episode_steps)
+
+    def get_episode_start_step(self) -> int:
+        """取得當前 episode 的起始 step index。"""
+        return int(getattr(self, "episode_start_step", 0))
+
+    def get_episode_start_timestamp(self) -> Optional[str]:
+        """取得當前 episode 的起始 timestamp（字串；若不可得則回傳 None）。"""
+        return getattr(self, "episode_start_timestamp", None)
+
+    def get_feature_distribution_stats(
+        self,
+        feature_names: Iterable[str],
+        *,
+        quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9),
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        回傳指定 5m 特徵在「整段資料」上的分布摘要（mean/std + quantiles）。
+
+        用途：
+        - 快速檢查 train/eval 的 regime 是否漂移
+        - 避免在 callback 端自己重算特徵或讀 CSV
+
+        Returns:
+            dict[str, dict[str, float]]，例如：
+            {
+              "atr_ratio_z": {"mean": 0.01, "std": 0.98, "q10": -1.2, "q50": 0.0, "q90": 1.3},
+              ...
+            }
+        """
+        names = [str(x) for x in feature_names]
+        cols = list(getattr(self.market_data, "cols_5m", []) or [])
+        if not cols or not hasattr(self.market_data, "features_5m_arr"):
+            return {}
+
+        idx_map = {c: i for i, c in enumerate(cols)}
+        out: Dict[str, Dict[str, float]] = {}
+
+        feats = np.asarray(self.market_data.features_5m_arr)
+        if feats.ndim != 2 or feats.shape[0] <= 0:
+            return {}
+
+        qs = tuple(float(q) for q in quantiles)
+        for name in names:
+            i = idx_map.get(name)
+            if i is None:
+                continue
+            x = feats[:, int(i)].astype(np.float64, copy=False)
+            x = x[np.isfinite(x)]
+            if x.size == 0:
+                continue
+            d: Dict[str, float] = {
+                "mean": float(np.mean(x)),
+                "std": float(np.std(x)),
+            }
+            try:
+                qv = np.quantile(x, qs)
+                for q, v in zip(qs, qv):
+                    key = f"q{int(round(q * 100)):02d}"
+                    d[key] = float(v)
+            except Exception:
+                # quantile 非關鍵：失敗就只回 mean/std
+                pass
+            out[name] = d
+        return out
+
+    def get_episode_feature_stats(
+        self,
+        feature_names: Iterable[str],
+        *,
+        quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9),
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        回傳指定 5m 特徵在「本 episode 區間」上的分布摘要。
+
+        註：episode 區間使用 [episode_start_step, episode_start_step + episode_steps)。
+        """
+        start = int(getattr(self, "episode_start_step", 0))
+        steps = int(getattr(self, "episode_steps", 0))
+        end = int(max(start, start + max(1, steps)))
+
+        cols = list(getattr(self.market_data, "cols_5m", []) or [])
+        if not cols or not hasattr(self.market_data, "features_5m_arr"):
+            return {}
+
+        feats = np.asarray(self.market_data.features_5m_arr)
+        n = int(feats.shape[0]) if feats.ndim == 2 else 0
+        if n <= 0:
+            return {}
+
+        start = int(np.clip(start, 0, max(0, n - 1)))
+        end = int(np.clip(end, start + 1, n))
+
+        # 暫時切片成一個小矩陣（只用少數欄位）
+        idx_map = {c: i for i, c in enumerate(cols)}
+        names = [str(x) for x in feature_names]
+        qs = tuple(float(q) for q in quantiles)
+        out: Dict[str, Dict[str, float]] = {}
+        for name in names:
+            i = idx_map.get(name)
+            if i is None:
+                continue
+            x = feats[start:end, int(i)].astype(np.float64, copy=False)
+            x = x[np.isfinite(x)]
+            if x.size == 0:
+                continue
+            d: Dict[str, float] = {
+                "mean": float(np.mean(x)),
+                "std": float(np.std(x)),
+            }
+            try:
+                qv = np.quantile(x, qs)
+                for q, v in zip(qs, qv):
+                    key = f"q{int(round(q * 100)):02d}"
+                    d[key] = float(v)
+            except Exception:
+                pass
+            out[name] = d
+        return out
+
+    def _get_timestamp_str(self, *, step_idx: int) -> Optional[str]:
+        """安全取得 step_idx 對應的 timestamp 字串（YYYY-MM-DD HH:MM:SS）。"""
+        try:
+            df = getattr(self.market_data, "df_5m", None)
+            if df is None or "timestamp" not in df.columns:
+                return None
+            idx = int(np.clip(int(step_idx), 0, max(0, len(df) - 1)))
+            ts = df["timestamp"].iloc[idx]
+            # pandas Timestamp / datetime
+            return str(ts)[:19]
+        except Exception:
+            return None
 
     def _get_observation(self):
         # 準備 Observation 需要的各類 metrics
@@ -360,6 +599,10 @@ class TradingEnvironment(gym.Env):
         if done:
             info["termination_reason"] = termination_reason
             info["final_balance"] = float(new_equity)
+            # 評估/統計常用：episode 起點與步數
+            info["episode_start_step"] = int(getattr(self, "episode_start_step", 0))
+            info["episode_start_timestamp"] = getattr(self, "episode_start_timestamp", None)
+            info["episode_steps"] = int(getattr(self, "episode_steps", 0))
             info["episode_max_dd"] = float(episode_max_dd)
             info["episode_turnover_notional"] = float(max(0.0, episode_turnover_notional))
             info["episode_holding_steps"] = int(max(0, int(episode_holding_steps)))

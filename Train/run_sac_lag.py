@@ -137,6 +137,10 @@ def main() -> None:
         "window_size_1d": TrainConfig.WINDOW_SIZE_1D,
         # 固定特徵 symbols：讓 obs 維度包含 ETH/SOL/DOGE/1000PEPE 的跨市場摘要（5m）
         "feature_symbols": list(TrainConfig.FEATURE_SYMBOLS),
+        # 資料切分：訓練與評估資料分離（避免資料洩漏）
+        "data_split_enabled": bool(getattr(TrainConfig, "DATA_SPLIT_ENABLED", False)),
+        "data_mode": "train",
+        "holdout_months": int(getattr(TrainConfig, "HOLDOUT_MONTHS", 3)),
         # 這裡可以覆寫 Env/config.py 的預設值
     }
     
@@ -213,6 +217,12 @@ def main() -> None:
                 {
                     "random_start": bool(TrainConfig.EVAL_RANDOM_START),
                     "max_episode_steps": int(TrainConfig.EVAL_MAX_EPISODE_STEPS),
+                    # 評估最短長度：觀測暖機(1d window) + 評估回合長度
+                    "min_episode_steps": int(TrainConfig.EVAL_MAX_EPISODE_STEPS),
+                    # eval 用最近 N 個月
+                    "data_mode": "eval",
+                    # eval 的 obs 必須填滿（起點 >= max(WINDOW_SIZE_5M, WINDOW_SIZE_1D*288)）
+                    "ensure_filled_obs": True,
                 }
             )
             e = TradingEnvironment(env_id=9999, **eval_kwargs)

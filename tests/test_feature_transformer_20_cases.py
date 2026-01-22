@@ -153,8 +153,8 @@ def test_feature_shapes_are_fixed_and_safe(case: Case) -> None:
     assert md.price_seq_features_dim == len(md.cols_5m)
     assert md.price_seq_features_dim > 0
 
-    # 1d 必須固定 11 通道（7 symbol-specific + 4 macro）
-    assert md.features_1d_dim == 11
+    # 1d 必須固定 15 通道（11 symbol-specific + 4 macro）
+    assert md.features_1d_dim == 15
     spec = FeatureTransformer().get_spec()
     assert md.cols_1d == list(spec.price_seq_1d_cols)
 
@@ -162,7 +162,7 @@ def test_feature_shapes_are_fixed_and_safe(case: Case) -> None:
     seq_5m = md.get_price_seq(40)
     seq_1d = md.get_1d_seq(40, window_size_1d=10)
     assert seq_5m.shape == (32, md.price_seq_features_dim)
-    assert seq_1d.shape == (10, 11)
+    assert seq_1d.shape == (10, 15)
     # MarketData 內部特徵矩陣使用 float32（計算穩定）；env 輸出 obs 可能轉成 float16 以省 RAM
     assert seq_5m.dtype == np.float32
     assert seq_1d.dtype == np.float32

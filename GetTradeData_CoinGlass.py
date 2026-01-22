@@ -13,6 +13,37 @@ import pandas as pd
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def upsert_dataframe_to_csv(
+    new_df: pd.DataFrame,
+    filename: str,
+    key_cols: List[str],
+    parse_dates: Optional[List[str]] = None
+) -> pd.DataFrame:
+    """
+    將新資料與既有 CSV 合併，重複 key 以新資料覆蓋，其餘直接插入。
+
+    Args:
+        new_df: 要寫入的新資料 DataFrame。
+        filename: 目標 CSV 檔案路徑。
+        key_cols: 判定重複的欄位名稱列表。
+        parse_dates: 需要解析為日期的欄位名稱列表。
+
+    Returns:
+        合併後的 DataFrame。
+    """
+    if os.path.exists(filename):
+        existing_df = pd.read_csv(filename, parse_dates=parse_dates)
+        combined = pd.concat([existing_df, new_df], ignore_index=True)
+        combined = combined.drop_duplicates(subset=key_cols, keep="last")
+    else:
+        combined = new_df.copy()
+
+    if key_cols:
+        combined = combined.sort_values(key_cols).reset_index(drop=True)
+
+    combined.to_csv(filename, index=False)
+    return combined
+
 class CoinGlassAPIError(Exception):
     """Base exception for CoinGlass API errors."""
     pass
@@ -1058,7 +1089,7 @@ if __name__ == "__main__":
         '1000PEPEUSDT'
     ]
     EXCHANGE = "Binance"
-    INTERVAL = "15m"
+    INTERVAL = "1d"
         # 2. Define Time Range (1 year)
     diff = timedelta(minutes=15)
     diff_ms = diff.total_seconds() * 1000
@@ -1088,7 +1119,13 @@ if __name__ == "__main__":
                 
                 # Save to CSV
                 filename = f"Data/{symbol}_futures_volume_coinglass_5years_{INTERVAL}.csv"
-                all_klines.dropna().to_csv(filename, index=False)
+                clean_klines = all_klines.dropna()
+                upsert_dataframe_to_csv(
+                    clean_klines,
+                    filename,
+                    key_cols=["time"],
+                    parse_dates=["time"]
+                )
                 print(f"Data saved to {filename}")
 
                 # Add a small delay to avoid rate limiting
@@ -1107,8 +1144,13 @@ if __name__ == "__main__":
                 if 'time' in fear_greed.columns:
                         fear_greed['time'] = pd.to_datetime(fear_greed['time'], unit='ms')
                     
-                filename = f"Data/fear_greed_index_history.csv"
-                fear_greed.to_csv(filename, index=False)
+                filename = f"Data/fear_greed_index_history_1d.csv"
+                upsert_dataframe_to_csv(
+                    fear_greed,
+                    filename,
+                    key_cols=["time"],
+                    parse_dates=["time"]
+                )
                 print(f"Fear & Greed data saved to {filename}")
                 print(f"Fear & Greed records: {len(fear_greed)}")
             else:
@@ -1124,8 +1166,13 @@ if __name__ == "__main__":
                 if 'timestamp' in altcoin_season.columns:
                     altcoin_season['timestamp'] = pd.to_datetime(altcoin_season['timestamp'], unit='ms')
                     
-                    filename = f"Data/altcoin_season_index_history.csv"
-                    altcoin_season.to_csv(filename, index=False)
+                    filename = f"Data/altcoin_season_index_history_1d.csv"
+                    upsert_dataframe_to_csv(
+                        altcoin_season,
+                        filename,
+                        key_cols=["timestamp"],
+                        parse_dates=["timestamp"]
+                    )
                     print(f"Altcoin Season data saved to {filename}")
                     print(f"Altcoin Season records: {len(altcoin_season)}")
                 else:
@@ -1141,8 +1188,13 @@ if __name__ == "__main__":
                 if 'timestamp' in bitcoin_sth_sopr.columns:
                     bitcoin_sth_sopr['timestamp'] = pd.to_datetime(bitcoin_sth_sopr['timestamp'], unit='ms')
                     
-                    filename = f"Data/bitcoin_sth_sopr_index_history.csv"
-                    bitcoin_sth_sopr.to_csv(filename, index=False)
+                    filename = f"Data/bitcoin_sth_sopr_index_history_1d.csv"
+                    upsert_dataframe_to_csv(
+                        bitcoin_sth_sopr,
+                        filename,
+                        key_cols=["timestamp"],
+                        parse_dates=["timestamp"]
+                    )
                     print(f"Bitcoin STH SOPR data saved to {filename}")
                     print(f"Bitcoin STH SOPR records: {len(bitcoin_sth_sopr)}")
 
@@ -1153,8 +1205,13 @@ if __name__ == "__main__":
                 if 'timestamp' in bitcoin_lth_sopr.columns:
                     bitcoin_lth_sopr['timestamp'] = pd.to_datetime(bitcoin_lth_sopr['timestamp'], unit='ms')
                     
-                    filename = f"Data/bitcoin_sth_sopr_index_history.csv"
-                    bitcoin_lth_sopr.to_csv(filename, index=False)
+                    filename = f"Data/bitcoin_sth_sopr_index_history_1d.csv"
+                    upsert_dataframe_to_csv(
+                        bitcoin_lth_sopr,
+                        filename,
+                        key_cols=["timestamp"],
+                        parse_dates=["timestamp"]
+                    )
                     print(f"Bitcoin LTH SOPR data saved to {filename}")
                     print(f"Bitcoin LTH SOPR records: {len(bitcoin_lth_sopr)}")
             
@@ -1164,8 +1221,13 @@ if __name__ == "__main__":
                 if 'timestamp' in bitcoin_macro_oscillator.columns:
                     bitcoin_macro_oscillator['timestamp'] = pd.to_datetime(bitcoin_macro_oscillator['timestamp'], unit='ms')
                     
-                    filename = f"Data/bitcoin_macro_oscillator_index_history.csv"
-                    bitcoin_macro_oscillator.to_csv(filename, index=False)
+                    filename = f"Data/bitcoin_macro_oscillator_index_history_1d.csv"
+                    upsert_dataframe_to_csv(
+                        bitcoin_macro_oscillator,
+                        filename,
+                        key_cols=["timestamp"],
+                        parse_dates=["timestamp"]
+                    )
                     print(f"Bitcoin Macro Oscillator data saved to {filename}")
                     print(f"Bitcoin Macro Oscillator records: {len(bitcoin_macro_oscillator)}")
                 

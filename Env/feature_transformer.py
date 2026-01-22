@@ -8,7 +8,7 @@
 
 輸出：
 - 5m: price_seq  (T, 14)
-- 1d: price_seq_1d (D, K)  (K = symbol-specific coinglass + global macro；固定順序)
+- 1d: price_seq_1d (D, K)  (K = symbol-specific price+coinglass + global macro；固定順序)
 
 設計原則（符合你專案 OOP + SOLID 需求）：
 - SRP：本模組只負責「將 DataFrame → 特徵矩陣」與欄位定義，不負責環境 step/交易邏輯。
@@ -139,7 +139,7 @@ class FeatureTransformer:
         "alts_trend_spread_std_z",
     )
 
-    # ---- 1d：固定通道順序（symbol-specific coinglass + global macro）----
+    # ---- 1d：固定通道順序（symbol-specific price+coinglass + global macro）----
     PRICE_SEQ_1D_SYMBOL_COLS: Final[Tuple[str, ...]] = (
         "oi_close_z",
         "funding_close_z",
@@ -148,6 +148,11 @@ class FeatureTransformer:
         "liq_long_log_z",
         "liq_short_log_z",
         "ob_imbalance_z",
+        # ---- 1d price regime features ----
+        "ret_1d_z",
+        "range_1d_z",
+        "close_over_ema_20_z",
+        "ema_20_60_spread_z",
     )
     PRICE_SEQ_1D_MACRO_COLS: Final[Tuple[str, ...]] = (
         "fear_greed_z",
@@ -504,7 +509,7 @@ class FeatureTransformer:
         z_window_1d: int = 60,
     ) -> Tuple[np.ndarray, List[str]]:
         """
-        建立 1d 特徵矩陣（包含 symbol-specific + macro 共用）。
+        建立 1d 特徵矩陣（包含 symbol-specific price+coinglass + macro 共用）。
 
         Args:
             df_1d: merge 後的 1d DataFrame（含 `{symbol}_open_interest_close` 等欄位，以及 macro 前綴欄位）
@@ -516,7 +521,20 @@ class FeatureTransformer:
         """
         minp = max(10, z_window_1d // 6)
 
-        # ---- symbol-specific（coinglass 1d）----
+        # ---- symbol-specific（price + coinglass 1d）----
+        # 1) price-based regime
+        close_1d = _get_symbol_col(df_1d, target_symbol=target_symbol, suffix="close")
+        high_1d = _get_symbol_col(df_1d, target_symbol=target_symbol, suffix="high")
+        low_1d = _get_symbol_col(df_1d, target_symbol=target_symbol, suffix="low")
+        log_close_1d = _safe_log(close_1d)
+        ret_1d = log_close_1d.diff().fillna(0.0)
+        range_1d = (high_1d - low_1d) / np.maximum(close_1d, 1e-12)
+        ema_20 = self._ema(close_1d, span=20)
+        ema_60 = self._ema(close_1d, span=60)
+        close_over_ema_20 = (close_1d / np.maximum(ema_20, 1e-12)) - 1.0
+        ema_20_60_spread = (ema_20 - ema_60) / np.maximum(ema_60, 1e-12)
+
+        # 2) coinglass 1d
         # coinglass 1d 欄位通常有前綴；若測試資料沒有，會自動補 0。
         oi_close = _get_col(df_1d, f"{target_symbol}_open_interest_close")
         funding_close = _get_col(df_1d, f"{target_symbol}_funding_rate_close")
@@ -545,6 +563,10 @@ class FeatureTransformer:
                 "liq_long_log_z": _clip(_rolling_zscore(np.log1p(np.clip(liq_long, 0.0, None)), z_window_1d, minp)),
                 "liq_short_log_z": _clip(_rolling_zscore(np.log1p(np.clip(liq_short, 0.0, None)), z_window_1d, minp)),
                 "ob_imbalance_z": _clip(_rolling_zscore(ob_imbalance, z_window_1d, minp)),
+                "ret_1d_z": _clip(_rolling_zscore(ret_1d, z_window_1d, minp)),
+                "range_1d_z": _clip(_rolling_zscore(range_1d, z_window_1d, minp)),
+                "close_over_ema_20_z": _clip(_rolling_zscore(close_over_ema_20, z_window_1d, minp)),
+                "ema_20_60_spread_z": _clip(_rolling_zscore(ema_20_60_spread, z_window_1d, minp)),
                 "fear_greed_z": _clip(_rolling_zscore(fear_greed, z_window_1d, minp)),
                 "altcoin_season_z": _clip(_rolling_zscore(altcoin_season, z_window_1d, minp)),
                 "bmo_z": _clip(_rolling_zscore(bmo_value, z_window_1d, minp)),

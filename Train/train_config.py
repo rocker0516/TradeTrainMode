@@ -45,10 +45,10 @@ class TrainConfig:
     # - STATS_WINDOW_EPISODES: 統計最多取最近 M 個 episode（滾動視窗，建議：100）
     LOG_EVERY_EPISODES: int = 50
     STATS_WINDOW_EPISODES: int = 100
-    REWARD_SCALE: float = 1.5 # 獎勵尺度 1.0 代表獎勵不放大
+    REWARD_SCALE: float = 2 # 獎勵尺度 1.0 代表獎勵不放大
 
     # ---- SB3 SAC 超參數 ----
-    LEARNING_RATE: float = 2e-4
+    LEARNING_RATE: float = 1e-4
     BUFFER_SIZE: int = 1_000_000
     BATCH_SIZE: int = 256
     ENT_COEF: str = "auto"
@@ -59,23 +59,28 @@ class TrainConfig:
     EMB_5M: int = 256 # 5m 特徵維度
     EMB_1D: int = 128 # 1d 特徵維度
     EMB_VEC: int = 128 # 向量特徵維度
-    OUT_DIM: int = 384 # 輸出維度
+    OUT_DIM: int = 256 # 輸出維度
     PI_ARCH: tuple[int, int] = (256, 256) # P 網路結構
-    QF_ARCH: tuple[int, int] = (256, 256) # Q 網路結構
+    QF_ARCH: tuple[int, int] = (128, 128) # Q 網路結構
 
     # ---- Wrapper（動作平滑/重複）----
     # 訓練時建議用「更強的降頻/降換手」設定，否則手續費與 turnover 會把主線 log-return 磨成長期負值。
     # 這些會由 Train/run_sac_lag.py 以 CLI 參數覆寫（不必動 Env/config.py 的全域預設）。
-    ACTION_REPEAT: int = 2 # 5 代表 5 步一決策
+    ACTION_REPEAT: int = 1 # 5 代表 5 步一決策
     # 作用：訓練入口 `Train/run_sac_lag.py` 會用這個值建立 `ActionClipWrapper`，
     # 用來限制 agent 的「目標持倉百分比」在 [-MAX_POSITION_PCT, +MAX_POSITION_PCT]。
     # 優先順序：在 run_sac_lag 訓練流程中，此值會「覆蓋」Env.config.Config.MAX_POSITION_PCT（因為此處是顯式傳參）。
-    MAX_POSITION_PCT: float = 0.8
+    MAX_POSITION_PCT: float = 0.5
     MIN_POSITION_CHANGE: float = 0.1
 
     # ---- 環境參數 ----
-    WINDOW_SIZE_5M: int = 288 
-    WINDOW_SIZE_1D: int = 14
+    WINDOW_SIZE_5M: int = 288
+    WINDOW_SIZE_1D: int = 28
+
+    # ---- 資料切分（Train/Eval 分離）----
+    # 需求：評估資料使用「最近 N 個月」，剩餘資料作為訓練資料
+    DATA_SPLIT_ENABLED: bool = True
+    HOLDOUT_MONTHS: int = 3
 
     # ---- Log / Checkpoint ----
     TENSORBOARD_LOG_DIR: str = "logs/sac_lag_tb"
@@ -93,9 +98,9 @@ class TrainConfig:
     EVAL_N_EVAL_EPISODES: int = 10
     EVAL_DETERMINISTIC: bool = True
     # Eval 環境設定：避免隨機起點使指標不穩定（可重現）
-    EVAL_RANDOM_START: bool = False
+    EVAL_RANDOM_START: bool = True
     # 為了避免 eval 回合過長拖慢訓練：允許在 eval 端覆寫 episode 上限
-    EVAL_MAX_EPISODE_STEPS: int = 288*31
+    EVAL_MAX_EPISODE_STEPS: int = 288*7
     # Eval 每回合在 Terminal 顯示一行摘要
     EVAL_PRINT_EACH_EPISODE: bool = True
     EVAL_PRINT_PREFIX: str = "[EVAL]"
