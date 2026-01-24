@@ -4,8 +4,9 @@ Eval callback with detailed summary for production readiness check.
 from __future__ import annotations
 
 import os
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
@@ -18,6 +19,27 @@ class EvalConstraints:
 
     max_dd_limit: float
     mean_cost_limit: float
+
+
+@dataclass(frozen=True)
+class TrainEvalStartGateConfig:
+    """
+    訓練端「開始評估」的 gate 設定。
+
+    目的：
+    - 避免 agent 還在「大量死亡/提前結束」階段就開始 eval，讓你看到的 eval 指標更穩定且可解讀。
+
+    規則（以最近 window_size 個 training episodes 為準）：
+    - 若其中 max_steps_reached_count >= min_max_steps_reached_count，才允許開始跑 periodic eval。
+
+    注意：
+    - 這裡使用 training env 的 info["termination_reason"] 判斷 episode 是否為 max_steps_reached。
+    - 當 gate 尚未達標時，eval callback 會直接跳過本次 eval（不更新 best、不寫入 eval 指標）。
+    """
+
+    enabled: bool = True
+    window_size: int = 100
+    min_max_steps_reached_count: int = 70
 
 
 @dataclass(frozen=True)
@@ -42,6 +64,69 @@ class EvalConfig:
     best_model_path: str
     print_each_episode: bool = False
     print_prefix: str = "[EVAL]"
+    # 只有訓練端達到「足夠多回合能撐到 max_steps」才開始 eval
+    train_start_gate: TrainEvalStartGateConfig = field(default_factory=TrainEvalStartGateConfig)
+
+
+class _TrainEpisodeWindowGate:
+    """維護最近 N 個訓練回合，判斷是否可開始 eval。"""
+
+    def __init__(self, *, config: TrainEvalStartGateConfig) -> None:
+        self._cfg = config
+        self._is_max_steps_hist: Deque[bool] = deque(maxlen=int(max(1, config.window_size)))
+        self._max_steps_count: int = 0
+
+    def update_from_infos(self, infos: Any) -> None:
+        """
+        從 SB3 callback locals 的 infos 更新 episode window。
+
+        Args:
+            infos: 一般是 List[dict]（VecEnv 每個 env 一個 info）
+        """
+        if not bool(getattr(self._cfg, "enabled", True)):
+            return
+        if not isinstance(infos, (list, tuple)):
+            return
+
+        for info in infos:
+            if not isinstance(info, dict):
+                continue
+
+            # VecMonitor 在 episode 結束時會附加 "episode" dict；同時我們的 env 會給 termination_reason
+            termination_reason = info.get("termination_reason", None)
+            is_episode_end = ("episode" in info) or bool(info.get("terminated", False)) or bool(info.get("truncated", False))
+            if (not is_episode_end) or (termination_reason is None):
+                continue
+
+            is_max_steps = bool(str(termination_reason) == "max_steps_reached")
+
+            # 維護 max_steps_count（用 deque 的 pop 補償）
+            if len(self._is_max_steps_hist) == self._is_max_steps_hist.maxlen:
+                old = bool(self._is_max_steps_hist[0])
+                if old:
+                    self._max_steps_count = int(max(0, self._max_steps_count - 1))
+
+            self._is_max_steps_hist.append(is_max_steps)
+            if is_max_steps:
+                self._max_steps_count = int(self._max_steps_count + 1)
+
+    def is_ready(self) -> bool:
+        """是否已達到可開始 eval 的條件。"""
+        if not bool(getattr(self._cfg, "enabled", True)):
+            return True
+        if len(self._is_max_steps_hist) < int(self._cfg.window_size):
+            return False
+        return int(self._max_steps_count) >= int(self._cfg.min_max_steps_reached_count)
+
+    def snapshot(self) -> Dict[str, Any]:
+        """供 debug 使用的狀態快照。"""
+        return {
+            "enabled": bool(self._cfg.enabled),
+            "window_size": int(self._cfg.window_size),
+            "min_max_steps_reached_count": int(self._cfg.min_max_steps_reached_count),
+            "seen_episodes": int(len(self._is_max_steps_hist)),
+            "max_steps_reached_count": int(self._max_steps_count),
+        }
 
 
 class ConstraintEvalCallback(BaseCallback):
@@ -60,9 +145,19 @@ class ConstraintEvalCallback(BaseCallback):
 
         self._last_eval_timestep: int = 0
         self._best_mean_final_balance: float = float("-inf")
+        self._train_start_gate = _TrainEpisodeWindowGate(config=self.eval_config.train_start_gate)
 
     def _on_step(self) -> bool:
         if not bool(self.eval_config.enabled):
+            return True
+
+        # 更新「訓練端 episode window」：尚未達標前不跑 eval
+        try:
+            self._train_start_gate.update_from_infos(self.locals.get("infos", None))
+        except Exception:
+            # gate 是輔助功能，不應阻斷訓練
+            pass
+        if not bool(self._train_start_gate.is_ready()):
             return True
 
         current_ts = int(getattr(self.model, "num_timesteps", 0))

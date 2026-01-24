@@ -23,16 +23,35 @@ class Config:
     WINDOW_SIZE: int = 288 * 3  # 5m * 288 = 1 day
     WINDOW_SIZE_1D: int = 30
 
+    # ---- 風險基準資金更新頻率 ----
+    # daily_risk_base：用於「單步最大倉位變化限制(max_step_pos_change_pct)」的基準金額。
+    # 你希望每 288 steps（以 5m K 計，一天）更新一次，避免 base 資金跟著每一步波動而造成過度調倉。
+    # 註：訓練入口 `Train/run_sac_lag.py` 會顯式傳入此值，以確保訓練與評估一致。
+    RISK_BASE_UPDATE_STEPS: int = 288
+
     # ---- 交易參數 ----
     LEVERAGE: float = 10.0
     MIN_BALANCE: float = INITIAL_BALANCE * 0.5 # 最小餘額 0. 5 代表 50%
-    MIN_EPISODE_STEPS: int = 288 * 31 * 6 # 最小步數 288 * 31 = 8928 步
-    MAX_EPISODE_STEPS: int = 288 * 31 * 6 # 最大步數 288 * 31 = 8928 步
+    MIN_EPISODE_STEPS: int = 288 * 31* 3 # 最小步數 288 * 31 = 8928 步
+    MAX_EPISODE_STEPS: int = 288 * 31* 3  # 最大步數 288 * 31 = 8928 步
     # 最小調倉幅度（Deadband, 0.0 ~ 1.0）
     # 預設使用 0.0：讓「單步倉位變化限制(max_step_pos_change_pct)」可以逐步累積倉位，
     # 需要抑制微小調倉刷手續費時，再由外部 kwargs 覆寫（例如 0.2 代表 20%）。
     MIN_POSITION_CHANGE: float = 0.0 # 最小調倉幅度（預設不啟用 deadband）
     MAX_STEP_POS_CHANGE_PCT: float = 0.5 # 最大單步持倉比例變化 0.5 代表 50%
+
+    # ---- No-trade hysteresis（方案2：雙門檻）----
+    # 目的：讓「空倉/不交易」更穩定，避免 SAC 在 0 附近的小噪音反覆觸發開/平倉。
+    #
+    # 語義（action 是目標倉位比例）：
+    # - 空倉時：|action| < NO_TRADE_ENTRY_THRESHOLD => 強制 action=0（不進場）
+    # - 有倉時：|action| < NO_TRADE_EXIT_THRESHOLD  => 強制 action=0（更容易回到空倉）
+    #
+    # 注意：
+    # - 單位是「目標倉位比例」（position pct），不是百分比(%)
+    # - 若你使用 ActionClipWrapper 限制最大持倉（TrainConfig.MAX_POSITION_PCT），建議 threshold 也隨之調整（下面會討論）
+    NO_TRADE_ENTRY_THRESHOLD: float = 0.0
+    NO_TRADE_EXIT_THRESHOLD: float = 0.0
 
     # ---- 訓練/執行 Wrapper 參數（單一來源）----
     # ActionClipWrapper：硬限制最大目標倉位（不做 action smoothing）

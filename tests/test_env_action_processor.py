@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from Env.Components.action_processor import ActionProcessor
 from Env.Executors.trade_executor import TradeExecutor
@@ -72,5 +73,75 @@ def test_action_processor_max_step_change_limits_position_build_up() -> None:
     )
     final_pct_close = ap.calculate_effective_action(0.0, ex, price, risk_base=1000.0)
     assert abs(final_pct_close) <= abs(final_pct)
+
+
+def test_action_processor_no_trade_hysteresis_blocks_entry_when_flat() -> None:
+    ex = _make_executor()
+    ap = ActionProcessor(
+        leverage=10.0,
+        max_step_pos_change_pct=1.0,
+        min_position_change=0.0,
+        no_trade_entry_threshold=0.06,
+        no_trade_exit_threshold=0.03,
+    )
+
+    # 空倉時：小於 entry threshold 的 action 應被吸附到 0（不進場）
+    target, is_flip = ap.process_action(np.array([0.05], dtype=np.float32), ex, 100.0)
+    assert is_flip is False
+    assert float(target) == 0.0
+
+
+def test_action_processor_no_trade_hysteresis_allows_entry_above_threshold() -> None:
+    ex = _make_executor()
+    ap = ActionProcessor(
+        leverage=10.0,
+        max_step_pos_change_pct=1.0,
+        min_position_change=0.0,
+        no_trade_entry_threshold=0.06,
+        no_trade_exit_threshold=0.03,
+    )
+
+    target, is_flip = ap.process_action(np.array([0.07], dtype=np.float32), ex, 100.0)
+    assert is_flip is False
+    assert float(target) == pytest.approx(0.07, abs=1e-8)
+
+
+def test_action_processor_no_trade_hysteresis_exits_when_has_position_and_action_below_exit_threshold() -> None:
+    ex = _make_executor()
+    ap = ActionProcessor(
+        leverage=10.0,
+        max_step_pos_change_pct=1.0,
+        min_position_change=0.0,
+        no_trade_entry_threshold=0.06,
+        no_trade_exit_threshold=0.03,
+    )
+
+    # 先建立一個小倉位（讓 has_pos=True）
+    ex.execute(
+        position_percent=0.2,
+        current_price=100.0,
+        high=101.0,
+        low=99.0,
+        equity=ex.equity(100.0),
+        atr=0.0,
+        risk_base=1000.0,
+    )
+
+    # 有倉時：小於 exit threshold 的 action 應被吸附到 0（更容易回到空倉）
+    target, is_flip = ap.process_action(np.array([0.02], dtype=np.float32), ex, 100.0)
+    assert is_flip is False
+    assert float(target) == 0.0
+
+
+def test_action_processor_no_trade_hysteresis_validates_threshold_order() -> None:
+    # entry 必須 >= exit（否則 hysteresis 會失去意義）
+    with pytest.raises(ValueError):
+        ActionProcessor(
+            leverage=10.0,
+            max_step_pos_change_pct=1.0,
+            min_position_change=0.0,
+            no_trade_entry_threshold=0.02,
+            no_trade_exit_threshold=0.03,
+        )
 
 

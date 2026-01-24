@@ -60,6 +60,14 @@ class TradingEnvironment(gym.Env):
         # 預設行為不變：若未提供 max_episode_steps，仍使用 Config.MAX_EPISODE_STEPS。
         self.max_episode_steps = int(kwargs.get("max_episode_steps", getattr(Config, "MAX_EPISODE_STEPS", 1000000)))
         self.min_position_change = float(kwargs.get("min_position_change", Config.MIN_POSITION_CHANGE))
+        # daily_risk_base 更新頻率（用於單步倉位變化上限的基準）
+        # 預設用 Config.RISK_BASE_UPDATE_STEPS；若未設定則回退到 window_size（維持舊語義）
+        self.risk_base_update_steps = int(
+            kwargs.get(
+                "risk_base_update_steps",
+                getattr(Config, "RISK_BASE_UPDATE_STEPS", self.window_size),
+            )
+        )
         self.random_start = kwargs.get('random_start', True)
         self.target_symbol = kwargs.get('target_symbol', 'BTCUSDT') # 預設交易對
         # 固定的特徵 symbols 清單（決定 5m 跨市場摘要的維度）
@@ -113,7 +121,10 @@ class TradingEnvironment(gym.Env):
         self.action_processor = ActionProcessor(
             leverage=self.leverage,
             max_step_pos_change_pct=float(kwargs.get("max_step_pos_change_pct", Config.MAX_STEP_POS_CHANGE_PCT)),
-            min_position_change=self.min_position_change
+            min_position_change=self.min_position_change,
+            # no-trade 雙門檻（hysteresis）：讓 0 倉位更穩定，避免 action 0 附近抖動造成反覆成交
+            no_trade_entry_threshold=float(kwargs.get("no_trade_entry_threshold", getattr(Config, "NO_TRADE_ENTRY_THRESHOLD", 0.0))),
+            no_trade_exit_threshold=float(kwargs.get("no_trade_exit_threshold", getattr(Config, "NO_TRADE_EXIT_THRESHOLD", 0.0))),
         )
         # Action Space
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
@@ -674,7 +685,8 @@ class TradingEnvironment(gym.Env):
         """
         以固定間隔更新 daily_risk_base（原本 step() 內的邏輯抽離，行為不變）。
         """
-        if (self.current_step - self.last_risk_base_update_step) >= self.window_size:
+        update_every = int(max(1, self.risk_base_update_steps))
+        if (self.current_step - self.last_risk_base_update_step) >= update_every:
             self.daily_risk_base = float(self.executor.wallet_balance)
             self.last_risk_base_update_step = self.current_step
 

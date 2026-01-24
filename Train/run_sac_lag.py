@@ -26,7 +26,12 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 
 from Env.trading_env import TradingEnvironment
 from Env.wrappers import ActionRepeatWrapper, ActionClipWrapper
-from Train.eval_callback import ConstraintEvalCallback, EvalConfig, EvalConstraints
+from Train.eval_callback import (
+    ConstraintEvalCallback,
+    EvalConfig,
+    EvalConstraints,
+    TrainEvalStartGateConfig,
+)
 from Train.optimized_dict_replay_buffer import OptimizedDictReplayBuffer
 from Train.sb3_cnn_policy import DualCnnFeatureExtractor
 from Train.lagrangian import (
@@ -135,6 +140,15 @@ def main() -> None:
         "target_symbol": args.symbol,
         "window_size": TrainConfig.WINDOW_SIZE_5M,
         "window_size_1d": TrainConfig.WINDOW_SIZE_1D,
+        # Deadband：抑制微小調倉（避免 action 抖動導致過度成交/手續費爆炸）
+        # 注意：Env/config.py 預設可能是 0.0；訓練入口必須顯式傳入才會生效。
+        "min_position_change": float(getattr(TrainConfig, "MIN_POSITION_CHANGE", 0.0)),
+        # No-trade hysteresis（方案2：雙門檻），讓 0 倉位更穩定
+        "no_trade_entry_threshold": float(getattr(TrainConfig, "NO_TRADE_ENTRY_THRESHOLD", 0.0)),
+        "no_trade_exit_threshold": float(getattr(TrainConfig, "NO_TRADE_EXIT_THRESHOLD", 0.0)),
+        # daily_risk_base 更新頻率（用於 max_step_pos_change 的「單步加倉上限」基準）
+        # 你希望每 288 steps（一日 5m K 數）才更新一次 base 資金，這裡固定跟隨 WINDOW_SIZE_5M。
+        "risk_base_update_steps": int(getattr(TrainConfig, "WINDOW_SIZE_5M", 288)),
         # 固定特徵 symbols：讓 obs 維度包含 ETH/SOL/DOGE/1000PEPE 的跨市場摘要（5m）
         "feature_symbols": list(TrainConfig.FEATURE_SYMBOLS),
         # 資料切分：訓練與評估資料分離（避免資料洩漏）
@@ -245,6 +259,11 @@ def main() -> None:
                 constraints=EvalConstraints(
                     max_dd_limit=float(TrainConfig.EVAL_MAX_DD_LIMIT),
                     mean_cost_limit=float(TrainConfig.EVAL_MEAN_COST_LIMIT),
+                ),
+                train_start_gate=TrainEvalStartGateConfig(
+                    enabled=True,
+                    window_size=100,
+                    min_max_steps_reached_count=70,
                 ),
                 save_best_model=bool(TrainConfig.EVAL_SAVE_BEST_MODEL),
                 best_model_path=str(best_model_path),

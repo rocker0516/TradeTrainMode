@@ -33,7 +33,7 @@ class TrainConfig:
     # 新版：雙路徑成本限制（risk / friction）- 目前 Controller 尚未完全支援分開的 dual-lambda，
     # 但保留參數供未來擴充。邏輯同上，Risk 應趨近於 0，Fric 容許少量。
     RISK_COST_LIMIT: float = 0.001 # 0.000005 代表 0.0005% 死亡風險(容許極小風險)
-    FRIC_COST_LIMIT: float = 0.0001 # 0.002：代表允許每步平均手續費佔權益 0.2%
+    FRIC_COST_LIMIT: float = 0.00005 # 0.002：代表允許每步平均手續費佔權益 0.2%
     # Stop-Buffer Cost（0~1）：建議先設很小的平均步成本上限，因為「接近止損」應該是短暫狀態
     SL_BUF_COST_LIMIT: float = 0.01 # 0.1：代表允許每步平均止損緩衝成本佔權益 10%
     # Stop-Loss Event Cost（事件型）：當步觸發止損時才會出現的成本（獨立成本線，不歸類到 risk）。
@@ -45,12 +45,12 @@ class TrainConfig:
     # - STATS_WINDOW_EPISODES: 統計最多取最近 M 個 episode（滾動視窗，建議：100）
     LOG_EVERY_EPISODES: int = 50
     STATS_WINDOW_EPISODES: int = 100
-    REWARD_SCALE: float = 2 # 獎勵尺度 1.0 代表獎勵不放大
+    REWARD_SCALE: float = 1 # 獎勵尺度 1.0 代表獎勵不放大
 
     # ---- SB3 SAC 超參數 ----
-    LEARNING_RATE: float = 1e-4
-    BUFFER_SIZE: int = 1_000_000
-    BATCH_SIZE: int = 256
+    LEARNING_RATE: float = 2e-4
+    BUFFER_SIZE: int = 1_500_000
+    BATCH_SIZE: int = 128
     ENT_COEF: str = "auto"
     TRAIN_FREQ: int = 1 # 1 代表每次更新參數時，只用一個 batch 的資料
     GRADIENT_STEPS: int = 1 # 1 代表每次更新參數時，只用一個 batch 的資料進行梯度下降
@@ -70,12 +70,20 @@ class TrainConfig:
     # 作用：訓練入口 `Train/run_sac_lag.py` 會用這個值建立 `ActionClipWrapper`，
     # 用來限制 agent 的「目標持倉百分比」在 [-MAX_POSITION_PCT, +MAX_POSITION_PCT]。
     # 優先順序：在 run_sac_lag 訓練流程中，此值會「覆蓋」Env.config.Config.MAX_POSITION_PCT（因為此處是顯式傳參）。
-    MAX_POSITION_PCT: float = 0.5
-    MIN_POSITION_CHANGE: float = 0.1
+    MAX_POSITION_PCT: float = 0.7
+    MIN_POSITION_CHANGE: float = 0.2
+
+    # ---- No-trade hysteresis（方案2：雙門檻）----
+    # 建議先用很小的值觀察 trade_steps 與 fees 是否下降：
+    # - entry：空倉時需有明確訊號才進場
+    # - exit ：有倉時較容易回到空倉（避免 0 附近抖動）
+    # 注意：單位是目標倉位比例（position pct），並且動作會先被 clip 到 [-MAX_POSITION_PCT, +MAX_POSITION_PCT]。
+    NO_TRADE_ENTRY_THRESHOLD: float = MIN_POSITION_CHANGE
+    NO_TRADE_EXIT_THRESHOLD: float = 0.1
 
     # ---- 環境參數 ----
     WINDOW_SIZE_5M: int = 288
-    WINDOW_SIZE_1D: int = 28
+    WINDOW_SIZE_1D: int = 14
 
     # ---- 資料切分（Train/Eval 分離）----
     # 需求：評估資料使用「最近 N 個月」，剩餘資料作為訓練資料
@@ -95,12 +103,12 @@ class TrainConfig:
     EVAL_ENABLED: bool = True
     # 以「訓練總 timesteps」為基準（使用 SB3 的 model.num_timesteps），確保在 VecEnv 下語意正確
     EVAL_EVERY_TIMESTEPS: int = 1_000_000
-    EVAL_N_EVAL_EPISODES: int = 10
+    EVAL_N_EVAL_EPISODES: int = 20
     EVAL_DETERMINISTIC: bool = True
     # Eval 環境設定：避免隨機起點使指標不穩定（可重現）
     EVAL_RANDOM_START: bool = True
     # 為了避免 eval 回合過長拖慢訓練：允許在 eval 端覆寫 episode 上限
-    EVAL_MAX_EPISODE_STEPS: int = 288*7
+    EVAL_MAX_EPISODE_STEPS: int = 288*14
     # Eval 每回合在 Terminal 顯示一行摘要
     EVAL_PRINT_EACH_EPISODE: bool = True
     EVAL_PRINT_PREFIX: str = "[EVAL]"

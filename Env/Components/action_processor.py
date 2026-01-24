@@ -4,16 +4,29 @@ class ActionProcessor:
     """
     負責動作處理邏輯：
     1. 翻倉偵測 (Flip Detection)（僅標記 is_flip；不做預算限制）
+    1.1 no-trade 雙門檻（hysteresis）：讓 0 倉位更穩定（避免 action 0 附近抖動造成反覆成交）
     2. 單步倉位變化限制 (Max Step Position Change)
     3. 最小調倉幅度過濾 (Deadband)
     """
     def __init__(self, 
                  leverage: float, 
                  max_step_pos_change_pct: float,
-                 min_position_change: float):
+                 min_position_change: float,
+                 no_trade_entry_threshold: float = 0.0,
+                 no_trade_exit_threshold: float = 0.0):
         self.leverage = float(leverage)
         self.max_step_pos_change_pct = float(max_step_pos_change_pct)
         self.min_position_change = float(min_position_change)
+        self.no_trade_entry_threshold = float(no_trade_entry_threshold)
+        self.no_trade_exit_threshold = float(no_trade_exit_threshold)
+
+        # 允許關閉 hysteresis：兩者皆為 0 即不生效
+        if self.no_trade_entry_threshold < 0.0:
+            raise ValueError("no_trade_entry_threshold must be >= 0")
+        if self.no_trade_exit_threshold < 0.0:
+            raise ValueError("no_trade_exit_threshold must be >= 0")
+        if self.no_trade_entry_threshold < self.no_trade_exit_threshold:
+            raise ValueError("no_trade_entry_threshold must be >= no_trade_exit_threshold")
 
     def process_action(self, 
                        action_raw: np.ndarray, 
@@ -36,6 +49,18 @@ class ActionProcessor:
         if max_nominal > 0:
             current_pos_val = executor.position.size * current_price
             current_pos_pct = current_pos_val / max_nominal
+
+        # 2.1 No-trade hysteresis (方案2)
+        # - 空倉時：|action| < entry_threshold => 強制 0（避免被小噪音推著開小倉）
+        # - 有倉時：|action| < exit_threshold  => 強制 0（允許更敏感地回到空倉）
+        # 注意：閾值單位是「目標倉位比例」(position pct)，並且 action 可能已被 ActionClipWrapper 先 clip。
+        entry_th = float(self.no_trade_entry_threshold)
+        exit_th = float(self.no_trade_exit_threshold)
+        if (entry_th > 0.0) or (exit_th > 0.0):
+            has_pos = abs(float(getattr(executor.position, "size", 0.0))) > 1e-8
+            th = exit_th if has_pos else entry_th
+            if abs(float(target_pos_pct)) < th:
+                target_pos_pct = 0.0
 
         # 3. Flip Detect（只標記，不限制）
         is_flip = (target_pos_pct * current_pos_pct < -0.01)  # Crossing zero significantly
