@@ -169,6 +169,7 @@ class BinanceFuturesClient(ITradingClient):
                 or os.getenv("BINANCE_API_KEY")
                 or os.getenv("BINANCE_TEST_TRADE_API_KEY")
                 or os.getenv("BINANCE_TEST_API_KEY")
+                or 'JFyghzzEKteoSzrDlUbNPAYxyCnFwmwylHyNAkxRJhW4xlPdFcN5b9UgYBwU2o0p'
             )
             api_secret = (
                 api_secret
@@ -176,6 +177,7 @@ class BinanceFuturesClient(ITradingClient):
                 or os.getenv("BINANCE_API_SECRET")
                 or os.getenv("BINANCE_TEST_TRADE_API_SECRET")
                 or os.getenv("BINANCE_TEST_API_SECRET")
+                or  'N43ec0htdk2Bp14WuTLKmU0mhFsk4mmk8AMZy6PsPTshccVa5PDaOKu2QJ6Ngth1'
             )
 
             if not api_key or not api_secret:
