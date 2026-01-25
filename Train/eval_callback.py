@@ -37,9 +37,11 @@ class TrainEvalStartGateConfig:
     - 當 gate 尚未達標時，eval callback 會直接跳過本次 eval（不更新 best、不寫入 eval 指標）。
     """
 
-    enabled: bool = True
+    # 預設關閉：避免在一般使用/單元測試時「第一次 eval 永遠不會跑」。
+    # 若你在訓練端需要 gate，請在訓練入口顯式啟用並設定 window/min_count。
+    enabled: bool = False
     window_size: int = 100
-    min_max_steps_reached_count: int = 70
+    min_max_steps_reached_count: int = 90
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,10 @@ class EvalConfig:
     best_model_path: str
     print_each_episode: bool = False
     print_prefix: str = "[EVAL]"
+    # Render
+    # - True：每個 eval episode 結束時呼叫 env.render()（用於出圖/存檔/人工觀察）
+    # - 注意：是否真的顯示視窗取決於 env 端 render_show + matplotlib backend（策略 A）
+    render_each_episode: bool = False
     # 只有訓練端達到「足夠多回合能撐到 max_steps」才開始 eval
     train_start_gate: TrainEvalStartGateConfig = field(default_factory=TrainEvalStartGateConfig)
 
@@ -286,6 +292,21 @@ class ConstraintEvalCallback(BaseCallback):
                 cost_sl_event_sum = _add_cost("cost_sl_event", cost_sl_event_sum)
 
                 done = bool(dones[0])
+
+            # episode end: optional render (VecEnv-safe)
+            #
+            # 重要：SB3 VecEnv（DummyVecEnv/SubprocVecEnv）會在 done 那一步「自動 reset」，
+            # 因此在 episode 結束後再呼叫 env_method("render") 幾乎必定失敗（env.done 已被 reset 清掉）。
+            # 正確作法：在 env 端啟用 render_on_done，於終止那一步就把 render_path 塞回 info。
+            if bool(getattr(self.eval_config, "render_each_episode", False)):
+                out_path = None
+                try:
+                    out_path = last_info.get("render_path", None) if isinstance(last_info, dict) else None
+                except Exception:
+                    out_path = None
+                if out_path and bool(getattr(self.eval_config, "print_each_episode", False)):
+                    prefix = str(getattr(self.eval_config, "print_prefix", "[EVAL]"))
+                    print(f"{prefix} render_saved: {out_path}", flush=True)
 
             # 以 info["episode_steps"] 為主（最貼近 env 內部結束時記錄），
             # 失敗再回退到 env_method 或 loop 計數。

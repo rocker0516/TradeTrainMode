@@ -89,8 +89,28 @@ class TradingEnvironment(gym.Env):
         ensure_filled_default = bool(self.data_mode == "eval")
         self.ensure_filled_obs = bool(kwargs.get("ensure_filled_obs", ensure_filled_default))
 
-        # 載入數據
-        self.df_5m, self.df_1d = load_data()
+        # ---- Render (episode end) ----
+        # 說明：render 主要用於 eval/debug，不應在 step() 內做昂貴工作。
+        # 預設：save + show（策略 A：能 show 就 show；無 GUI 自動只存檔）
+        self.render_enabled = bool(kwargs.get("render_enabled", True))
+        self.render_dir = str(kwargs.get("render_dir", "logs/renders"))
+        self.render_save = bool(kwargs.get("render_save", True))
+        self.render_show = bool(kwargs.get("render_show", True))
+        # 重要：VecEnv（例如 SB3 DummyVecEnv/SubprocVecEnv）會在 step() 遇到 done 時「自動 reset」，
+        # 因此 callback 在 episode 結束後再呼叫 env.render() 往往會失敗（env.done 已被 reset() 清掉）。
+        # 解法：允許在「終止那一步」直接 render 並把路徑塞回 info（render_path），讓 callback 能拿到結果。
+        # 預設關閉避免訓練時額外負擔；eval 建議開啟。
+        self.render_on_done = bool(kwargs.get("render_on_done", False))
+        self.render_dpi = int(kwargs.get("render_dpi", 140))
+        self.render_figsize = tuple(kwargs.get("render_figsize", (14.0, 9.0)))
+
+        # 載入數據（允許測試/外部注入 df，避免強耦合到檔案系統）
+        df_5m_in = kwargs.get("df_5m", None)
+        df_1d_in = kwargs.get("df_1d", None)
+        if df_5m_in is not None and df_1d_in is not None:
+            self.df_5m, self.df_1d = df_5m_in, df_1d_in
+        else:
+            self.df_5m, self.df_1d = load_data()
 
         # ---- Apply train/eval split by recent months ----
         if self.data_split_enabled and self.data_mode in {"train", "eval"}:
@@ -161,6 +181,30 @@ class TradingEnvironment(gym.Env):
             data_len=len(self.df_5m),
             fee_rolling_window=int(kwargs.get("fee_rolling_window", Config.FEE_ROLLING_WINDOW))
         )
+
+        # ---- Render runtime caches ----
+        # 每步事件（供 episode 結束時 render 畫 entry/reduce/close/flip/SL/LIQ）
+        self._episode_events: list[dict[str, Any]] = []
+        self._last_info: Optional[Dict[str, Any]] = None
+        self._last_executed_step_idx: Optional[int] = None
+        self._rendered_this_episode: bool = False
+        # Renderer（lazy import，避免在訓練時增加 import 成本）
+        self._renderer = None
+        if self.render_enabled:
+            try:
+                from Env.Renderers.mpl_episode_renderer import MplfinanceEpisodeRenderer, RenderOutput
+
+                self._renderer = MplfinanceEpisodeRenderer(
+                    output=RenderOutput(
+                        save_dir=self.render_dir,
+                        save=self.render_save,
+                        show=self.render_show,
+                        dpi=self.render_dpi,
+                        figsize=self.render_figsize,
+                    )
+                )
+            except Exception:
+                self._renderer = None
         
         # Fee Limit
         self.fee_limit_enabled = getattr(Config, "FEE_LIMIT_ENABLED", True)
@@ -202,6 +246,87 @@ class TradingEnvironment(gym.Env):
         self.stop_loss_cooldown = 0
         self.daily_risk_base = 0.0
         self.last_risk_base_update_step = 0
+
+    def _record_step_events(
+        self,
+        *,
+        step_idx: int,
+        prev_size: float,
+        new_size: float,
+        current_price: float,
+        current_high: float,
+        current_low: float,
+        stop_loss_triggered: bool,
+        liq_triggered: bool,
+    ) -> None:
+        """記錄本 step 的交易事件（供 render 使用）。
+
+        需求對應：
+        - entry：0 -> 非 0
+        - reduce：部分減倉（同方向、曝險變小、且未回到 0）
+        - close：完全平倉（非 0 -> 0）
+        - flip：翻倉（多<->空）同一步標兩點（close + entry）
+        - SL：止損（獨立標記）
+        - LIQ：爆倉/強平（獨立標記）
+
+        備註：
+        - delta_qty 單位為「資產單位」（例如 BTC）。
+        - 事件位置以「本 step 使用的 K 線（step_idx）」對齊；時間由 df_5m.timestamp 決定。
+        """
+        try:
+            step_idx = int(step_idx)
+            prev_size = float(prev_size)
+            new_size = float(new_size)
+            delta = float(new_size - prev_size)
+            if abs(delta) <= 1e-12 and (not stop_loss_triggered) and (not liq_triggered):
+                return
+            ts = None
+            try:
+                ts = self.market_data.df_5m["timestamp"].iloc[int(step_idx)]
+            except Exception:
+                ts = None
+
+            base = {
+                "step_idx": int(step_idx),
+                "timestamp": ts,
+                "price": float(current_price),
+                "high": float(current_high),
+                "low": float(current_low),
+                "prev_size": float(prev_size),
+                "new_size": float(new_size),
+            }
+
+            # 1) SL / LIQ 事件（獨立標記）
+            if bool(stop_loss_triggered) and abs(prev_size) > 1e-12:
+                self._episode_events.append({**base, "type": "sl", "delta_qty": float(-prev_size)})
+            if bool(liq_triggered) and abs(prev_size) > 1e-12:
+                self._episode_events.append({**base, "type": "liq", "delta_qty": float(-prev_size)})
+
+            # 2) 交易事件（entry/reduce/close/flip）
+            # flip：多<->空（同一步標兩點：close 舊方向 + entry 新方向）
+            if (prev_size > 1e-12 and new_size < -1e-12) or (prev_size < -1e-12 and new_size > 1e-12):
+                self._episode_events.append({**base, "type": "close", "delta_qty": float(-prev_size)})
+                self._episode_events.append({**base, "type": "entry", "delta_qty": float(new_size)})
+                return
+
+            # entry
+            if abs(prev_size) <= 1e-12 and abs(new_size) > 1e-12:
+                self._episode_events.append({**base, "type": "entry", "delta_qty": float(new_size)})
+                return
+
+            # close
+            if abs(prev_size) > 1e-12 and abs(new_size) <= 1e-12:
+                self._episode_events.append({**base, "type": "close", "delta_qty": float(-prev_size)})
+                return
+
+            # reduce（部分減倉）
+            if abs(prev_size) > 1e-12 and abs(new_size) > 1e-12:
+                same_dir = (prev_size * new_size) > 0.0
+                if same_dir and abs(new_size) < abs(prev_size) and abs(delta) > 1e-12:
+                    self._episode_events.append({**base, "type": "reduce", "delta_qty": float(delta)})
+        except Exception:
+            # render helper must never break training
+            return
 
     @staticmethod
     def _split_train_eval_by_recent_months(
@@ -303,6 +428,12 @@ class TradingEnvironment(gym.Env):
         self.tracker.fee_history.clear()
         self.tracker.rolling_fee_sum = 0.0
         self.tracker.prev_total_fees = 0.0
+
+        # Render caches
+        self._episode_events = []
+        self._last_info = None
+        self._last_executed_step_idx = None
+        self._rendered_this_episode = False
         
         # 3. Reset State Variables
         # Flip budget 機制已移除：risk_budget 固定為 1.0（僅供觀測/相容性）
@@ -980,6 +1111,9 @@ class TradingEnvironment(gym.Env):
         return stop_loss_triggered, liq_triggered
 
     def step(self, action):
+        # 記錄本次 action 對應的 bar index（render/事件對齊用）
+        step_idx = int(self.current_step)
+
         # 1. Prepare market inputs
         metrics = self.market_data.get_market_metrics(self.current_step)
         prices = self._prepare_step_prices(metrics)
@@ -1146,6 +1280,19 @@ class TradingEnvironment(gym.Env):
             stop_buffer_d_scale=float(getattr(Config, "STOP_BUFFER_D_SCALE", 0.3)),
         )
 
+        # ---- Record render events (entry/reduce/close/flip/SL/LIQ) ----
+        self._record_step_events(
+            step_idx=step_idx,
+            prev_size=float(prev_size),
+            new_size=float(new_size),
+            current_price=float(prices.current_price),
+            current_high=float(prices.current_high),
+            current_low=float(prices.current_low),
+            stop_loss_triggered=bool(stop_loss_triggered),
+            liq_triggered=bool(liq_triggered),
+        )
+        self._last_executed_step_idx = int(step_idx)
+
         # 10. Update Step
         self.current_step += 1
         self.episode_steps += 1
@@ -1181,6 +1328,9 @@ class TradingEnvironment(gym.Env):
             info["cost_sl_event"] = float(cost_out["cost_sl_event"])
         info["cost_breakdown"] = dict(cost_out["cost_breakdown"])
 
+        # cache last info for render()
+        self._last_info = dict(info)
+
         log_payload = self._build_log_payload(
             step=int(self.current_step),
             new_equity=float(new_equity),
@@ -1196,11 +1346,33 @@ class TradingEnvironment(gym.Env):
         except (AttributeError, TypeError, ValueError):
             pass
 
+        # ---- Auto render on done (VecEnv-safe) ----
+        # 若啟用 render_on_done：在終止那一步直接 render，並把結果路徑塞回 info，
+        # 讓 VecEnv 自動 reset 後仍可在 callback 端看到 render_path。
+        if bool(self.done) and bool(self.render_enabled) and bool(getattr(self, "render_on_done", False)):
+            if not bool(getattr(self, "_rendered_this_episode", False)):
+                try:
+                    out_path = self.render(mode="human")
+                except Exception:
+                    out_path = None
+                if out_path is not None:
+                    info["render_path"] = str(out_path)
+                self._rendered_this_episode = True
+
         # Gymnasium: (obs, reward, terminated, truncated, info)
         return self._get_observation(), reward, bool(terminated), bool(truncated), info
 
     def render(self, mode='human'):
-        pass
+        # 只在 episode 結束時 render，避免訓練中每步繪圖造成效能負擔
+        if not bool(getattr(self, "done", False)):
+            return None
+        renderer = getattr(self, "_renderer", None)
+        if renderer is None:
+            return None
+        try:
+            return renderer.render_episode(env=self, info=getattr(self, "_last_info", None))
+        except Exception:
+            return None
     
     def close(self):
         pass

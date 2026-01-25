@@ -237,6 +237,13 @@ def main() -> None:
                     "data_mode": "eval",
                     # eval 的 obs 必須填滿（起點 >= max(WINDOW_SIZE_5M, WINDOW_SIZE_1D*288)）
                     "ensure_filled_obs": True,
+                    # ---- Render (EVAL) ----
+                    "render_enabled": True,
+                    "render_save": True,
+                    "render_show": True,
+                    # VecEnv 會在 done 時自動 reset；因此必須在「終止那一步」就 render，並把路徑塞回 info。
+                    "render_on_done": True,
+                    "render_dir": os.path.join("logs", "renders", f"eval_{args.symbol}"),
                 }
             )
             e = TradingEnvironment(env_id=9999, **eval_kwargs)
@@ -269,6 +276,7 @@ def main() -> None:
                 best_model_path=str(best_model_path),
                 print_each_episode=bool(getattr(TrainConfig, "EVAL_PRINT_EACH_EPISODE", True)),
                 print_prefix=str(getattr(TrainConfig, "EVAL_PRINT_PREFIX", "[EVAL]")),
+                render_each_episode=True,
             ),
         )
         callbacks.append(eval_cb)

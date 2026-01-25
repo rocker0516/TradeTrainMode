@@ -22,7 +22,7 @@ class TrainConfig:
     # - 用於 5m 跨市場摘要 +（後續可擴充）多幣 1d regime
     # - 注意：Gym observation_space 必須固定 shape，因此這裡用「固定清單」，而不是隨 Data 目錄動態增減。
     FEATURE_SYMBOLS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "1000PEPEUSDT")
-    TOTAL_TIMESTEPS: int = 60_000_000
+    TOTAL_TIMESTEPS: int = 100_000_000
     N_ENVS: int = 64
     DEVICE: str = "auto"  # "cuda" / "cpu" / "auto"
 
@@ -48,9 +48,9 @@ class TrainConfig:
     REWARD_SCALE: float = 1 # 獎勵尺度 1.0 代表獎勵不放大
 
     # ---- SB3 SAC 超參數 ----
-    LEARNING_RATE: float = 2e-4
-    BUFFER_SIZE: int = 1_500_000
-    BATCH_SIZE: int = 128
+    LEARNING_RATE: float = 5e-5
+    BUFFER_SIZE: int = 1_600_000
+    BATCH_SIZE: int = 256 # 512 / 1_500_000 = 0.034% 
     ENT_COEF: str = "auto"
     TRAIN_FREQ: int = 1 # 1 代表每次更新參數時，只用一個 batch 的資料
     GRADIENT_STEPS: int = 1 # 1 代表每次更新參數時，只用一個 batch 的資料進行梯度下降
@@ -103,7 +103,7 @@ class TrainConfig:
     EVAL_ENABLED: bool = True
     # 以「訓練總 timesteps」為基準（使用 SB3 的 model.num_timesteps），確保在 VecEnv 下語意正確
     EVAL_EVERY_TIMESTEPS: int = 1_000_000
-    EVAL_N_EVAL_EPISODES: int = 20
+    EVAL_N_EVAL_EPISODES: int = 25
     EVAL_DETERMINISTIC: bool = True
     # Eval 環境設定：避免隨機起點使指標不穩定（可重現）
     EVAL_RANDOM_START: bool = True

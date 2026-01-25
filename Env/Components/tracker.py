@@ -35,11 +35,23 @@ class Tracker:
             self._step_log_path = os.path.join(env_dir, f"steps_{timestamp}.jsonl")
             
         # Account Series History
+        #
+        # 設計說明：
+        # - 既有 key（position/position_value/equity/wallet）維持「相對 initial_balance 的正規化序列」，
+        #   方便與舊版分析/繪圖保持相容。
+        # - 新增 raw key（*_raw / position_size）保存「原始數值」，供 render / debug 直接畫曲線與事件標記使用。
+        #   raw 預設用 NaN，避免未走到的未來區段被誤畫成 0（符合「done 後曲線留白」需求）。
         self.account_series = {
-            'position': np.zeros(data_len),
-            'position_value': np.zeros(data_len),
-            'equity': np.zeros(data_len),
-            'wallet': np.zeros(data_len)
+            # --- normalized series (backward compatible) ---
+            "position": np.zeros(data_len, dtype=np.float64),
+            "position_value": np.zeros(data_len, dtype=np.float64),
+            "equity": np.zeros(data_len, dtype=np.float64),
+            "wallet": np.zeros(data_len, dtype=np.float64),
+            # --- raw series (for render/debug) ---
+            "position_size": np.full(data_len, np.nan, dtype=np.float64),  # asset units (e.g., BTC)
+            "position_value_raw": np.full(data_len, np.nan, dtype=np.float64),  # notional (asset*price)
+            "equity_raw": np.full(data_len, np.nan, dtype=np.float64),
+            "wallet_raw": np.full(data_len, np.nan, dtype=np.float64),
         }
         
         # Fee Tracking
@@ -63,6 +75,21 @@ class Tracker:
         self.account_series['position_value'][step_idx] = float(pos_value_norm)
         self.account_series['equity'][step_idx] = float(equity_norm)
         self.account_series['wallet'][step_idx] = float(wallet_norm)
+
+        # Raw series (for render/debug)
+        try:
+            pos_size = float(getattr(executor.position, "size", 0.0))
+            pos_value = float(pos_size) * float(current_price)
+            equity_raw = float(executor.equity(current_price))
+            wallet_raw = float(getattr(executor, "wallet_balance", 0.0))
+        except (TypeError, ValueError):
+            # Do not break training due to plotting helpers
+            return
+
+        self.account_series["position_size"][step_idx] = pos_size
+        self.account_series["position_value_raw"][step_idx] = pos_value
+        self.account_series["equity_raw"][step_idx] = equity_raw
+        self.account_series["wallet_raw"][step_idx] = wallet_raw
 
     def update_fee_tracking(self, step_idx: int, current_total_fees: float):
         """更新滾動手續費統計"""
