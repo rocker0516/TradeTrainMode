@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass
 from typing import Callable, Tuple
 
 import numpy as np
 import pandas as pd
 import pytest
+
+# Windows/pytest 直跑時，sys.path 可能未包含專案根，導致 `import Env` / `import Train` 失敗。
+# 統一放在 conftest，避免每支測試檔重複處理。
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 
 @dataclass(frozen=True)

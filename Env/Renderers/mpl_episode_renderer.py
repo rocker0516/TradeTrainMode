@@ -61,10 +61,27 @@ class MplfinanceEpisodeRenderer(BaseEpisodeRenderer):
             return False
 
     def render_episode(self, *, env: Any, info: Optional[dict] = None) -> Optional[str]:
+        """
+        Render 當前 episode 圖並（可選）存檔/顯示。
+
+        重要（Windows 常見崩潰修正）：
+        - 你遇到的 `Tcl_AsyncDelete: async handler deleted by the wrong thread` 幾乎都是
+          Matplotlib 使用 Tk 後端（TkAgg）時，在非主執行緒/非 Tk 事件迴圈情境呼叫 close/cleanup 造成。
+        - 我們在 `show=False`（訓練/CI/Headless 最常見）時，強制切到非互動式 `Agg` 後端，
+          讓 savefig/close 不再依賴 Tk，避免訓練中途被 render 崩潰。
+        """
+
         # Lazy import: avoid heavy import during training unless render is called.
+        # 必須在 import mplfinance/matplotlib.pyplot 之前設定 backend，否則可能已經鎖定 TkAgg。
         try:
-            import mplfinance as mpf
+            import matplotlib
+
+            if not bool(getattr(self._output, "show", True)):
+                # force=True：即使 matplotlib 已初始化，也盡力切換到 Agg（若 pyplot 已 import 則可能無效）
+                matplotlib.use("Agg", force=True)
+
             import matplotlib.pyplot as plt
+            import mplfinance as mpf
         except Exception:
             return None
 
@@ -273,7 +290,8 @@ class MplfinanceEpisodeRenderer(BaseEpisodeRenderer):
             except Exception:
                 out_path = None
 
-        if self._output.show and self._can_show_gui():
+        can_show = bool(self._output.show and self._can_show_gui())
+        if can_show:
             try:
                 plt.show(block=False)
                 plt.pause(0.001)
@@ -281,7 +299,7 @@ class MplfinanceEpisodeRenderer(BaseEpisodeRenderer):
                 pass
         # 若真的有 GUI 且要求 show，避免立刻 close 導致視窗瞬間消失。
         # 在 headless / show=False 的情況，才關閉 fig 釋放記憶體。
-        if not (self._output.show and self._can_show_gui()):
+        if not can_show:
             try:
                 plt.close(fig)
             except Exception:
