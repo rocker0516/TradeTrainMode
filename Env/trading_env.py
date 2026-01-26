@@ -1,226 +1,155 @@
 import gymnasium as gym
 import numpy as np
-import pandas as pd
-from gymnasium import spaces
 import random
-import os
-import json
-import time
-from collections import deque
-from .trade_executor import TradeExecutor
-from .reward import create_default_calculator
-from .features import build_all_features, compute_market_shape_features
+from dataclasses import dataclass
+from gymnasium import spaces
+from typing import Optional, Dict, Tuple, Any, Iterable
+import pandas as pd
 
-'''
-    交易環境
-    
-    Args:
-        df: 交易數據
-        initial_balance: 初始資金
-        transaction_fee: 交易手續費
-        window_size: 窗口大小(K線數量)
-        leverage: 槓桿倍數
-        min_balance: 最小資金(資金不足時強制結束)
-        min_trade_qty: 最低交易數量(BTC)
-        margin_mode: 保證金模式 (cross: 全倉, isolated: 逐倉)
-        reward_weights: 獎勵權重
-        reward_calculator: 獎勵計算器
-        random_start: 是否隨機起點
-        max_step_pos_change_pct: 單步最大倉位變化限制 (0.0 ~ 1.0, 相對 Max Capacity)
-        turnover_penalty: 換手獎勵懲罰係數
-'''
-from Train.config import Config
+from Env.config import Config
+from Env.Executors.trade_executor import TradeExecutor
+from Env.Rewards.reward import create_default_calculator
+from Env.Components.market_data import MarketData
+from Env.Components.observer import TradingObserver
+from Env.Components.action_processor import ActionProcessor
+from Env.Components.tracker import Tracker
+from Env.load_file import load_data
+from Env.Costs.cost import CostCalculator, CostWeights
+
+
+@dataclass(frozen=True)
+class _StepPrices:
+    """step() 單步計算會用到的價格與波動資訊。"""
+
+    current_price: float
+    current_high: float
+    current_low: float
+    atr_est: float
+
 
 class TradingEnvironment(gym.Env):
-    def __init__(self, df, env_id: int = 0, **kwargs):
+    """
+    重構後的交易環境，採用組件化設計。
+    - MarketData: 數據與特徵 (支援 5min/1day 雙週期)
+    - TradeExecutor: 交易執行與帳務
+    - TradingObserver: 觀察值生成
+    - ActionProcessor: 動作處理與限制
+    - Tracker: 狀態追蹤與日誌
+    - RewardCalculator: 獎勵計算
+    """
+    def __init__(self, env_id: int = 0, **kwargs):
+        """
+        Args:
+            df_5m: 5分鐘線數據 (主要執行時間軸)
+            df_1d: 日線數據 (背景趨勢參考)
+            env_id: 環境 ID (用於 Log)
+            **kwargs: 覆寫 Config 的參數
+        """
         super(TradingEnvironment, self).__init__()
         
-        # 使用 Config 作為預設，但允許 kwargs 覆寫（讓測試/實驗更可控，避免全域 Config 汙染）
+        # 1. 配置參數載入 (優先使用 kwargs，後備 Config)
+        self.env_id = int(env_id)
         self.initial_balance = float(kwargs.get("initial_balance", Config.INITIAL_BALANCE))
         self.transaction_fee = float(kwargs.get("transaction_fee", Config.TRANSACTION_FEE))
         self.window_size = int(kwargs.get("window_size", Config.WINDOW_SIZE))
+        self.window_size_1d = int(kwargs.get("window_size_1d", Config.WINDOW_SIZE_1D))
         self.leverage = float(kwargs.get("leverage", Config.LEVERAGE))
         self.min_balance = float(kwargs.get("min_balance", Config.MIN_BALANCE))
         self.min_episode_steps = int(kwargs.get("min_episode_steps", Config.MIN_EPISODE_STEPS))
+        # 允許外部（訓練/評估端）用 kwargs 覆寫 episode 上限，避免評估回合過長拖慢訓練。
+        # 預設行為不變：若未提供 max_episode_steps，仍使用 Config.MAX_EPISODE_STEPS。
+        self.max_episode_steps = int(kwargs.get("max_episode_steps", getattr(Config, "MAX_EPISODE_STEPS", 1000000)))
         self.min_position_change = float(kwargs.get("min_position_change", Config.MIN_POSITION_CHANGE))
-        self.max_step_pos_change_pct = float(kwargs.get("max_step_pos_change_pct", Config.MAX_STEP_POS_CHANGE_PCT))
-        self.fee_limit_enabled = getattr(Config, "FEE_LIMIT_ENABLED", True)
-        self.fee_limit_ratio = float(kwargs.get("fee_limit_ratio", Config.FEE_LIMIT_RATIO))
-        self.fee_rolling_window = int(kwargs.get("fee_rolling_window", Config.FEE_ROLLING_WINDOW))
-        self.stop_loss_atr = float(kwargs.get("stop_loss_atr", Config.STOP_LOSS_ATR))
-        self.liq_warn_pct = getattr(Config, "LIQUIDATION_WARN_PCT", 0.005)
-        self.stop_loss_warn_pct = getattr(Config, "STOP_LOSS_WARN_PCT", 0.002)
-        
-        # Flip Strategy Params from Config
-        self.flip_budget_max = Config.FLIP_BUDGET_MAX
-        self.flip_cost = Config.FLIP_COST
-        self.flip_threshold = Config.FLIP_THRESHOLD
-        self.flip_recovery_rate = Config.FLIP_RECOVERY_RATE
-        self.flip_profit_recovery_rate = Config.FLIP_PROFIT_RECOVERY_RATE
-        
-        self.margin_mode = 'isolated' # Default to isolated
-        self.random_start = kwargs.get('random_start', True) # Default to random start
-        
-        self.min_trade_qty = 0.001 # Default hardcoded or move to config
-        
-        # Step logging
-        self.env_id = int(env_id)
-        self.step_log_enabled = Config.STEP_LOG_ENABLED
-        self.step_log_dir = Config.STEP_LOG_DIR
-        self.step_log_every_n = Config.STEP_LOG_EVERY_N
+        # daily_risk_base 更新頻率（用於單步倉位變化上限的基準）
+        # 預設用 Config.RISK_BASE_UPDATE_STEPS；若未設定則回退到 window_size（維持舊語義）
+        self.risk_base_update_steps = int(
+            kwargs.get(
+                "risk_base_update_steps",
+                getattr(Config, "RISK_BASE_UPDATE_STEPS", self.window_size),
+            )
+        )
+        self.random_start = kwargs.get('random_start', True)
+        self.target_symbol = kwargs.get('target_symbol', 'BTCUSDT') # 預設交易對
+        # 固定的特徵 symbols 清單（決定 5m 跨市場摘要的維度）
+        # - 若不傳，維持相容：只用 target_symbol（但仍會包含主市場結構化/廣度特徵）
+        self.feature_symbols = kwargs.get("feature_symbols", None)
+        self.margin_mode = 'isolated'
+        self.min_trade_qty = 0.001 
 
-        self._step_log_path = None
-        if self.step_log_enabled:
-            env_dir = os.path.join(self.step_log_dir, f"env_{self.env_id:03d}")
-            os.makedirs(env_dir, exist_ok=True)
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            self._step_log_path = os.path.join(env_dir, f"steps_{timestamp}.jsonl")
-        
-        # 定義動作空間
-        # 目標持倉比例 (-1.0 ~ 1.0)，限制小數位為1位
-        self.action_space = spaces.Box(
-            low=-1.0,
-            high=1.0,
-            shape=(1,),
-            dtype=np.float32
+        # ---- Train/Eval split (optional; to prevent data leakage) ----
+        # 語義：
+        # - data_split_enabled=True 且 data_mode="train"：使用「非最近 N 個月」資料
+        # - data_split_enabled=True 且 data_mode="eval" ：使用「最近 N 個月」資料
+        # - 其他：維持舊行為（用全部資料）
+        self.data_split_enabled = bool(kwargs.get("data_split_enabled", False))
+        self.data_mode = str(kwargs.get("data_mode", "full")).lower().strip()
+        self.holdout_months = int(kwargs.get("holdout_months", 3))
+        # Eval obs 必須填滿：起點至少在 warmup_steps 之後
+        # - 若使用 data_mode="eval"，預設強制啟用（除非你顯式傳 ensure_filled_obs=False）
+        ensure_filled_default = bool(self.data_mode == "eval")
+        self.ensure_filled_obs = bool(kwargs.get("ensure_filled_obs", ensure_filled_default))
+
+        # ---- Render (episode end) ----
+        # 說明：render 主要用於 eval/debug，不應在 step() 內做昂貴工作。
+        # 預設：save + show（策略 A：能 show 就 show；無 GUI 自動只存檔）
+        self.render_enabled = bool(kwargs.get("render_enabled", True))
+        self.render_dir = str(kwargs.get("render_dir", "logs/renders"))
+        self.render_save = bool(kwargs.get("render_save", True))
+        self.render_show = bool(kwargs.get("render_show", True))
+        # 重要：VecEnv（例如 SB3 DummyVecEnv/SubprocVecEnv）會在 step() 遇到 done 時「自動 reset」，
+        # 因此 callback 在 episode 結束後再呼叫 env.render() 往往會失敗（env.done 已被 reset() 清掉）。
+        # 解法：允許在「終止那一步」直接 render 並把路徑塞回 info（render_path），讓 callback 能拿到結果。
+        # 預設關閉避免訓練時額外負擔；eval 建議開啟。
+        self.render_on_done = bool(kwargs.get("render_on_done", False))
+        self.render_dpi = int(kwargs.get("render_dpi", 140))
+        self.render_figsize = tuple(kwargs.get("render_figsize", (14.0, 9.0)))
+
+        # 載入數據（允許測試/外部注入 df，避免強耦合到檔案系統）
+        df_5m_in = kwargs.get("df_5m", None)
+        df_1d_in = kwargs.get("df_1d", None)
+        if df_5m_in is not None and df_1d_in is not None:
+            self.df_5m, self.df_1d = df_5m_in, df_1d_in
+        else:
+            self.df_5m, self.df_1d = load_data()
+
+        # ---- Apply train/eval split by recent months ----
+        if self.data_split_enabled and self.data_mode in {"train", "eval"}:
+            self.df_5m, self.df_1d = self._split_train_eval_by_recent_months(
+                df_5m=self.df_5m,
+                df_1d=self.df_1d,
+                holdout_months=int(self.holdout_months),
+                mode=str(self.data_mode),
+            )
+
+        # 2. 初始化組件
+        # Market Data (傳入兩個 DataFrame，並指定目標交易對)
+        self.market_data = MarketData(
+            self.df_5m,
+            self.df_1d,
+            self.window_size,
+            self.window_size_1d,
+            target_symbol=self.target_symbol,
+            feature_symbols=self.feature_symbols,
         )
         
-        # 1. 準備內部特徵（主要用於 step 邏輯，如 ATR 止損）
-        self.feature_lookback = int(max(288, self.window_size))
+        # Observer
+        obs_dtype = kwargs.get("obs_dtype", getattr(Config, "OBS_DTYPE", "float32"))
+        self.observer = TradingObserver(self.window_size, self.window_size_1d, self.market_data, obs_dtype=obs_dtype)
+        self.observation_space = self.observer.observation_space
         
-        # --- Convert to NumPy Arrays for Fast Access in Step ---
-        # Ensure df is processed correctly
-        self.df = df.copy()
-        df_num = self.df
-        
-        close = df_num['close'].astype(np.float64)
-        high = df_num['high'].astype(np.float64)
-        low = df_num['low'].astype(np.float64)
-        prev_close = close.shift(1)
-        
-        # ATR 計算 (用於止損)
-        true_range = np.maximum.reduce([
-            (high - low).values,
-            np.abs(high - prev_close).fillna(0.0).values,
-            np.abs(low - prev_close).fillna(0.0).values,
-        ])
-        atr = pd.Series(true_range, index=df_num.index).rolling(14, min_periods=5).mean().fillna(0.0)
-        atr_ratio = (atr / np.clip(close, 1e-12, None)).astype(np.float32)
-        
-        # 保存內部使用的特徵 (供 step 使用)
-        self.internal_features = pd.DataFrame({
-            'atr_ratio': atr_ratio
-        }, index=df_num.index)
-        
-        # 1.5 Pre-calculate All Features for State Vector to avoid slow lookup
-        # This ensures all columns required by _get_observation (dollar_volume_log_z, amihud_z, etc.) are present.
-        all_feats = build_all_features(self.df, lookback=self.feature_lookback)
-        self.internal_features = pd.concat([self.internal_features, all_feats], axis=1)
-        
-        # Remove duplicate columns if any (keep first occurrence)
-        self.internal_features = self.internal_features.loc[:, ~self.internal_features.columns.duplicated()]
+        # Action Processor
+        self.action_processor = ActionProcessor(
+            leverage=self.leverage,
+            max_step_pos_change_pct=float(kwargs.get("max_step_pos_change_pct", Config.MAX_STEP_POS_CHANGE_PCT)),
+            min_position_change=self.min_position_change,
+            # no-trade 雙門檻（hysteresis）：讓 0 倉位更穩定，避免 action 0 附近抖動造成反覆成交
+            no_trade_entry_threshold=float(kwargs.get("no_trade_entry_threshold", getattr(Config, "NO_TRADE_ENTRY_THRESHOLD", 0.0))),
+            no_trade_exit_threshold=float(kwargs.get("no_trade_exit_threshold", getattr(Config, "NO_TRADE_EXIT_THRESHOLD", 0.0))),
+        )
+        # Action Space
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
 
-        # 2. 準備觀測特徵 (price_seq)
-        self.market_shape_df = compute_market_shape_features(self.df)
-        self.price_seq_features = self.market_shape_df.shape[1]
-        
-        # --- Convert to NumPy Arrays for Fast Access in Step ---
-        self._close_arr = self.df['close'].values.astype(np.float32)
-        self._high_arr = self.df['high'].values.astype(np.float32)
-        self._low_arr = self.df['low'].values.astype(np.float32)
-        self._low_arr = self.df['low'].values.astype(np.float32)
-        
-        # Time features prep
-        if 'timestamp' in self.df.columns:
-            ts = self.df['timestamp']
-            self._hour_arr = ts.dt.hour.values.astype(np.float32)
-            self._dow_arr = ts.dt.dayofweek.values.astype(np.float32)  # 0=Mon..6=Sun
-            self._is_weekend_arr = (ts.dt.dayofweek.values >= 5).astype(np.float32)
-        else:
-            self._hour_arr = np.zeros(len(self.df), dtype=np.float32)
-            self._dow_arr = np.zeros(len(self.df), dtype=np.float32)
-            self._is_weekend_arr = np.zeros(len(self.df), dtype=np.float32)
-
-        # Short-term realized vol (rhythm feature): std(log_ret, 20) normalized by std(log_ret, 288)
-        try:
-            close_series = self.df['close'].astype(np.float64)
-            log_close = np.log(np.clip(close_series, 1e-12, None))
-            log_ret = log_close.diff().fillna(0.0)
-            rv_20 = log_ret.rolling(20, min_periods=5).std().fillna(0.0)
-            rv_288 = (
-                log_ret.rolling(288, min_periods=20)
-                .std()
-                .replace(0.0, np.nan)
-                .bfill()
-                .fillna(1e-8)
-            )
-            rv_ratio = (rv_20 / rv_288).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-            self._rv_ratio_arr = rv_ratio.values.astype(np.float32)
-        except Exception:
-            self._rv_ratio_arr = np.zeros(len(self.df), dtype=np.float32)
-
-        # Market Shape DF -> NumPy
-        self._market_shape_arr = self.market_shape_df.values.astype(np.float32)
-        
-        # Internal Features -> NumPy
-        # market_state columns are configurable via Config.MARKET_STATE_COLS
-        default_market_cols = [
-            'dollar_volume_log_z', 'amihud_z', 'parkinson_vol_z', 'kyle_lambda_z', 'vpin_z', 'trade_entropy_z'
-        ]
-        market_cols = list(getattr(Config, "MARKET_STATE_COLS", default_market_cols))
-        self.market_state_cols = market_cols
-
-        # Ensure they exist in internal_features, fill 0 if missing
-        for c in market_cols:
-            if c not in self.internal_features.columns:
-                self.internal_features[c] = 0.0
-
-        # Tradability score (no-trade / reduce-trade gating) computed from existing proxies.
-        # Higher => more tradable. Keeps logic stable even if some columns are missing.
-        try:
-            amihud = self.internal_features.get("amihud_z", 0.0)
-            spread = self.internal_features.get("hl_spread_z", 0.0)
-            atr_z = self.internal_features.get("atr_z_score", 0.0)
-            # Simple bounded heuristic: combine "illiquidity + spread + extreme vol"
-            raw = (
-                np.abs(np.asarray(amihud, dtype=np.float64))
-                + np.abs(np.asarray(spread, dtype=np.float64))
-                + np.maximum(0.0, np.asarray(atr_z, dtype=np.float64))
-            )
-            # Map to [0,1] with a soft clamp.
-            score = 1.0 - np.clip(raw / 6.0, 0.0, 1.0)
-            self.internal_features["tradability_score"] = pd.Series(score, index=self.internal_features.index).astype(np.float32)
-        except Exception:
-            self.internal_features["tradability_score"] = 0.0
-
-        self._market_state_features_arr = self.internal_features[market_cols].values.astype(np.float32)
-        self._atr_ratio_arr = self.internal_features['atr_ratio'].values.astype(np.float32)
-        # -----------------------------------------------------
-
-        # 3. 定義觀察空間
-        # price_seq: [window_size, F]
-        # Split state_vector into 5 semantic groups:
-        # 1. Account Status (13)
-        # 2. Time Features (2)
-        # 3. Market Rhythm (2)
-        # 4. Cost/Risk State (14)
-        # 5. Market State (len(market_cols)) -> Total dynamic
-        market_dim = int(self._market_state_features_arr.shape[1])
-        state_dim = 13 + 2 + 2 + 14 + market_dim
-        
-        self.observation_space = spaces.Dict({
-            'price_seq': spaces.Box(low=-np.inf, high=np.inf, shape=(self.window_size, self.price_seq_features), dtype=np.float32),
-            # account_state keeps the original first 13 dims for backward compatibility, and appends new semantic dims.
-            # NOTE: keep the first 20 dims stable; append additional accounting dims after them.
-            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(27,), dtype=np.float32),
-            # time_state extended: hour sin/cos + dow sin/cos + funding-cycle sin/cos + weekend flag
-            'time_state': spaces.Box(low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32),
-            'rhythm_state': spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
-            # NOTE: keep the first 14 dims stable; append action-conditioned cost proxies after them.
-            'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(19,), dtype=np.float32),
-            'market_state': spaces.Box(low=-np.inf, high=np.inf, shape=(market_dim,), dtype=np.float32)
-        })
-        
+        # Executor
         self.executor = TradeExecutor(
             initial_balance=self.initial_balance,
             fee_rate=self.transaction_fee,
@@ -229,60 +158,236 @@ class TradingEnvironment(gym.Env):
             maintenance_margin_rate=Config.MAINTENANCE_MARGIN_RATE,
             margin_mode=self.margin_mode,
             min_position_change=self.min_position_change,
-            stop_loss_atr=self.stop_loss_atr,
+            stop_loss_atr=float(kwargs.get("stop_loss_atr", Config.STOP_LOSS_ATR)),
             stop_loss_liq_buffer_pct=getattr(Config, "STOP_LOSS_LIQ_BUFFER_PCT", 0.0),
         )
-
-        # Action-conditioned accounting/risk effects (exposed in the *next* observation).
-        # Filled in step(); read in _get_observation().
-        self._last_action_effects: dict[str, float] = {
-            "expected_fee_if_trade": 0.0,
-            "predicted_used_margin_after_action": 0.0,
-            "predicted_available_balance_after_action": 0.0,
-            "predicted_liq_distance_after_action": 0.0,
-            "predicted_stop_distance_after_action": 0.0,
-        }
         
+        # Reward Calculator
         self.reward_calculator = create_default_calculator(
-            c_liq=getattr(Config, "COST_LIQ_PENALTY", 10.0),
-            base_log_ret_weight=getattr(Config, "REWARD_LOG_RET_WEIGHT", 1.0),
-            conviction_trend_bonus_weight=getattr(Config, "REWARD_CONVICTION_TREND_BONUS_WEIGHT", 0.0),
-            conviction_trend_min_strength=getattr(Config, "REWARD_CONVICTION_TREND_MIN_STRENGTH", 0.8),
-            conviction_min_abs_pos=getattr(Config, "REWARD_CONVICTION_MIN_ABS_POS", 0.15),
+            c_liq=0.0,
+            base_log_ret_weight=1.0,
+            conviction_trend_bonus_weight=0.0,
+            conviction_trend_min_strength=0.8,
+            conviction_min_abs_pos=0.15,
         )
         
-        self.account_series = {
-            'position': np.zeros(len(df)),
-            'position_value': np.zeros(len(df)),
-            'equity': np.zeros(len(df)),
-            'wallet': np.zeros(len(df))
-        }
+        # Tracker
+        self.tracker = Tracker(
+            step_log_enabled=Config.STEP_LOG_ENABLED,
+            step_log_dir=Config.STEP_LOG_DIR,
+            step_log_every_n=Config.STEP_LOG_EVERY_N,
+            env_id=self.env_id,
+            initial_balance=self.initial_balance,
+            data_len=len(self.df_5m),
+            fee_rolling_window=int(kwargs.get("fee_rolling_window", Config.FEE_ROLLING_WINDOW))
+        )
+
+        # ---- Render runtime caches ----
+        # 每步事件（供 episode 結束時 render 畫 entry/reduce/close/flip/SL/LIQ）
+        self._episode_events: list[dict[str, Any]] = []
+        self._last_info: Optional[Dict[str, Any]] = None
+        self._last_executed_step_idx: Optional[int] = None
+        self._rendered_this_episode: bool = False
+        # Renderer（lazy import，避免在訓練時增加 import 成本）
+        self._renderer = None
+        if self.render_enabled:
+            try:
+                from Env.Renderers.mpl_episode_renderer import MplfinanceEpisodeRenderer, RenderOutput
+
+                self._renderer = MplfinanceEpisodeRenderer(
+                    output=RenderOutput(
+                        save_dir=self.render_dir,
+                        save=self.render_save,
+                        show=self.render_show,
+                        dpi=self.render_dpi,
+                        figsize=self.render_figsize,
+                    )
+                )
+            except Exception:
+                self._renderer = None
         
-        self.reset()
+        # Fee Limit
+        self.fee_limit_enabled = getattr(Config, "FEE_LIMIT_ENABLED", True)
+        self.fee_limit_ratio = float(kwargs.get("fee_limit_ratio", Config.FEE_LIMIT_RATIO))
 
-    def set_fee_rate(self, fee_rate: float) -> None:
+        # Cost / Constraint（供 Lagrangian-SAC 使用）
+        # 注意：reward 與 cost 分離，cost 透過 info 回傳，方便訓練端做 λ 更新與解析。
+        # REFACTORED: 只保留死亡懲罰 (Liq / Bankrupt) 與 摩擦成本 (Fee/Equity)
+        # CostCalculator 現在不再需要 weights (已內建正規化公式)，這裡維持空建構
+        self.cost_calculator = CostCalculator()
+
+        # Runtime State
+        self.current_step = 0
+        self.episode_steps = 0
+        self.done = False
+        # Flip budget 機制已移除；保留 risk_budget 欄位供觀測/相容性使用（固定為 1.0）
+        self.risk_budget = 1.0
+        self.last_equity_for_budget = 0.0
+        self.max_equity_so_far = 0.0
+        # Episode-level max drawdown (0~1). Used for trade stats (e.g., last 100 episodes max DD).
+        self.episode_max_dd = 0.0
+        # Episode-level metrics (for Trade Stats)
+        self.episode_turnover_notional = 0.0
+        self.episode_holding_steps = 0
+        self.episode_trade_count = 0
+        # Episode-level event metrics (for Trade Stats)
+        # 主動出場：由 agent 動作將持倉平到 0（排除 stop loss / liquidation 強制出場）
+        self.episode_active_exit_count = 0
+        
+        # Action-conditioned effects cache (for next obs)
+        self._last_action_effects = {}
+        
+        # Tracking helper
+        self.last_trade_step = -999999
+        self.position_entry_step = None
+        self._last_position_size = 0.0
+        self.episode_stop_loss_count = 0
+        self.episode_liq_count = 0
+        self.stop_loss_cooldown = 0
+        self.daily_risk_base = 0.0
+        self.last_risk_base_update_step = 0
+
+    def _record_step_events(
+        self,
+        *,
+        step_idx: int,
+        prev_size: float,
+        new_size: float,
+        current_price: float,
+        current_high: float,
+        current_low: float,
+        stop_loss_triggered: bool,
+        liq_triggered: bool,
+    ) -> None:
+        """記錄本 step 的交易事件（供 render 使用）。
+
+        需求對應：
+        - entry：0 -> 非 0
+        - reduce：部分減倉（同方向、曝險變小、且未回到 0）
+        - close：完全平倉（非 0 -> 0）
+        - flip：翻倉（多<->空）同一步標兩點（close + entry）
+        - SL：止損（獨立標記）
+        - LIQ：爆倉/強平（獨立標記）
+
+        備註：
+        - delta_qty 單位為「資產單位」（例如 BTC）。
+        - 事件位置以「本 step 使用的 K 線（step_idx）」對齊；時間由 df_5m.timestamp 決定。
         """
-        動態更新手續費率（供訓練課程式學習使用）。
+        try:
+            step_idx = int(step_idx)
+            prev_size = float(prev_size)
+            new_size = float(new_size)
+            delta = float(new_size - prev_size)
+            if abs(delta) <= 1e-12 and (not stop_loss_triggered) and (not liq_triggered):
+                return
+            ts = None
+            try:
+                ts = self.market_data.df_5m["timestamp"].iloc[int(step_idx)]
+            except Exception:
+                ts = None
 
-        會同步更新：
-        - self.transaction_fee
-        - self.executor.fee_rate
+            base = {
+                "step_idx": int(step_idx),
+                "timestamp": ts,
+                "price": float(current_price),
+                "high": float(current_high),
+                "low": float(current_low),
+                "prev_size": float(prev_size),
+                "new_size": float(new_size),
+            }
 
-        Args:
-            fee_rate: 新的 fee_rate（必須 >= 0）
+            # 1) SL / LIQ 事件（獨立標記）
+            if bool(stop_loss_triggered) and abs(prev_size) > 1e-12:
+                self._episode_events.append({**base, "type": "sl", "delta_qty": float(-prev_size)})
+            if bool(liq_triggered) and abs(prev_size) > 1e-12:
+                self._episode_events.append({**base, "type": "liq", "delta_qty": float(-prev_size)})
+
+            # 2) 交易事件（entry/reduce/close/flip）
+            # flip：多<->空（同一步標兩點：close 舊方向 + entry 新方向）
+            if (prev_size > 1e-12 and new_size < -1e-12) or (prev_size < -1e-12 and new_size > 1e-12):
+                self._episode_events.append({**base, "type": "close", "delta_qty": float(-prev_size)})
+                self._episode_events.append({**base, "type": "entry", "delta_qty": float(new_size)})
+                return
+
+            # entry
+            if abs(prev_size) <= 1e-12 and abs(new_size) > 1e-12:
+                self._episode_events.append({**base, "type": "entry", "delta_qty": float(new_size)})
+                return
+
+            # close
+            if abs(prev_size) > 1e-12 and abs(new_size) <= 1e-12:
+                self._episode_events.append({**base, "type": "close", "delta_qty": float(-prev_size)})
+                return
+
+            # reduce（部分減倉）
+            if abs(prev_size) > 1e-12 and abs(new_size) > 1e-12:
+                same_dir = (prev_size * new_size) > 0.0
+                if same_dir and abs(new_size) < abs(prev_size) and abs(delta) > 1e-12:
+                    self._episode_events.append({**base, "type": "reduce", "delta_qty": float(delta)})
+        except Exception:
+            # render helper must never break training
+            return
+
+    @staticmethod
+    def _split_train_eval_by_recent_months(
+        *,
+        df_5m: "pd.DataFrame",
+        df_1d: "pd.DataFrame",
+        holdout_months: int,
+        mode: str,
+    ) -> Tuple["pd.DataFrame", "pd.DataFrame"]:
         """
-        fee_rate = float(fee_rate)
-        if fee_rate < 0.0:
-            raise ValueError("fee_rate must be >= 0")
-        self.transaction_fee = fee_rate
-        if hasattr(self, "executor") and self.executor is not None:
-            self.executor.set_fee_rate(fee_rate)
+        依「最近 N 個月」切分資料，用於 Train/Eval 分離（避免資料洩漏）。
 
-    def get_fee_rate(self) -> float:
-        """取得目前手續費率（fee_rate）。"""
-        if hasattr(self, "executor") and self.executor is not None:
-            return float(self.executor.get_fee_rate())
-        return float(self.transaction_fee)
+        - eval: 取 df_*.timestamp >= eval_start
+        - train: 取 df_*.timestamp <  eval_start
+
+        注意：
+        - 這裡用 df_5m 的 max timestamp 決定 eval_start（避免 1d 某些來源晚開始造成切點偏移）
+        """
+        if "timestamp" not in df_5m.columns:
+            raise ValueError("df_5m must contain 'timestamp' column for train/eval split")
+        if "timestamp" not in df_1d.columns:
+            raise ValueError("df_1d must contain 'timestamp' column for train/eval split")
+        if int(holdout_months) <= 0:
+            raise ValueError("holdout_months must be > 0")
+
+        mode = str(mode).lower().strip()
+        if mode not in {"train", "eval"}:
+            raise ValueError("mode must be 'train' or 'eval'")
+
+        # ensure datetime dtype
+        if not pd.api.types.is_datetime64_any_dtype(df_5m["timestamp"]):
+            df_5m = df_5m.copy()
+            df_5m["timestamp"] = pd.to_datetime(df_5m["timestamp"])
+        if not pd.api.types.is_datetime64_any_dtype(df_1d["timestamp"]):
+            df_1d = df_1d.copy()
+            df_1d["timestamp"] = pd.to_datetime(df_1d["timestamp"])
+
+        max_ts = df_5m["timestamp"].max()
+        if pd.isna(max_ts):
+            raise ValueError("df_5m timestamp is empty; cannot split train/eval")
+
+        eval_start = pd.Timestamp(max_ts) - pd.DateOffset(months=int(holdout_months))
+
+        if mode == "eval":
+            df_5m_out = df_5m[df_5m["timestamp"] >= eval_start].copy()
+            df_1d_out = df_1d[df_1d["timestamp"] >= eval_start].copy()
+        else:
+            df_5m_out = df_5m[df_5m["timestamp"] < eval_start].copy()
+            df_1d_out = df_1d[df_1d["timestamp"] < eval_start].copy()
+
+        df_5m_out = df_5m_out.sort_values("timestamp").reset_index(drop=True)
+        df_1d_out = df_1d_out.sort_values("timestamp").reset_index(drop=True)
+
+        # Basic sanity: 5m must have enough rows to run at least one episode window.
+        if len(df_5m_out) < 10:
+            raise ValueError(
+                f"Split produced too few 5m rows for mode={mode}. "
+                f"holdout_months={holdout_months}, rows={len(df_5m_out)}"
+            )
+
+        return df_5m_out, df_1d_out
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -290,987 +395,994 @@ class TradingEnvironment(gym.Env):
             np.random.seed(seed)
             random.seed(seed)
             
-        # 隨機選擇起始點，但要保留窗口數據
-        if self.random_start:
-            # 預留 min_episode_steps 給 agent 跑
-            max_start_index = len(self.df) - self.min_episode_steps - 2
-            self.current_step = int(random.randint(self.window_size, max_start_index))
-        else:
-            self.current_step = self.window_size 
+        # 1. 決定起始點
+        # Eval obs 必須填滿：起點至少在 max(window_size_5m, window_size_1d*288) 之後
+        # - window_size_1d 用「天」計算，因此換算成 5m steps = window_size_1d * 288
+        # - 若資料不足，會退化成可用的最小起點，避免 randint 空範圍
+        warmup_steps = int(max(int(self.window_size), int(self.window_size_1d) * 288)) if bool(self.ensure_filled_obs) else int(self.window_size)
+        warmup_steps = max(1, warmup_steps)
 
-        self.executor.reset(self.initial_balance)
-        # Clear action-conditioned effects at episode reset so the first observation is deterministic.
-        if hasattr(self, "_last_action_effects") and isinstance(self._last_action_effects, dict):
-            self._last_action_effects.update({
-                "expected_fee_if_trade": 0.0,
-                "predicted_used_margin_after_action": 0.0,
-                "predicted_available_balance_after_action": 0.0,
-                "predicted_liq_distance_after_action": 0.0,
-                "predicted_stop_distance_after_action": 0.0,
-            })
-        self.balance = self.initial_balance
-        self.btc_held = 0.0
-        self.total_value = self.balance
+        if self.random_start:
+            max_start_index = len(self.market_data.df_5m) - self.min_episode_steps - 2
+            # 若資料量不足以支援 min_episode_steps（常見於測試用合成資料），退化為固定起點，避免 randint 空範圍。
+            if int(max_start_index) <= int(warmup_steps):
+                self.current_step = int(min(warmup_steps, max(1, len(self.market_data.df_5m) - 1)))
+            else:
+                self.current_step = int(random.randint(int(warmup_steps), int(max_start_index)))
+        else:
+            self.current_step = int(min(warmup_steps, max(1, len(self.market_data.df_5m) - 1)))
+            
+        self.episode_start_step = self.current_step
+        # 供評估端追蹤「episode 起始時間」用（避免 callback 自己猜時間）
+        # 注意：timestamp 取自 MarketData.df_5m（已確保是 datetime）
+        self.episode_start_timestamp = self._get_timestamp_str(step_idx=int(self.episode_start_step))
+        self.episode_max_steps = min(
+            max(0, (len(self.market_data.df_5m) - 1) - self.episode_start_step),
+            self.max_episode_steps
+        )
+        self.episode_steps = 0
         self.done = False
-        self.position_holding_time = 0
+        
+        # 2. Reset Components
+        self.executor.reset(self.initial_balance)
+        self.tracker.fee_history.clear()
+        self.tracker.rolling_fee_sum = 0.0
+        self.tracker.prev_total_fees = 0.0
+
+        # Render caches
+        self._episode_events = []
+        self._last_info = None
+        self._last_executed_step_idx = None
+        self._rendered_this_episode = False
+        
+        # 3. Reset State Variables
+        # Flip budget 機制已移除：risk_budget 固定為 1.0（僅供觀測/相容性）
+        self.risk_budget = 1.0
+        self.last_equity_for_budget = self.initial_balance
+        self.max_equity_so_far = self.initial_balance
+        self.episode_max_dd = 0.0
+        self.episode_turnover_notional = 0.0
+        self.episode_holding_steps = 0
+        self.episode_trade_count = 0
+        self.episode_active_exit_count = 0
+        
+        self.last_trade_step = -999999
         self.position_entry_step = None
         self._last_position_size = 0.0
-        self.last_total_value = self.initial_balance
-        self.episode_steps = 0
-        
-        # 重置追蹤變數
-        self.max_equity_so_far = self.initial_balance
-        self.last_trade_step = -999999
-        self.trade_steps_buffer = []
-        
-        self.open_trades = []
-        self.closed_trades = []
-        self.last_position = 0
-        self.avg_entry_price = 0
-        
         self.episode_stop_loss_count = 0
         self.episode_liq_count = 0
         self.stop_loss_cooldown = 0
-        
-        self.prev_total_fees = 0.0
-        self.last_step_fee = 0.0
-        
-        # 初始化滾動手續費計算
-        self.fee_history = deque() # (step_index, fee_amount)
-        self.rolling_fee_sum = 0.0
-        self.fee_limit_hit = False
-        
-        self.risk_budget = self.flip_budget_max
-        self.last_equity_for_budget = self.initial_balance
-        
-        self.episode_start_step = int(self.current_step)
-        self.episode_max_steps = max(0, (len(self.df) - 1) - self.episode_start_step)
-        if hasattr(Config, 'MAX_EPISODE_STEPS'):
-             self.episode_max_steps = min(self.episode_max_steps, Config.MAX_EPISODE_STEPS)
-        
-        # 初始化 risk_base (每日更新一次的基準資金)
         self.daily_risk_base = self.initial_balance
         self.last_risk_base_update_step = self.current_step
-
-        # 初始化帳戶序列 (填入初始值)
-        # Use NumPy array access
-        current_price = float(self._close_arr[self.current_step])
-        self._update_account_series(current_price)
-
-        return self._get_observation(), {}
-    
-    def _update_account_series(self, current_price):
-        # 輔助函數：更新歷史序列
-        pos_norm = self.executor.position.size / (self.initial_balance / current_price) if self.initial_balance > 0 and current_price > 0 else 0.0
-        pos_value_norm = (self.executor.position.size * current_price) / self.initial_balance if self.initial_balance > 0 else 0.0
-        equity_norm = self.executor.equity(current_price) / self.initial_balance if self.initial_balance > 0 else 0.0
-        wallet_norm = self.executor.wallet_balance / self.initial_balance if self.initial_balance > 0 else 0.0
         
-        if self.current_step < len(self.df):
-            self.account_series['position'][self.current_step] = float(pos_norm)
-            self.account_series['position_value'][self.current_step] = float(pos_value_norm)
-            self.account_series['equity'][self.current_step] = float(equity_norm)
-            self.account_series['wallet'][self.current_step] = float(wallet_norm)
-
-    def _log_step(self, payload: dict):
-        """將本步資訊以 JSONL 方式寫入檔案；僅除錯用。"""
-        if not (self.step_log_enabled and self._step_log_path):
-            return
-        try:
-            with open(self._step_log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, ensure_ascii=False))
-                f.write("\n")
-        except Exception:
-            # 除錯log失敗不應影響訓練流程
-            pass
-
-    def _compute_risk_signals(self, current_price: float) -> dict:
-        """
-        計算即時風險指標，包含強平價、距離、保證金率與止損距離。
-        返回的數值將用於觀測與 info，便於 Agent 感知風險。
-        """
-        size = float(self.executor.position.size)
-        if self.current_step >= len(self.df) or abs(size) < 1e-12 or current_price <= 0.0:
-            return {
-                'liq_price': 0.0,
-                'price_gap': 0.0,
-                'gap_pct': 0.0,
-                'abs_gap_pct': 0.0,
-                'margin_ratio': 0.0,
-                'sl_gap_pct': 0.0,
-                'stop_loss_missing': 0.0,
-                'near_liq': False,
-                'near_margin': False,
-                'near_stop': False,
-            }
-
-        liq_price = float(self.executor.get_liquidation_price(current_price))
-        price_gap = current_price - liq_price if liq_price > 0 else 0.0
-        gap_pct = price_gap / current_price
-        abs_gap_pct = abs(price_gap) / current_price
-
-        equity = float(self.executor.equity(current_price))
-        upnl = float(self.executor.unrealized_pnl(current_price))
-        unrealized_loss = max(0.0, -upnl)
-        pos_notional = abs(size) * current_price
-        margin_ratio = (equity - unrealized_loss) / pos_notional if pos_notional > 0 else 0.0
-
-        mmr = float(getattr(self.executor, "maintenance_margin_rate", 0.0))
-        near_liq = abs_gap_pct <= self.liq_warn_pct
-        near_margin = (pos_notional > 0) and (margin_ratio <= mmr if mmr > 0 else False)
-
-        stop_price = float(self.executor.position.stop_loss_price)
-        has_stop = stop_price > 0.0
-        sl_gap_pct = 0.0
-        near_stop = False
-        if has_stop:
-            sl_gap_pct = (current_price - stop_price) / current_price
-            near_stop = abs(sl_gap_pct) <= self.stop_loss_warn_pct
-
-        stop_loss_missing = float(1.0 if (pos_notional > 0 and not has_stop) else 0.0)
-
-        return {
-            'liq_price': liq_price,
-            'price_gap': price_gap,
-            'gap_pct': gap_pct,
-            'abs_gap_pct': abs_gap_pct,
-            'margin_ratio': margin_ratio,
-            'sl_gap_pct': sl_gap_pct,
-            'stop_loss_missing': stop_loss_missing,
-            'near_liq': bool(near_liq),
-            'near_margin': bool(near_margin),
-            'near_stop': bool(near_stop),
+        self._last_action_effects = {
+            "expected_fee_if_trade": 0.0,
+            "predicted_used_margin_after_action": 0.0,
+            "predicted_available_balance_after_action": 0.0,
+            "predicted_liq_distance_after_action": 0.0,
+            "predicted_stop_distance_after_action": 0.0,
+            # --- action vs execution discrepancy (for next obs) ---
+            "cooldown_remaining_norm": 0.0,
+            "action_overridden_flag": 0.0,
+            "last_action_raw": 0.0,
+            "last_action_used": 0.0,
+            "last_target_pos_pct": 0.0,
+            "last_final_pos_pct": 0.0,
+            "trade_executed_flag": 0.0,
         }
+
+        # 4. Initial Observation
+        metrics = self.market_data.get_market_metrics(self.current_step)
+        current_price = metrics['close']
+        self.tracker.update_account_series(self.current_step, self.executor, current_price)
+        
+        # Gymnasium reset() 允許回傳 info；我們把 episode 起始資訊放進去，方便評估端取用
+        return self._get_observation(), {
+            "episode_start_step": int(self.episode_start_step),
+            "episode_start_timestamp": self.episode_start_timestamp,
+        }
+
+    # ---------------------------------------------------------------------
+    # Public helpers (for EvalCallback / debugging)
+    # ---------------------------------------------------------------------
+    def get_current_step(self) -> int:
+        """取得環境目前的 step index（用於 eval/debug）。"""
+        return int(self.current_step)
+
+    def get_episode_steps(self) -> int:
+        """取得當前 episode 已走過的步數（環境內部步數）。"""
+        return int(self.episode_steps)
+
+    def get_episode_start_step(self) -> int:
+        """取得當前 episode 的起始 step index。"""
+        return int(getattr(self, "episode_start_step", 0))
+
+    def get_episode_start_timestamp(self) -> Optional[str]:
+        """取得當前 episode 的起始 timestamp（字串；若不可得則回傳 None）。"""
+        return getattr(self, "episode_start_timestamp", None)
+
+    def get_feature_distribution_stats(
+        self,
+        feature_names: Iterable[str],
+        *,
+        quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9),
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        回傳指定 5m 特徵在「整段資料」上的分布摘要（mean/std + quantiles）。
+
+        用途：
+        - 快速檢查 train/eval 的 regime 是否漂移
+        - 避免在 callback 端自己重算特徵或讀 CSV
+
+        Returns:
+            dict[str, dict[str, float]]，例如：
+            {
+              "atr_ratio_z": {"mean": 0.01, "std": 0.98, "q10": -1.2, "q50": 0.0, "q90": 1.3},
+              ...
+            }
+        """
+        names = [str(x) for x in feature_names]
+        cols = list(getattr(self.market_data, "cols_5m", []) or [])
+        if not cols or not hasattr(self.market_data, "features_5m_arr"):
+            return {}
+
+        idx_map = {c: i for i, c in enumerate(cols)}
+        out: Dict[str, Dict[str, float]] = {}
+
+        feats = np.asarray(self.market_data.features_5m_arr)
+        if feats.ndim != 2 or feats.shape[0] <= 0:
+            return {}
+
+        qs = tuple(float(q) for q in quantiles)
+        for name in names:
+            i = idx_map.get(name)
+            if i is None:
+                continue
+            x = feats[:, int(i)].astype(np.float64, copy=False)
+            x = x[np.isfinite(x)]
+            if x.size == 0:
+                continue
+            d: Dict[str, float] = {
+                "mean": float(np.mean(x)),
+                "std": float(np.std(x)),
+            }
+            try:
+                qv = np.quantile(x, qs)
+                for q, v in zip(qs, qv):
+                    key = f"q{int(round(q * 100)):02d}"
+                    d[key] = float(v)
+            except Exception:
+                # quantile 非關鍵：失敗就只回 mean/std
+                pass
+            out[name] = d
+        return out
+
+    def get_episode_feature_stats(
+        self,
+        feature_names: Iterable[str],
+        *,
+        quantiles: Tuple[float, ...] = (0.1, 0.5, 0.9),
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        回傳指定 5m 特徵在「本 episode 區間」上的分布摘要。
+
+        註：episode 區間使用 [episode_start_step, episode_start_step + episode_steps)。
+        """
+        start = int(getattr(self, "episode_start_step", 0))
+        steps = int(getattr(self, "episode_steps", 0))
+        end = int(max(start, start + max(1, steps)))
+
+        cols = list(getattr(self.market_data, "cols_5m", []) or [])
+        if not cols or not hasattr(self.market_data, "features_5m_arr"):
+            return {}
+
+        feats = np.asarray(self.market_data.features_5m_arr)
+        n = int(feats.shape[0]) if feats.ndim == 2 else 0
+        if n <= 0:
+            return {}
+
+        start = int(np.clip(start, 0, max(0, n - 1)))
+        end = int(np.clip(end, start + 1, n))
+
+        # 暫時切片成一個小矩陣（只用少數欄位）
+        idx_map = {c: i for i, c in enumerate(cols)}
+        names = [str(x) for x in feature_names]
+        qs = tuple(float(q) for q in quantiles)
+        out: Dict[str, Dict[str, float]] = {}
+        for name in names:
+            i = idx_map.get(name)
+            if i is None:
+                continue
+            x = feats[start:end, int(i)].astype(np.float64, copy=False)
+            x = x[np.isfinite(x)]
+            if x.size == 0:
+                continue
+            d: Dict[str, float] = {
+                "mean": float(np.mean(x)),
+                "std": float(np.std(x)),
+            }
+            try:
+                qv = np.quantile(x, qs)
+                for q, v in zip(qs, qv):
+                    key = f"q{int(round(q * 100)):02d}"
+                    d[key] = float(v)
+            except Exception:
+                pass
+            out[name] = d
+        return out
+
+    def _get_timestamp_str(self, *, step_idx: int) -> Optional[str]:
+        """安全取得 step_idx 對應的 timestamp 字串（YYYY-MM-DD HH:MM:SS）。"""
+        try:
+            df = getattr(self.market_data, "df_5m", None)
+            if df is None or "timestamp" not in df.columns:
+                return None
+            idx = int(np.clip(int(step_idx), 0, max(0, len(df) - 1)))
+            ts = df["timestamp"].iloc[idx]
+            # pandas Timestamp / datetime
+            return str(ts)[:19]
+        except Exception:
+            return None
 
     def _get_observation(self):
-        if self.current_step >= len(self.df):
-            self.current_step = len(self.df) - 1
-            
-        # 1. Price Sequence (CNN Input)
-        # Shape: [window_size, F]
-        # USE NUMPY SLICING (Fast)
-        price_seq = self._market_shape_arr[self.current_step - self.window_size : self.current_step]
+        # 準備 Observation 需要的各類 metrics
+        metrics = self.market_data.get_market_metrics(self.current_step)
+        current_price = metrics['close']
+        atr_est = float(metrics.get("atr_ratio", 0.0)) * float(current_price)
         
-        # 2. State Features Extraction
-        current_price = float(self._close_arr[self.current_step])
-        equity = self.executor.equity(current_price)
-        risk_signals = self._compute_risk_signals(current_price)
+        risk_signals = self.observer.compute_risk_signals(
+            self.executor, current_price, atr_est, self.current_step, len(self.market_data.df_5m)
+        )
         
-        # --- Account Status (10) ---
-        size = self.executor.position.size
-        pos_side_oh = np.zeros(3, dtype=np.float32)
-        if size > 0: pos_side_oh[0] = 1.0
-        elif size < 0: pos_side_oh[1] = 1.0
-        else: pos_side_oh[2] = 1.0
+        account_metrics = {
+            'initial_balance': self.initial_balance,
+            'max_equity_so_far': self.max_equity_so_far,
+            'episode_stop_loss_count': self.episode_stop_loss_count,
+            'episode_liq_count': self.episode_liq_count,
+            'risk_budget': self.risk_budget,
+            'steps_since_trade': float(self.current_step - self.last_trade_step) if self.last_trade_step > -1e8 else float(self.window_size),
+            'holding_steps': float(self.current_step - self.position_entry_step) if self.position_entry_step is not None else 0.0,
+            'last_step_fee': self.tracker.last_step_fee,
+            'rolling_fee_sum': self.tracker.rolling_fee_sum,
+            'fee_limit_ratio': self.fee_limit_ratio,
+            'fee_limit_enabled': self.fee_limit_enabled
+        }
         
-        pos_notional = abs(size) * current_price
-        max_notional = equity * self.leverage
-        pos_size_norm = pos_notional / max_notional if max_notional > 0 else 0.0
-        pos_size_norm = np.clip(pos_size_norm, 0.0, 1.0)
-        
-        upnl = self.executor.unrealized_pnl(current_price)
-        unreal_pnl_ratio = upnl / self.initial_balance if self.initial_balance > 0 else 0.0
-        unreal_pnl_ratio = np.clip(unreal_pnl_ratio, -2.0, 2.0)
-        
-        equity_ratio = equity / self.initial_balance if self.initial_balance > 0 else 0.0
-        equity_ratio = np.clip(equity_ratio, 0.0, 5.0)
-        
-        max_equity_ratio = self.max_equity_so_far / self.initial_balance if self.initial_balance > 0 else 0.0
-        max_equity_ratio = np.clip(max_equity_ratio, 0.0, 5.0)
-        
-        dd = (self.max_equity_so_far - equity) / self.max_equity_so_far if self.max_equity_so_far > 0 else 0.0
-        dd = np.clip(dd, 0.0, 1.0)
-        
-        # Maintenance Margin Ratio (Replaces Margin Ratio)
-        # Maint Margin = Position Value * MMR
-        # Ratio = Maint Margin / Equity
-        # If Ratio >= 1.0 -> Liquidation
-        maint_margin_ratio = 0.0
-        leverage_ratio = 0.0
-        if equity > 0 and abs(size) > 0:
-            # Default MMR = 0.005 (0.5%) if not available
-            mmr = getattr(self.executor, 'maintenance_margin_rate', 0.005)
-            maint_margin = pos_notional * mmr
-            maint_margin_ratio = maint_margin / equity
-            leverage_ratio = pos_notional / equity
-        elif equity <= 0:
-            maint_margin_ratio = 1.1 # Already bust
+        return self.observer.get_observation(
+            step_idx=self.current_step,
+            executor=self.executor,
+            market_data=self.market_data,
+            account_metrics=account_metrics,
+            risk_signals=risk_signals,
+            last_action_effects=self._last_action_effects
+        )
 
-        maint_margin_ratio = np.clip(maint_margin_ratio, 0.0, 1.1)
-        leverage_ratio = np.clip(leverage_ratio, 0.0, 10.0)
+    def _determine_termination(
+        self,
+        *,
+        data_exhausted: bool,
+        max_steps_reached: bool,
+        balance_insufficient: bool,
+        liq_triggered: bool,
+    ) -> Tuple[bool, bool, Optional[str]]:
+        """
+        判斷回合是否結束，並以 Gymnasium 語意回傳 terminated/truncated。
 
-        # Recent Performance
-        profit_rate = (equity - self.initial_balance) / self.initial_balance if self.initial_balance > 0 else 0.0
-        profit_rate = np.clip(profit_rate, -1.0, 5.0)
+        Args:
+            data_exhausted: 數據走完（通常視為 truncated）
+            max_steps_reached: 回合步數達上限（視為 truncated）
+            balance_insufficient: 權益低於下限（視為 terminated）
+            liq_triggered: 觸發爆倉（視為 terminated）
 
-        # Distance to Stop Loss (Risk Perception)
-        dist_to_sl_norm = 0.0
-        if abs(size) > 0 and self.executor.position.stop_loss_price > 0:
-            sl_price = self.executor.position.stop_loss_price
-            if size > 0:
-                dist = max(0.0, current_price - sl_price)
-            else:
-                dist = max(0.0, sl_price - current_price)
-            
-            # Normalize by price (Percentage Distance)
-            if current_price > 0:
-                dist_ratio = dist / current_price
-                # Scale up so 1% distance = 0.1, 10% = 1.0 (Approx)
-                dist_to_sl_norm = np.clip(dist_ratio * 10.0, 0.0, 5.0)
+        Returns:
+            (terminated, truncated, termination_reason)
+        """
+        terminated = bool(liq_triggered or balance_insufficient)
+        truncated = bool((data_exhausted or max_steps_reached) and not terminated)
 
-        # --- Accounting / execution awareness (append-only) ---
-        wallet_balance = float(self.executor.wallet_balance)
-        used_margin = float(getattr(self.executor, "used_margin", 0.0))
-        available_balance = float(self.executor.available_balance()) if hasattr(self.executor, "available_balance") else float(wallet_balance - used_margin)
-        fee_rate_pct = float(self.executor.get_fee_rate()) if hasattr(self.executor, "get_fee_rate") else float(self.transaction_fee)
+        termination_reason: Optional[str] = None
+        if terminated:
+            termination_reason = "liq_triggered" if liq_triggered else "balance_insufficient"
+        elif truncated:
+            termination_reason = "max_steps_reached" if max_steps_reached else "data_exhausted"
 
-        wallet_balance_ratio = float(wallet_balance / self.initial_balance) if self.initial_balance > 0 else 0.0
-        used_margin_ratio = float(used_margin / max(1e-8, equity)) if equity > 0 else 0.0
-        available_balance_ratio = float(available_balance / max(1e-8, equity)) if equity > 0 else 0.0
+        return terminated, truncated, termination_reason
 
-        # More intuitive than leverage_ratio: equity / position_notional (0..inf). 0 if no position.
-        equity_to_position_notional = 0.0
-        if pos_notional > 0:
-            equity_to_position_notional = float(equity / max(1e-8, pos_notional))
+    def _build_step_info(
+        self,
+        *,
+        new_equity: float,
+        stop_loss_triggered: bool,
+        liq_triggered: bool,
+        step_fee: float,
+        is_flip: bool,
+        current_dd: float,
+        episode_max_dd: float,
+        episode_turnover_notional: float,
+        episode_holding_steps: int,
+        episode_trade_count: int,
+        terminated: bool,
+        truncated: bool,
+        termination_reason: Optional[str],
+    ) -> Dict[str, Any]:
+        """
+        組合 step() 要回傳的 info dict（抽離 step 內的大段組裝邏輯）。
 
-        liq_price = float(risk_signals.get("liq_price", 0.0))
-        liq_distance_pct = float(abs(current_price - liq_price) / current_price) if (current_price > 0 and liq_price > 0) else 0.0
+        Args:
+            new_equity: 本 step 後的權益（mark-to-market）
+            stop_loss_triggered: 是否本 step 觸發停損
+            liq_triggered: 是否本 step 觸發爆倉
+            step_fee: 本 step 手續費
+            is_flip: 是否發生翻倉/反手（由 ActionProcessor 回傳）
+            current_dd: 當前回撤
+            episode_max_dd: 本回合迄今最大回撤（0~1）
+            episode_turnover_notional: 本回合累積換手名目（sum(abs(delta_size) * price)）
+            episode_holding_steps: 本回合持倉步數（abs(position.size)>0 的 step 數）
+            episode_trade_count: 本回合發生交易的 step 數（position_change > threshold）
+            terminated: Gymnasium terminated（自然終止）
+            truncated: Gymnasium truncated（時間/資料截斷）
+            termination_reason: 終止原因（若結束回合）
 
-        entry_price = float(self.executor.position.entry_price)
-        stop_price = float(self.executor.position.stop_loss_price)
-        stop_distance_pct = float(abs(entry_price - stop_price) / entry_price) if (abs(size) > 1e-12 and entry_price > 0 and stop_price > 0) else 0.0
-
-        # Clip for numerical stability (keep ranges modest for NN training).
-        wallet_balance_ratio = float(np.clip(wallet_balance_ratio, 0.0, 5.0))
-        used_margin_ratio = float(np.clip(used_margin_ratio, 0.0, 5.0))
-        available_balance_ratio = float(np.clip(available_balance_ratio, -5.0, 5.0))
-        equity_to_position_notional = float(np.clip(equity_to_position_notional, 0.0, 5.0))
-        liq_distance_pct = float(np.clip(liq_distance_pct, 0.0, 5.0))
-        stop_distance_pct = float(np.clip(stop_distance_pct, 0.0, 5.0))
-        fee_rate_pct = float(np.clip(fee_rate_pct, 0.0, 1.0))
-
-        # --- Entry/Breakeven relative features (normalized by ATR) ---
-        atr_ratio = float(self._atr_ratio_arr[self.current_step])
-        atr_est = max(1e-8, atr_ratio * max(current_price, 1e-8))
-        entry_price = float(self.executor.position.entry_price)
-        fee_frac = float(getattr(self.executor, "fee_rate", self.transaction_fee)) / 100.0  # fee_rate is in % units
-        fee_frac = float(np.clip(fee_frac, 0.0, 0.05))
-
-        entry_gap_atr = 0.0
-        breakeven_gap_atr = 0.0
-        if abs(size) > 1e-12 and entry_price > 0.0:
-            # Signed so that positive means "favorable" for both long & short.
-            signed = 1.0 if size > 0 else -1.0
-            entry_gap_atr = signed * ((current_price - entry_price) / atr_est)
-            # Approx breakeven: include round-trip fees (open+close) as a price shift.
-            if size > 0:
-                breakeven_price = entry_price * (1.0 + 2.0 * fee_frac)
-            else:
-                breakeven_price = entry_price * (1.0 - 2.0 * fee_frac)
-            breakeven_gap_atr = signed * ((current_price - breakeven_price) / atr_est)
-        entry_gap_atr = float(np.clip(entry_gap_atr, -10.0, 10.0))
-        breakeven_gap_atr = float(np.clip(breakeven_gap_atr, -10.0, 10.0))
-
-        # --- Holding time / recency features ---
-        steps_since_trade = float(self.current_step - int(self.last_trade_step)) if self.last_trade_step > -1e8 else float(self.window_size)
-        steps_since_trade_norm = float(np.clip(steps_since_trade / max(1.0, float(self.window_size)), 0.0, 5.0))
-
-        holding_steps = 0.0
-        if abs(size) > 1e-12 and self.position_entry_step is not None:
-            holding_steps = float(self.current_step - int(self.position_entry_step))
-        holding_time_norm = float(np.clip(holding_steps / max(1.0, float(self.window_size)), 0.0, 5.0))
-
-        account_state = np.array([
-            pos_size_norm,
-            unreal_pnl_ratio,
-            equity_ratio,
-            max_equity_ratio,
-            dd,
-            maint_margin_ratio,
-            profit_rate,
-            self.executor.long_entry_count * 0.01,
-            self.executor.short_entry_count * 0.01,
-            self.episode_stop_loss_count * 0.1,
-            self.episode_liq_count * 1.0,
-            dist_to_sl_norm,
-            float(self.risk_budget) # Add Risk Budget to Observation
-            ,
-            # --- appended semantic dims (keep first 13 stable) ---
-            pos_side_oh[0],
-            pos_side_oh[1],
-            pos_side_oh[2],
-            entry_gap_atr,
-            breakeven_gap_atr,
-            steps_since_trade_norm,
-            holding_time_norm,
-            # --- appended accounting dims (action->accounting awareness) ---
-            wallet_balance_ratio,
-            used_margin_ratio,
-            available_balance_ratio,
-            equity_to_position_notional,
-            liq_distance_pct,
-            stop_distance_pct,
-            fee_rate_pct,
-        ], dtype=np.float32)
-        
-        # --- Time Features (7) ---
-        time_state = np.zeros(7, dtype=np.float32)
-        hour = float(self._hour_arr[self.current_step])
-        dow = float(self._dow_arr[self.current_step])
-        is_weekend = float(self._is_weekend_arr[self.current_step])
-        # hour-of-day
-        time_state[0] = np.sin(2 * np.pi * hour / 24.0)
-        time_state[1] = np.cos(2 * np.pi * hour / 24.0)
-        # day-of-week
-        time_state[2] = np.sin(2 * np.pi * dow / 7.0)
-        time_state[3] = np.cos(2 * np.pi * dow / 7.0)
-        # funding cycle proxy (8h)
-        phase = (hour % 8.0) / 8.0
-        time_state[4] = np.sin(2 * np.pi * phase)
-        time_state[5] = np.cos(2 * np.pi * phase)
-        # weekend flag (0/1)
-        time_state[6] = is_weekend
-            
-        # --- Market Rhythm (2) ---
-        rhythm_state = np.zeros(2, dtype=np.float32)
-        rhythm_state[0] = float(self._atr_ratio_arr[self.current_step])
-        rhythm_state[1] = float(np.clip(self._rv_ratio_arr[self.current_step], 0.0, 10.0))
-            
-        # --- Cost/Risk State ---
-        # Keep first 14 dims stable; append action-conditioned proxies at the end.
-        cost_state = np.zeros(19, dtype=np.float32)
-        step_fee_ratio_stable = np.clip((self.last_step_fee / self.initial_balance if self.initial_balance > 0 else 0.0), 0.0, 0.1)
-        # Use rolling fee ratio instead of cumulative
-        rolling_fee_ratio = 0.0
-        if equity > 0:
-            rolling_fee_ratio = self.rolling_fee_sum / equity
-        rolling_fee_ratio = np.clip(rolling_fee_ratio, 0.0, 1.0)
-        # Remaining fee budget ratio (1 means full budget; 0 means exceeded)
-        if self.fee_limit_enabled:
-            safe_equity = max(equity, self.initial_balance * 0.5)
-            limit_amount = max(1e-8, safe_equity * self.fee_limit_ratio)
-            remaining_fee_budget_ratio = 1.0 - (self.rolling_fee_sum / limit_amount)
-            remaining_fee_budget_ratio = float(np.clip(remaining_fee_budget_ratio, 0.0, 1.0))
-        else:
-            remaining_fee_budget_ratio = 1.0
-
-        cost_state[0] = step_fee_ratio_stable
-        cost_state[1] = rolling_fee_ratio
-        cost_state[2] = maint_margin_ratio
-        cost_state[3] = dd
-        cost_state[4] = leverage_ratio
-        cost_state[5] = remaining_fee_budget_ratio
-        # 風險觀測：強平距離、保證金率與止損距離
-        gap_pct = float(np.clip(risk_signals['gap_pct'], -5.0, 5.0))
-        abs_gap_pct = float(np.clip(risk_signals['abs_gap_pct'], 0.0, 5.0))
-        margin_ratio = float(np.clip(risk_signals['margin_ratio'], 0.0, 5.0))
-        sl_gap_pct = float(np.clip(risk_signals['sl_gap_pct'], -5.0, 5.0))
-        cost_state[6] = gap_pct
-        cost_state[7] = abs_gap_pct
-        cost_state[8] = margin_ratio
-        cost_state[9] = sl_gap_pct
-        cost_state[10] = float(risk_signals['stop_loss_missing'])
-        cost_state[11] = float(risk_signals['near_liq'])
-        cost_state[12] = float(risk_signals['near_margin'])
-        cost_state[13] = float(risk_signals['near_stop'])
-
-        # --- Action-conditioned "predicted after action" effects (from previous step) ---
-        effects = getattr(self, "_last_action_effects", {}) or {}
-        cost_state[14] = float(effects.get("expected_fee_if_trade", 0.0))
-        cost_state[15] = float(effects.get("predicted_used_margin_after_action", 0.0))
-        cost_state[16] = float(effects.get("predicted_available_balance_after_action", 0.0))
-        cost_state[17] = float(effects.get("predicted_liq_distance_after_action", 0.0))
-        cost_state[18] = float(effects.get("predicted_stop_distance_after_action", 0.0))
-        
-        # --- Market State (6) ---
-        # USE NUMPY ACCESS
-        # [dollar_volume_log_z, amihud_z, parkinson_vol_z, kyle_lambda_z, vpin_z, trade_entropy_z]
-        market_state = self._market_state_features_arr[self.current_step]
-        
-        return {
-            'price_seq': price_seq,
-            'account_state': account_state,
-            'time_state': time_state,
-            'rhythm_state': rhythm_state,
-            'cost_state': cost_state,
-            'market_state': market_state
+        Returns:
+            info dict
+        """
+        done = bool(terminated or truncated)
+        info: Dict[str, Any] = {
+            "equity": float(new_equity),
+            "profit": float(new_equity - self.initial_balance),
+            "stop_loss_triggered": bool(stop_loss_triggered),
+            "liq_triggered": bool(liq_triggered),
+            "step_fee_ratio": float(step_fee / self.initial_balance) if self.initial_balance > 0 else 0.0,
+            "is_flip": bool(is_flip),
+            "risk_budget": float(self.risk_budget),
+            "current_dd": float(current_dd),
         }
 
-    def step(self, action):
-        # 限制動作範圍
-        action = np.clip(action, self.action_space.low, self.action_space.high)
+        if done:
+            info["termination_reason"] = termination_reason
+            info["final_balance"] = float(new_equity)
+            # 評估/統計常用：episode 起點與步數
+            info["episode_start_step"] = int(getattr(self, "episode_start_step", 0))
+            info["episode_start_timestamp"] = getattr(self, "episode_start_timestamp", None)
+            info["episode_steps"] = int(getattr(self, "episode_steps", 0))
+            info["episode_max_dd"] = float(episode_max_dd)
+            info["episode_turnover_notional"] = float(max(0.0, episode_turnover_notional))
+            info["episode_holding_steps"] = int(max(0, int(episode_holding_steps)))
+            info["episode_trade_count"] = int(max(0, int(episode_trade_count)))
+            info["fees_to_equity_ratio"] = (
+                float(getattr(self.executor, "total_fees", 0.0)) / float(max(1e-8, new_equity))
+            )
+            # 額外提供 Gymnasium 語意旗標，方便外部檢查（不影響既有 key）
+            info["terminated"] = bool(terminated)
+            info["truncated"] = bool(truncated)
 
-        # 若處於止損冷卻期，強制不調倉（action -> 0），避免剛砍倉又立刻重開
-        if self.stop_loss_cooldown > 0:
-            action = np.zeros_like(action, dtype=np.float32)
-            self.stop_loss_cooldown -= 1
-        
-        # 取得當前市場數據 (USE NUMPY)
-        # 注意：reward 應該反映「持倉穿越到下一根 K 的 mark-to-market 收益」。
-        # 因此我們在本步仍以 current_price 執行交易/觸發止損/強平，但 reward 會使用下一根 close 作為 mark price。
-        current_price = float(self._close_arr[self.current_step])
-        current_high = float(self._high_arr[self.current_step])
-        current_low = float(self._low_arr[self.current_step])
-        
-        # 更新 risk_base（每日/每一定期間更新一次基準，用於動態風控）
-        risk_base = self.daily_risk_base
+            # ---- Episode summary（供訓練端每 N 回合統計/解析用）----
+            # 注意：這些統計只在回合結束時提供，避免每步 info 過大造成效能負擔。
+            # 1) 手續費（累積）
+            info["total_fees"] = float(getattr(self.executor, "total_fees", 0.0))
+            info["total_fees_ratio"] = (
+                float(getattr(self.executor, "total_fees", 0.0)) / float(self.initial_balance)
+                if self.initial_balance > 0
+                else 0.0
+            )
+            # 2) 多空進場/平倉次數（累積）
+            info["long_entry_count"] = int(getattr(self.executor, "long_entry_count", 0))
+            info["short_entry_count"] = int(getattr(self.executor, "short_entry_count", 0))
+            info["long_close_count"] = int(getattr(self.executor, "long_close_count", 0))
+            info["short_close_count"] = int(getattr(self.executor, "short_close_count", 0))
+            # 3) 結束時庫存（持倉 size）
+            info["final_position_size"] = float(getattr(self.executor.position, "size", 0.0))
+            info["final_position_notional"] = float(getattr(self.executor.position, "size", 0.0)) * float(
+                new_equity
+            )  # 粗略參考（不一定等於名目）
+            # 4) 回合事件統計（累積）
+            info["episode_stop_loss_count"] = int(getattr(self, "episode_stop_loss_count", 0))
+            info["episode_liq_count"] = int(getattr(self, "episode_liq_count", 0))
+            info["episode_active_exit_count"] = int(getattr(self, "episode_active_exit_count", 0))
 
-        # 計算當前權益（本步決策前的 equity_t）
-        last_equity = self.executor.equity(current_price)
-        
-        # Flip Strategy Check (反手限制邏輯)
-        target_pos_pct = float(action[0])
-        current_pos_pct = 0.0
-        max_nominal = last_equity * self.leverage
-        if max_nominal > 0:
-            current_pos_val = self.executor.position.size * current_price
-            current_pos_pct = current_pos_val / max_nominal
-            
-        # Check for sign flip (Long <-> Short)
-        is_flip = (target_pos_pct * current_pos_pct < -0.01) # Crossing zero significantly
-        flip_blocked = False
-        flip_budget_spent = 0.0
-        
-        if is_flip:
-             # Check budget
-             cost = self.flip_cost
-             if abs(target_pos_pct - current_pos_pct) > self.flip_threshold: # Large flip
-                 pass # standard cost
-             
-             if self.risk_budget >= cost:
-                 self.risk_budget -= cost
-                 flip_budget_spent = cost
-             else:
-                 # --- Hard Limit Enforcement ---
-                 # 預算不足，禁止反向開倉。強制平倉(0.0)或維持原方向(current_pos_pct)?
-                 # 為了安全與明確，強制平倉是比較好的"冷靜"手段。
-                 # 或者允許平倉到 0，但不允許跨越 0 到反向。
-                 
-                 # 策略：將目標強制修正為 0.0 (平倉)
-                 target_pos_pct = 0.0
-                 
-                 # 標記被阻擋
-                 flip_blocked = True 
-                 
-                 # 不扣預算(已經沒了)，也不允許動作。
+        return info
 
-        
-        # Convert target percent to concrete position change
-        # Action is target position % (-1.0 ~ 1.0) of Max Capacity (Equity * Leverage)
-        # But we need to apply min_position_change and max_step_pos_change
-        
-        # 1. Calculate Desired Position Size (BTC)
-        desired_notional = target_pos_pct * last_equity * self.leverage
-        desired_size = desired_notional / current_price if current_price > 0 else 0.0
-        
-        current_size = float(self.executor.position.size)
+    def _build_log_payload(
+        self,
+        *,
+        step: int,
+        new_equity: float,
+        reward: float,
+        action: np.ndarray,
+        final_pos_pct: float,
+    ) -> Dict[str, Any]:
+        """
+        組合 Tracker log payload（維持原本欄位命名，抽離 step 內的雜訊）。
 
-        # --- Action cost preview (before executing) ---
-        # expected_fee_if_trade is expressed in account currency (USDT).
-        # fee_rate unit follows project convention: 0.005 means 0.005% (executor divides by 100).
-        fee_rate_pct = float(self.executor.get_fee_rate()) if hasattr(self.executor, "get_fee_rate") else float(self.transaction_fee)
-        expected_fee_if_trade = float(abs(desired_size - current_size) * current_price * (fee_rate_pct / 100.0)) if current_price > 0 else 0.0
-        
-        # 2. Apply Step Change Limit
-        # Max change in BTC
-        max_change_qty = (risk_base * self.leverage * self.max_step_pos_change_pct) / current_price
-        
-        # 2.1 Check if we are reducing risk (Closing position)
-        # If abs(desired_size) < abs(current_size) and sign matches or zero, we are closing.
-        # Relax limit for closing to allow panic exit.
-        is_closing = (abs(desired_size) < abs(current_size)) and (desired_size * current_size >= 0)
-        
-        change = desired_size - current_size
-        
-        # Apply limit only if NOT closing (or if opening direction)
-        if not is_closing:
-            if abs(change) > max_change_qty:
-                change = np.sign(change) * max_change_qty
-                desired_size = current_size + change
-            
-        # 3. Apply Min Position Change (Deadband)
-        # If change is too small relative to capacity, ignore it (hold)
-        # EXCEPTION: If closing to zero, allow it regardless of size to clear dust.
-        is_close_to_zero = (abs(desired_size) < 1e-8)
-        
-        if not is_close_to_zero:
-             # Check deadband for normal adjustments
-             pass # TradeExecutor handles basic min_qty, but we can filter here too if needed.
-             # Currently relying on TradeExecutor's min_trade_qty or min_position_change if set there.
-             # But wait, logic for ignoring small updates usually happens here to save fees.
-             # Let's keep simple: if change is tiny and not closing to zero, ignore.
-             pass
-        
-        # Convert back to % for final command
-        final_action = 0.0
-        max_cap = last_equity * self.leverage
-        if max_cap > 0:
-            final_action = (desired_size * current_price) / max_cap
-        
-        position_percent = float(final_action)
-        # ----------------------------------------------
+        Args:
+            step: 當前 step index（環境內部）
+            new_equity: 權益
+            reward: 獎勵
+            action: 原始 action
+            final_pos_pct: 最終執行倉位百分比
 
-        # 估算當前 ATR（用於止損計算） (USE NUMPY)
-        atr_ratio = float(self._atr_ratio_arr[self.current_step - 1]) if self.current_step > 0 else 0.02
-        atr_est = atr_ratio * current_price
+        Returns:
+            log payload dict
+        """
+        return {
+            "step": int(step),
+            "equity": float(new_equity),
+            "reward": float(reward),
+            "action": float(action[0]) if hasattr(action, "__len__") else float(action),
+            "final_pos": float(final_pos_pct),
+        }
 
-        # 檢查是否需要更新 daily_risk_base
-        if (self.current_step - self.last_risk_base_update_step) >= self.window_size:
+    def _maybe_update_daily_risk_base(self) -> None:
+        """
+        以固定間隔更新 daily_risk_base（原本 step() 內的邏輯抽離，行為不變）。
+        """
+        update_every = int(max(1, self.risk_base_update_steps))
+        if (self.current_step - self.last_risk_base_update_step) >= update_every:
             self.daily_risk_base = float(self.executor.wallet_balance)
             self.last_risk_base_update_step = self.current_step
 
-        # 執行交易
-        prev_size = float(self.executor.position.size)
-        prev_wallet_balance = float(self.executor.wallet_balance)
-        prev_fees = float(self.executor.total_fees)
-        
-        self.executor.execute(
-            position_percent=position_percent,
+    def _prepare_step_prices(self, metrics: Dict[str, Any]) -> _StepPrices:
+        """
+        從 market metrics 萃取 step() 會用到的價格資訊。
+
+        Args:
+            metrics: MarketData.get_market_metrics 回傳 dict
+
+        Returns:
+            _StepPrices
+        """
+        current_price = float(metrics["close"])
+        current_high = float(metrics["high"])
+        current_low = float(metrics["low"])
+        atr_est = float(metrics["atr_ratio"]) * current_price
+        return _StepPrices(
             current_price=current_price,
-            high=current_high,
-            low=current_low,
-            equity=last_equity,
-            atr=atr_est,
-            risk_base=self.daily_risk_base
+            current_high=current_high,
+            current_low=current_low,
+            atr_est=atr_est,
         )
 
-        # --- Action-conditioned "predicted after action" effects (deterministic simulator => post-action = predicted) ---
-        # Store them for the *next* observation so the agent learns the accounting impact of its last action.
+    def _apply_stop_loss_cooldown(self, action: np.ndarray) -> np.ndarray:
+        """
+        若處於停損冷卻期，強制本 step 動作為 0。
+
+        Args:
+            action: 原始 action
+
+        Returns:
+            action（可能被覆寫為 0）
+        """
+        if self.stop_loss_cooldown > 0:
+            self.stop_loss_cooldown -= 1
+            return np.zeros_like(action)
+        return action
+
+    def _process_action_and_execute(
+        self,
+        *,
+        action: np.ndarray,
+        last_equity: float,
+        prices: _StepPrices,
+    ) -> Tuple[float, float, float, bool, np.ndarray, float, bool]:
+        """
+        動作處理（含限制/翻倉預算）+ 手續費預估 + 實際下單執行。
+
+        Args:
+            action: 原始 action
+            last_equity: 以 current_price 計算的上一刻權益
+            prices: 本 step 價格資訊
+
+        Returns:
+            (final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, action_overridden_flag)
+        """
+        action_used = self._apply_stop_loss_cooldown(action)
+        # action 是否被 env 覆寫（目前主要是 cooldown）
+        try:
+            action_overridden_flag = bool(abs(float(action_used[0]) - float(action[0])) > 1e-8)
+        except (TypeError, ValueError, IndexError):
+            action_overridden_flag = False
+
+        target_pos_pct, is_flip = self.action_processor.process_action(
+            action_used, self.executor, prices.current_price
+        )
+
+        final_pos_pct = self.action_processor.calculate_effective_action(
+            target_pos_pct, self.executor, prices.current_price, self.daily_risk_base
+        )
+
+        expected_fee = self._estimate_expected_fee(
+            final_pos_pct=final_pos_pct,
+            last_equity=last_equity,
+            current_price=prices.current_price,
+        )
+
+        prev_wallet = float(self.executor.wallet_balance)
+        self.executor.execute(
+            position_percent=final_pos_pct,
+            current_price=prices.current_price,
+            high=prices.current_high,
+            low=prices.current_low,
+            equity=last_equity,
+            atr=prices.atr_est,
+            risk_base=self.daily_risk_base,
+        )
+
+        return (
+            float(final_pos_pct),
+            float(expected_fee),
+            float(prev_wallet),
+            bool(is_flip),
+            action_used,
+            float(target_pos_pct),
+            bool(action_overridden_flag),
+        )
+
+    def _estimate_expected_fee(
+        self,
+        *,
+        final_pos_pct: float,
+        last_equity: float,
+        current_price: float,
+    ) -> float:
+        """
+        預估本次動作若成交可能產生的手續費（供 next obs 參考）。
+
+        注意：此為近似值，維持原本 step() 內的估算方式。
+        """
+        current_size = float(self.executor.position.size)
+        desired_notional = float(final_pos_pct) * float(last_equity) * float(self.leverage)
+        desired_size = desired_notional / float(current_price) if current_price > 0 else 0.0
+        fee_rate_pct = float(self.executor.get_fee_rate())
+        return abs(desired_size - current_size) * float(current_price) * (fee_rate_pct / 100.0)
+
+    def _estimate_add_only_fee(
+        self,
+        *,
+        prev_size: float,
+        new_size: float,
+        current_price: float,
+    ) -> float:
+        """
+        估算「只計入加碼/加曝險」的手續費（排除減倉/平倉）。
+
+        用途：
+        - 供 cost_fric（摩擦成本線）使用：只在加碼/加曝險時才計入摩擦成本。
+
+        定義：
+        - 若同向（未翻倉）：add_qty = max(0, |new| - |prev|)
+        - 若翻倉（跨 0 且新舊皆非 0）：只計入「新方向開倉」的部分 => add_qty = |new|
+
+        Args:
+            prev_size: 上一步的持倉 size
+            new_size: 本步執行後的持倉 size
+            current_price: 本步當下價格（用於估算名目）
+
+        Returns:
+            add_only_fee（>=0）
+        """
+        price = float(current_price)
+        if not (price > 0.0):
+            return 0.0
+
+        prev = float(prev_size)
+        new = float(new_size)
+        prev_nz = abs(prev) > 1e-8
+        new_nz = abs(new) > 1e-8
+
+        # Flip：只計入新方向「開倉」的名目（排除關倉名目）
+        if prev_nz and new_nz and (prev * new < 0.0):
+            add_qty = abs(new)
+        else:
+            add_qty = max(0.0, abs(new) - abs(prev))
+
+        add_notional = float(add_qty) * price
+        fee_rate_pct = float(self.executor.get_fee_rate())
+        return float(abs(add_notional) * (fee_rate_pct / 100.0))
+
+    def _update_action_effects_cache(self, *, expected_fee: float, current_price: float) -> None:
+        """
+        更新 last_action_effects（供下一個 observation 使用）。
+        """
         try:
             used_margin_after = float(getattr(self.executor, "used_margin", 0.0))
-            available_after = float(self.executor.available_balance()) if hasattr(self.executor, "available_balance") else float(self.executor.wallet_balance - used_margin_after)
-            liq_after = float(self.executor.get_liquidation_price(current_price)) if hasattr(self.executor, "get_liquidation_price") else 0.0
-            liq_dist_after = float(abs(current_price - liq_after) / current_price) if (current_price > 0 and liq_after > 0) else 0.0
+            available_after = float(self.executor.available_balance())
+            liq_after = float(self.executor.get_liquidation_price(current_price))
+            liq_dist_after = float(abs(current_price - liq_after) / current_price) if liq_after > 0 else 0.0
 
-            entry_after = float(getattr(self.executor.position, "entry_price", 0.0))
-            stop_after = float(getattr(self.executor.position, "stop_loss_price", 0.0))
-            stop_dist_after = float(abs(entry_after - stop_after) / entry_after) if (entry_after > 0 and stop_after > 0 and abs(float(getattr(self.executor.position, "size", 0.0))) > 1e-12) else 0.0
+            entry_after = float(self.executor.position.entry_price)
+            stop_after = float(self.executor.position.stop_loss_price)
+            stop_dist_after = (
+                float(abs(entry_after - stop_after) / entry_after)
+                if (entry_after > 0 and stop_after > 0)
+                else 0.0
+            )
 
             self._last_action_effects = {
-                "expected_fee_if_trade": float(expected_fee_if_trade),
+                "expected_fee_if_trade": float(expected_fee),
                 "predicted_used_margin_after_action": used_margin_after,
                 "predicted_available_balance_after_action": available_after,
-                "predicted_liq_distance_after_action": float(np.clip(liq_dist_after, 0.0, 5.0)),
-                "predicted_stop_distance_after_action": float(np.clip(stop_dist_after, 0.0, 5.0)),
+                "predicted_liq_distance_after_action": np.clip(liq_dist_after, 0.0, 5.0),
+                "predicted_stop_distance_after_action": np.clip(stop_dist_after, 0.0, 5.0),
             }
-        except Exception:
-            # If anything goes wrong, fail-safe to zeros (do not break training loop).
-            self._last_action_effects = {
-                "expected_fee_if_trade": float(expected_fee_if_trade),
-                "predicted_used_margin_after_action": 0.0,
-                "predicted_available_balance_after_action": 0.0,
-                "predicted_liq_distance_after_action": 0.0,
-                "predicted_stop_distance_after_action": 0.0,
-            }
+        except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+            # 預測值僅供 next obs 參考，不應因偶發資料/狀態異常中斷訓練流程
+            pass
 
-        # Track position entry step for holding-time semantics (env-level, no impact on execution).
-        new_size = float(self.executor.position.size)
+    def _update_position_entry(self, *, new_size: float) -> None:
+        """
+        更新 position_entry_step（用於 holding_steps 等觀測特徵）。
+        """
         if abs(new_size) <= 1e-12:
             self.position_entry_step = None
-        else:
-            was_flat = abs(prev_size) <= 1e-12
-            flipped = (prev_size * new_size) < 0.0
-            if was_flat or flipped or (self.position_entry_step is None):
-                self.position_entry_step = int(self.current_step)
+        elif (self._last_position_size * new_size < 0) or (abs(self._last_position_size) <= 1e-12):
+            self.position_entry_step = self.current_step
 
-        # Update fee tracking (Rolling Window)
-        current_fees = float(self.executor.total_fees)
-        step_fee = current_fees - prev_fees
-        self.last_step_fee = step_fee
-        self.prev_total_fees = current_fees
-        
-        # Maintain rolling window
-        self.fee_history.append((self.current_step, step_fee))
-        self.rolling_fee_sum += step_fee
-        
-        # Pop old fees
-        while self.fee_history and (self.current_step - self.fee_history[0][0]) > self.fee_rolling_window:
-            _, old_fee = self.fee_history.popleft()
-            self.rolling_fee_sum -= old_fee
-            
-        # Fee limit can be disabled; when disabled, fee_limit_hit remains False
+    def _update_fee_tracking(self, *, current_price: float) -> Tuple[float, float]:
+        """
+        更新 rolling fee tracking，並回傳 step_fee 與 safe_equity（供 fee_budget_ratio 使用）。
+
+        Returns:
+            (step_fee, safe_equity)
+        """
+        self.tracker.update_fee_tracking(self.current_step, self.executor.total_fees)
+        step_fee = float(self.tracker.last_step_fee)
+
+        # Fee Limit Check（維持原邏輯：使用 current_price 當下估 equity）
+        safe_equity = max(float(self.executor.equity(current_price)), self.initial_balance * 0.5)
         if self.fee_limit_enabled:
-            # Check Fee Limit against Current Equity
-            safe_equity = max(self.executor.equity(current_price), self.initial_balance * 0.5)
-            limit_amount = safe_equity * self.fee_limit_ratio
-            self.fee_limit_hit = self.rolling_fee_sum >= limit_amount
-        else:
-            self.fee_limit_hit = False
+            _limit_amount = safe_equity * self.fee_limit_ratio
+            _fee_limit_hit = self.tracker.rolling_fee_sum >= _limit_amount
+        return step_fee, float(safe_equity)
 
-        # -----------------------------
-        # Mark-to-market (path reward)
-        # -----------------------------
-        # 本步 reward 使用下一根 close 進行 mark-to-market，讓「持倉跨時間的盈虧」進入主線 reward。
-        # 若已到資料尾端，則退化為 current_price（避免越界）。
-        next_step_idx = min(int(self.current_step) + 1, len(self._close_arr) - 1)
-        mark_price = float(self._close_arr[next_step_idx])
+    def _mark_to_market(self) -> Tuple[float, float]:
+        """
+        以 next close 做 mark-to-market（原本 step() 的做法），並更新 max_equity_so_far。
 
-        # 同步帳戶狀態（new_equity = equity_{t+1} at mark_price）
-        new_equity = self.executor.equity(mark_price)
-        self.balance = self.executor.wallet_balance
-        self.btc_held = self.executor.position.size
-        self.total_value = new_equity
-        
-        # Risk budget recovery (time-based + profit-based)
-        self.risk_budget = min(self.flip_budget_max, self.risk_budget + self.flip_recovery_rate)
-        if new_equity > self.last_equity_for_budget:
-            gain_ratio = (new_equity - self.last_equity_for_budget) / max(1.0, self.initial_balance)
-            self.risk_budget = min(self.flip_budget_max, self.risk_budget + gain_ratio * self.flip_profit_recovery_rate)
-        self.last_equity_for_budget = new_equity
-        
-        # Update Max Equity
+        Returns:
+            (mark_price, new_equity)
+        """
+        next_step_idx = min(self.current_step + 1, len(self.market_data.df_5m) - 1)
+        next_metrics = self.market_data.get_market_metrics(next_step_idx)
+        mark_price = float(next_metrics["close"])
+        new_equity = float(self.executor.equity(mark_price))
+
         if new_equity > self.max_equity_so_far:
             self.max_equity_so_far = new_equity
-            
-        realized_pnl_step = float(self.executor.wallet_balance - prev_wallet_balance)
 
-        # Current drawdown after updating max_equity_so_far
-        current_dd = 0.0
-        if self.max_equity_so_far > 0:
-            current_dd = (self.max_equity_so_far - new_equity) / self.max_equity_so_far
-            current_dd = float(np.clip(current_dd, 0.0, 1.0))
+        return mark_price, new_equity
 
-        # 計算保證金緩衝
-        margin_buffer = 1.0
-        leverage_ratio = 0.0
-        try:
-            # 使用 mark_price 對齊下一狀態風險度量
-            position_value = abs(float(self.executor.position.size * mark_price))
-            if new_equity > 0:
-                leverage_ratio = position_value / new_equity
-                safe_leverage = float(self.leverage) * 0.8
-                if leverage_ratio >= safe_leverage:
-                    margin_buffer = 0.0
-                else:
-                    margin_buffer = 1.0 - (leverage_ratio / safe_leverage)
-                margin_buffer = float(np.clip(margin_buffer, 0.0, 1.0))
-        except Exception:
-            margin_buffer = 1.0
-        
-        # 計算倉位變動（換手） 
-        position_change = abs(float(self.executor.position.size - self._last_position_size))
-        traded = position_change > 1e-8
-        
-        is_risk_reducing = False
-        if abs(self.executor.position.size) < abs(self._last_position_size) - 1e-8:
-            is_risk_reducing = True
-        
+    def _recover_risk_budget(self, *, new_equity: float) -> None:
+        """
+        已停用：Flip budget 機制移除後，不再回復/消耗 risk_budget。
+        保留函式僅為相容性（避免舊程式碼呼叫時出錯）。
+        """
+        self.last_equity_for_budget = float(new_equity)
+
+    def _compute_reward_features(
+        self,
+        *,
+        current_price: float,
+        last_equity: float,
+        new_equity: float,
+        new_size: float,
+    ) -> Tuple[float, bool, float, float, float]:
+        """
+        計算 reward 會用到的中間特徵。
+
+        Returns:
+            (position_change, traded, position_change_norm, turnover_ratio, current_dd)
+        """
+        position_change = float(abs(new_size - self._last_position_size))
+        traded = bool(position_change > 1e-8)
         if traded:
             self.last_trade_step = self.current_step
-            self.trade_steps_buffer.append(self.current_step)
-            
-        turnover_ratio = 0.0
-        turnover_notional_change = 0.0
-        turnover_notional_scale = 0.0
-        try:
-            notional_change = position_change * current_price
-            turnover_notional_change = float(abs(notional_change))
-            # 主成本：使用名義換手率 / 基準名義規模
-            base_scale = getattr(Config, "TURNOVER_NOTIONAL_SCALE", None)
-            if base_scale is None:
-                base_scale = last_equity * self.leverage
-            turnover_notional_scale = float(max(base_scale, 1e-8))
-            turnover_ratio = float(turnover_notional_change / turnover_notional_scale)
-        except Exception:
-            turnover_ratio = 0.0
-            turnover_notional_change = 0.0
-            turnover_notional_scale = 1.0
-            
-        self._last_position_size = float(self.executor.position.size)
 
-        # 計算未實現損益（mark-to-market）
-        unrealized_pnl = float(self.executor.unrealized_pnl(mark_price))
-        has_position = abs(self.executor.position.size) > 1e-8
-        
-        stop_loss_triggered = self.executor.stop_loss_triggered
+        max_capacity_qty = (self.daily_risk_base * self.leverage) / current_price if current_price > 0 else 1.0
+        position_change_norm = position_change / max_capacity_qty if max_capacity_qty > 0 else 0.0
+
+        # Turnover ratio（只罰「加碼/加曝險」，不罰「減碼/平倉」）
+        # c_to ∝ max(0, |pos_{t+1}| - |pos_t|)
+        exposure_increase_qty = max(0.0, abs(float(new_size)) - abs(float(self._last_position_size)))
+        turnover_notional_change = float(exposure_increase_qty) * float(current_price)
+        turnover_scale = max(last_equity * self.leverage, 1e-8)
+        turnover_ratio = turnover_notional_change / turnover_scale
+
+        current_dd = (self.max_equity_so_far - new_equity) / self.max_equity_so_far if self.max_equity_so_far > 0 else 0.0
+
+        return position_change, traded, position_change_norm, turnover_ratio, float(current_dd)
+
+    def _update_episode_event_counters(self) -> Tuple[bool, bool]:
+        """
+        更新 stop loss / liquidation 事件統計與 cooldown。
+
+        Returns:
+            (stop_loss_triggered, liq_triggered)
+        """
+        stop_loss_triggered = bool(self.executor.stop_loss_triggered)
         if stop_loss_triggered:
             self.episode_stop_loss_count += 1
-            # 啟動止損冷卻，下一步強制不調倉
-            # from Train.config import Config  # lazy import removed to avoid UnboundLocalError
-            cooldown_steps = getattr(Config, "STOP_LOSS_COOLDOWN_STEPS", 0)
-            if cooldown_steps > 0:
-                self.stop_loss_cooldown = int(cooldown_steps)
+            if getattr(Config, "STOP_LOSS_COOLDOWN_STEPS", 0) > 0:
+                self.stop_loss_cooldown = int(Config.STOP_LOSS_COOLDOWN_STEPS)
 
-        # 計算結構性指標 (for reward)
-        dist_to_extreme_atr = None
-        mae_atr = None
-        try:
-            start_idx = max(0, self.current_step - self.window_size)
-            # USE NUMPY SLICING
-            window_high = float(np.max(self._high_arr[start_idx:self.current_step]))
-            window_low = float(np.min(self._low_arr[start_idx:self.current_step]))
-            
-            atr_est = max(1e-8, atr_est)
-            if has_position:
-                if self.executor.position.size > 0:
-                    dist = max(0.0, window_high - current_price)
-                    adverse_move = max(0.0, float(self.executor.position.entry_price) - current_low)
-                else:
-                    dist = max(0.0, current_price - window_low)
-                    adverse_move = max(0.0, current_high - float(self.executor.position.entry_price))
-                dist_to_extreme_atr = float(dist / atr_est)
-                mae_atr = float(adverse_move / atr_est)
-                position_value = abs(float(self.executor.position.size * current_price))
-                leverage_ratio = float(position_value / new_equity) if new_equity > 0 else 0.0
-        except Exception:
-            pass
-        
-        # Calculate Position Change Norm for Reward/Cost
-        max_capacity_qty = (risk_base * self.leverage) / current_price if current_price > 0 else 1.0
-        position_change_norm = abs(position_change) / max_capacity_qty if max_capacity_qty > 0 else 0.0
-
-        # 檢查結束條件 (先算好以便 reward 塑形)
-        data_exhausted = (self.current_step >= len(self.df) - 1)
-        if hasattr(Config, 'MAX_EPISODE_STEPS') and (self.episode_steps + 1) >= Config.MAX_EPISODE_STEPS:
-            data_exhausted = True
-            
-        balance_insufficient = new_equity <= self.min_balance
-        liq_triggered = self.executor.liq_triggered
-        stop_loss_hit = stop_loss_triggered
-
+        liq_triggered = bool(self.executor.liq_triggered)
         if liq_triggered:
             self.episode_liq_count += 1
 
-        self.done = data_exhausted or balance_insufficient or liq_triggered
-        
-        termination_reason = None
-        if data_exhausted:
-            termination_reason = 'data_exhausted'
-        elif liq_triggered:
-            termination_reason = 'liq_triggered'
-        elif balance_insufficient:
-            termination_reason = 'balance_insufficient'
+        return stop_loss_triggered, liq_triggered
 
-        # Remaining fee budget ratio for reward shaping
-        if self.fee_limit_enabled:
-            safe_equity_for_limit = max(new_equity, self.initial_balance * 0.5)
-            limit_amount = max(1e-8, safe_equity_for_limit * self.fee_limit_ratio)
-            remaining_fee_budget_ratio = 1.0 - (self.rolling_fee_sum / limit_amount)
-            remaining_fee_budget_ratio = float(np.clip(remaining_fee_budget_ratio, 0.0, 1.0))
-        else:
-            remaining_fee_budget_ratio = 1.0
+    def step(self, action):
+        # 記錄本次 action 對應的 bar index（render/事件對齊用）
+        step_idx = int(self.current_step)
 
-        step_fee_ratio = step_fee / self.initial_balance if self.initial_balance > 0 else 0.0
+        # 1. Prepare market inputs
+        metrics = self.market_data.get_market_metrics(self.current_step)
+        prices = self._prepare_step_prices(metrics)
+        self._maybe_update_daily_risk_base()
+        last_equity = float(self.executor.equity(prices.current_price))
+        prev_size = float(self._last_position_size)
 
-        # 回饋
-        # --- Conviction/Trend shaping inputs (optional) ---
-        # Provide normalized exposure + trend proxy to reward calculator.
-        # This allows "only when signal is strong AND position is large" bonuses (if enabled),
-        # without encouraging tiny-position bonus farming.
-        pos_size_for_reward = float(self.executor.position.size)
-        pos_notional_for_reward = pos_size_for_reward * float(mark_price)
-        max_cap_notional_for_reward = float(max(new_equity, 1e-12) * float(self.leverage))
-        position_pct_for_reward = float(pos_notional_for_reward / max_cap_notional_for_reward) if max_cap_notional_for_reward > 0 else 0.0
-        position_pct_for_reward = float(np.clip(position_pct_for_reward, -1.0, 1.0))
-        abs_position_pct_for_reward = float(abs(position_pct_for_reward))
+        # 2. Process action + execute
+        final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, action_overridden_flag = self._process_action_and_execute(
+            action=action,
+            last_equity=last_equity,
+            prices=prices,
+        )
+
+        # 3. Post execution updates (for next obs + accounting)
+        self._update_action_effects_cache(expected_fee=expected_fee, current_price=prices.current_price)
+        # --- store action discrepancy fields for next obs ---
         try:
-            if "macd_z" in self.internal_features.columns and self.current_step < len(self.internal_features):
-                trend_score_for_reward = float(np.clip(float(self.internal_features["macd_z"].iat[self.current_step]), -5.0, 5.0))
-            else:
-                trend_score_for_reward = 0.0
-        except Exception:
-            trend_score_for_reward = 0.0
+            self._last_action_effects["last_action_raw"] = float(action[0]) if hasattr(action, "__len__") else float(action)
+        except (TypeError, ValueError, IndexError):
+            self._last_action_effects["last_action_raw"] = 0.0
+        try:
+            self._last_action_effects["last_action_used"] = float(action_used[0]) if hasattr(action_used, "__len__") else float(action_used)
+        except (TypeError, ValueError, IndexError):
+            self._last_action_effects["last_action_used"] = 0.0
+        self._last_action_effects["last_target_pos_pct"] = float(target_pos_pct)
+        self._last_action_effects["last_final_pos_pct"] = float(final_pos_pct)
+        self._last_action_effects["action_overridden_flag"] = 1.0 if bool(action_overridden_flag) else 0.0
+        new_size = float(self.executor.position.size)
+        self._update_position_entry(new_size=new_size)
+        step_fee, safe_equity = self._update_fee_tracking(current_price=prices.current_price)
 
+        # 4. Mark-to-market (use NEXT close)
+        mark_price, new_equity = self._mark_to_market()
+
+        # 5. Risk budget recovery（已停用；保留呼叫不影響）
+        self._recover_risk_budget(new_equity=new_equity)
+
+        # 6. Reward features + episode events
+        position_change, traded, position_change_norm, turnover_ratio, current_dd = self._compute_reward_features(
+            current_price=prices.current_price,
+            last_equity=last_equity,
+            new_equity=new_equity,
+            new_size=new_size,
+        )
+        # Add-only friction fee（排除減倉/平倉；翻倉只算新方向開倉）
+        step_fee_add_only = self._estimate_add_only_fee(
+            prev_size=float(prev_size),
+            new_size=float(new_size),
+            current_price=float(prices.current_price),
+        )
+        # Episode metrics: turnover / holding / trade count
+        try:
+            turnover_notional_change = float(position_change) * float(prices.current_price)
+            if np.isfinite(turnover_notional_change) and turnover_notional_change > 0.0:
+                self.episode_turnover_notional = float(self.episode_turnover_notional) + float(turnover_notional_change)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+        if bool(traded):
+            self.episode_trade_count += 1
+        if abs(float(new_size)) > 1e-8:
+            self.episode_holding_steps += 1
+        # Track episode-level max drawdown (0~1)
+        try:
+            dd_clamped = float(np.clip(float(current_dd), 0.0, 1.0))
+            self.episode_max_dd = float(max(float(self.episode_max_dd), dd_clamped))
+        except (TypeError, ValueError):
+            # Should never break training due to a stats field
+            pass
+        stop_loss_triggered, liq_triggered = self._update_episode_event_counters()
+        # traded flag（供下一個 observation 使用）
+        self._last_action_effects["trade_executed_flag"] = 1.0 if bool(traded) else 0.0
+        # cooldown remaining norm（供下一個 observation 使用）
+        try:
+            cd = float(getattr(self, "stop_loss_cooldown", 0) or 0)
+            cd_max = float(max(1, int(getattr(Config, "STOP_LOSS_COOLDOWN_STEPS", 0) or 0)))
+            self._last_action_effects["cooldown_remaining_norm"] = float(np.clip(cd / cd_max, 0.0, 1.0))
+        except (TypeError, ValueError):
+            self._last_action_effects["cooldown_remaining_norm"] = 0.0
+        # Episode metrics: 主動出場次數（平倉到 0 且非 stop loss / liq）
+        try:
+            closed_to_flat = (abs(prev_size) > 1e-8) and (abs(float(new_size)) <= 1e-8)
+            if closed_to_flat and (not bool(stop_loss_triggered)) and (not bool(liq_triggered)):
+                self.episode_active_exit_count += 1
+        except (TypeError, ValueError):
+            pass
+            
+        # 8. Check Done
+        data_exhausted = (self.current_step >= len(self.market_data.df_5m) - 1)
+        max_steps_reached = (self.episode_steps + 1) >= self.episode_max_steps
+        balance_insufficient = new_equity <= self.min_balance
+        
+        terminated, truncated, termination_reason = self._determine_termination(
+            data_exhausted=data_exhausted,
+            max_steps_reached=max_steps_reached,
+            balance_insufficient=balance_insufficient,
+            liq_triggered=liq_triggered,
+        )
+        self.done = bool(terminated or truncated)
+        
+        # 9. Reward Calculation
+        # Prepare params
+        pos_notional_reward = new_size * mark_price
+        max_cap_reward = max(new_equity, 1e-12) * self.leverage
+        pos_pct_reward = np.clip(pos_notional_reward / max_cap_reward, -1.0, 1.0)
+        
         reward = self.reward_calculator.compute(
             last_equity=last_equity,
             new_equity=new_equity,
-            margin_buffer=margin_buffer,
+            margin_buffer=1.0, # Simplified
             position_change=position_change,
             position_change_norm=position_change_norm,
             turnover_ratio=turnover_ratio,
-            dist_to_extreme_atr=dist_to_extreme_atr,
-            mae_atr=mae_atr,
-            leverage_ratio=leverage_ratio,
-            has_position=has_position,
-            unrealized_pnl=unrealized_pnl,
+            dist_to_extreme_atr=0.0, # Simplified/Removed heavy calc
+            mae_atr=0.0, # Simplified
+            leverage_ratio= abs(new_size * mark_price) / new_equity if new_equity > 0 else 0.0,
+            has_position=abs(new_size) > 1e-8,
+            unrealized_pnl=self.executor.unrealized_pnl(mark_price),
             traded=traded,
-            realized_pnl_step=realized_pnl_step,
+            realized_pnl_step=self.executor.wallet_balance - prev_wallet,
             episode_steps=self.episode_steps,
             episode_max_steps=self.episode_max_steps,
             stop_loss_triggered=stop_loss_triggered,
             done=self.done,
             termination_reason=termination_reason,
-            step_fee_ratio=step_fee_ratio,
+            step_fee_ratio=step_fee / self.initial_balance if self.initial_balance > 0 else 0.0,
             current_dd=current_dd,
-            fee_budget_ratio=remaining_fee_budget_ratio,
-            position_pct=position_pct_for_reward,
-            abs_position_pct=abs_position_pct_for_reward,
-            trend_score=trend_score_for_reward,
+            fee_budget_ratio=1.0 - (self.tracker.rolling_fee_sum / (safe_equity * self.fee_limit_ratio)) if self.fee_limit_enabled else 1.0,
+            position_pct=pos_pct_reward,
+            abs_position_pct=abs(pos_pct_reward),
+            trend_score=metrics['trend_score']
+        )
+        
+        # 9. Cost / Constraint（成本線）
+        # 我們使用「當下價格」計算風險訊號（含 stop_loss_missing / 距離爆倉 / margin_ratio 等），
+        # 並把總 cost 與分項寫入 info，方便訓練端做 Lagrangian 更新與 debug。
+        risk_post = self.observer.compute_risk_signals(
+            self.executor, prices.current_price, prices.atr_est, self.current_step, len(self.market_data.df_5m)
+        )
+        step_fee_ratio = float(step_fee / self.initial_balance) if self.initial_balance > 0 else 0.0
+        
+        # REFACTORED: 僅傳遞必要參數 (liq_triggered, equity, min_balance, step_fee)
+        cost_out = self.cost_calculator.compute(
+            liq_triggered=bool(liq_triggered),
+            equity=float(new_equity),
+            min_balance=float(self.min_balance),
+            step_fee=float(step_fee),
+            # cost_fric 專用：只計入加碼/加曝險的手續費（排除減倉/平倉）
+            step_fee_add_only=float(step_fee_add_only),
+            # kwargs 傳遞以保留擴充性，但目前 cost.py 主要只用上述四個
+            step_fee_ratio=step_fee_ratio,
+            turnover_ratio=float(turnover_ratio),
+            traded=bool(traded),
+            current_dd=float(current_dd),
+            risk_signals=risk_post,
+            stop_loss_triggered=bool(stop_loss_triggered),
+            stop_loss_event_cost=float(getattr(Config, "STOP_LOSS_EVENT_COST", 0.0)),
+            # Stop-Buffer Cost inputs
+            has_position=bool(abs(float(new_size)) > 1e-8),
+            current_price=float(prices.current_price),
+            stop_loss_price=float(getattr(self.executor.position, "stop_loss_price", 0.0) or 0.0),
+            atr=float(prices.atr_est),
+            stop_buffer_d_min=float(getattr(Config, "STOP_BUFFER_D_MIN", 0.3)),
+            stop_buffer_d_scale=float(getattr(Config, "STOP_BUFFER_D_SCALE", 0.3)),
         )
 
-        # 更新步驟
+        # ---- Record render events (entry/reduce/close/flip/SL/LIQ) ----
+        self._record_step_events(
+            step_idx=step_idx,
+            prev_size=float(prev_size),
+            new_size=float(new_size),
+            current_price=float(prices.current_price),
+            current_high=float(prices.current_high),
+            current_low=float(prices.current_low),
+            stop_loss_triggered=bool(stop_loss_triggered),
+            liq_triggered=bool(liq_triggered),
+        )
+        self._last_executed_step_idx = int(step_idx)
+
+        # 10. Update Step
         self.current_step += 1
         self.episode_steps += 1
+        self._last_position_size = float(new_size)
+        
+        # 11. Tracker Log
+        info = self._build_step_info(
+            new_equity=float(new_equity),
+            stop_loss_triggered=bool(stop_loss_triggered),
+            liq_triggered=bool(liq_triggered),
+            step_fee=float(step_fee),
+            is_flip=bool(is_flip),
+            current_dd=float(current_dd),
+            episode_max_dd=float(self.episode_max_dd),
+            episode_turnover_notional=float(self.episode_turnover_notional),
+            episode_holding_steps=int(self.episode_holding_steps),
+            episode_trade_count=int(self.episode_trade_count),
+            terminated=bool(terminated),
+            truncated=bool(truncated),
+            termination_reason=termination_reason,
+        )
 
-        # 更新帳戶狀態時間序列（對齊新的 current_step/mark_price）
-        # 若 current_step 已被 clamp 到尾端，_get_observation 內也會再次 clamp，這裡保持安全即可。
+        # 將 cost 與分項加入 info（不破壞既有 key）
+        info["cost"] = float(cost_out["cost"])
+        # 新增：雙路徑成本（供雙 λ 使用）；舊訓練端若不認得也不會壞
+        if "cost_risk" in cost_out:
+            info["cost_risk"] = float(cost_out["cost_risk"])
+        if "cost_fric" in cost_out:
+            info["cost_fric"] = float(cost_out["cost_fric"])
+        if "cost_sl_buf" in cost_out:
+            info["cost_sl_buf"] = float(cost_out["cost_sl_buf"])
+        if "cost_sl_event" in cost_out:
+            info["cost_sl_event"] = float(cost_out["cost_sl_event"])
+        info["cost_breakdown"] = dict(cost_out["cost_breakdown"])
+
+        # cache last info for render()
+        self._last_info = dict(info)
+
+        log_payload = self._build_log_payload(
+            step=int(self.current_step),
+            new_equity=float(new_equity),
+            reward=float(reward),
+            action=action_used,
+            final_pos_pct=float(final_pos_pct),
+        )
+        self.tracker.log_step(log_payload, self.episode_steps, force=self.done)
+        
+        # Update Series
         try:
-            self._update_account_series(mark_price)
-        except Exception:
+             self.tracker.update_account_series(self.current_step, self.executor, mark_price)
+        except (AttributeError, TypeError, ValueError):
             pass
 
-        risk_signals = self._compute_risk_signals(current_price)
-        info = {}
-        if stop_loss_hit:
-            info['stop_loss_triggered'] = True
+        # ---- Auto render on done (VecEnv-safe) ----
+        # 若啟用 render_on_done：在終止那一步直接 render，並把結果路徑塞回 info，
+        # 讓 VecEnv 自動 reset 後仍可在 callback 端看到 render_path。
+        if bool(self.done) and bool(self.render_enabled) and bool(getattr(self, "render_on_done", False)):
+            if not bool(getattr(self, "_rendered_this_episode", False)):
+                try:
+                    out_path = self.render(mode="human")
+                except Exception:
+                    out_path = None
+                if out_path is not None:
+                    info["render_path"] = str(out_path)
+                self._rendered_this_episode = True
 
-        # Cost Calculation Helper Info
-        info['equity'] = float(new_equity)
-        info['maintenance_margin'] = 0.0
-        # Inventory / exposure diagnostics:
-        # Provide normalized position exposure to diagnose "avg inventory vs avg profit" divergence.
-        # - position_pct: signed exposure in [-1, 1] relative to (equity * leverage) at mark_price.
-        # - abs_position_pct: absolute exposure intensity.
-        # Note: we use mark_price to align with mark-to-market equity in this step.
-        pos_size = float(self.executor.position.size)
-        pos_notional = pos_size * float(mark_price)
-        info["position_notional"] = float(pos_notional)
-        max_cap_notional = float(max(new_equity, 1e-12) * float(self.leverage))
-        pos_pct = float(pos_notional / max_cap_notional) if max_cap_notional > 0 else 0.0
-        pos_pct = float(np.clip(pos_pct, -1.0, 1.0))
-        info["position_pct"] = pos_pct
-        info["abs_position_pct"] = float(abs(pos_pct))
-
-        if abs(pos_size) > 0:
-             mmr = self.executor.maintenance_margin_rate
-             pos_val = abs(pos_size * float(mark_price))
-             info['maintenance_margin'] = pos_val * mmr
-             # 額外提供 C6（止損接近度/無止損動態懲罰）所需輔助量
-             info['maintenance_margin_rate'] = float(mmr)
-             info['leverage_ratio'] = float(pos_val / new_equity) if new_equity > 0 else 0.0
-             info['maint_margin_ratio'] = float((pos_val * mmr) / new_equity) if new_equity > 0 else 0.0
-        else:
-             # 無倉位時給 0，避免 cost 計算誤判
-             info['maintenance_margin_rate'] = 0.0
-             info['leverage_ratio'] = 0.0
-             info['maint_margin_ratio'] = 0.0
-        info['liq_triggered'] = liq_triggered
-        
-        # Cost 3 Info: Fee Risk
-        info['step_fee_ratio'] = step_fee_ratio
-        
-        # Other info for debug/analysis
-        info['position_change_norm'] = position_change_norm
-        info['is_risk_reducing'] = is_risk_reducing
-        info['fee_limit_hit'] = bool(self.fee_limit_hit)
-        # expose flip decision so C1 can penalize churn (frequent long<->short flips)
-        info['is_flip'] = bool(is_flip)
-        info['flip_blocked'] = flip_blocked
-        info['flip_budget_spent'] = flip_budget_spent
-        info['risk_budget'] = float(self.risk_budget)
-        info['current_dd'] = current_dd
-        info['remaining_fee_budget_ratio'] = remaining_fee_budget_ratio
-        info['turnover_notional_change'] = turnover_notional_change
-        info['turnover_notional_scale'] = turnover_notional_scale
-        info['done'] = bool(self.done)
-        # Reward shaping diagnostics (if enabled)
-        try:
-            info["conviction_bonus"] = float(getattr(self.reward_calculator, "last_conviction_bonus", 0.0))
-            info["conviction_active"] = bool(getattr(self.reward_calculator, "last_conviction_active", False))
-        except Exception:
-            info["conviction_bonus"] = 0.0
-            info["conviction_active"] = False
-        # Trend proxy for directional cost shaping (C4).
-        # Use macd_z if available (already computed in features); fallback to 0.
-        try:
-            if "macd_z" in self.internal_features.columns and self.current_step < len(self.internal_features):
-                info["trend_score"] = float(np.clip(float(self.internal_features["macd_z"].iat[self.current_step]), -5.0, 5.0))
-            else:
-                info["trend_score"] = 0.0
-        except Exception:
-            info["trend_score"] = 0.0
-        info['risk_signals'] = {
-            'liq_price': float(risk_signals['liq_price']),
-            'price_gap': float(risk_signals['price_gap']),
-            'gap_pct': float(risk_signals['gap_pct']),
-            'abs_gap_pct': float(risk_signals['abs_gap_pct']),
-            'margin_ratio': float(risk_signals['margin_ratio']),
-            'sl_gap_pct': float(risk_signals['sl_gap_pct']),
-            'stop_loss_missing': float(risk_signals['stop_loss_missing']),
-            'near_liq': bool(risk_signals['near_liq']),
-            'near_margin': bool(risk_signals['near_margin']),
-            'near_stop': bool(risk_signals['near_stop']),
-        }
-
-        maint_margin_ratio_log = 0.0
-        if abs(self.executor.position.size) > 0:
-            mmr = self.executor.maintenance_margin_rate
-            pos_val = abs(self.executor.position.size * current_price)
-            if new_equity > 0:
-                maint_margin_ratio_log = (pos_val * mmr) / new_equity
-        maint_margin_ratio_log = float(np.clip(maint_margin_ratio_log, 0.0, 2.0))
-
-        # 逐步記錄（可依頻率或關鍵事件寫入）
-        should_log_step = self.step_log_enabled and (
-            (self.episode_steps % self.step_log_every_n == 0) or
-            self.done or stop_loss_triggered or liq_triggered
-        )
-        if should_log_step:
-            step_payload = {
-                "env_id": self.env_id,
-                "global_step": int(self.current_step),
-                "episode_step": int(self.episode_steps),
-                "price": current_price,
-                "mark_price": mark_price,
-                "action_raw": float(action[0]),
-                "target_pos_pct": float(target_pos_pct),
-                "final_pos_pct": float(position_percent),
-                "position_size": float(self.executor.position.size),
-                "equity_before": float(last_equity),
-                "equity_after": float(new_equity),
-                "wallet": float(self.executor.wallet_balance),
-                "unrealized_pnl": float(unrealized_pnl),
-                "realized_pnl_step": float(realized_pnl_step),
-                "turnover_ratio": float(turnover_ratio),
-                "position_change_norm": float(position_change_norm),
-                "fees_step": float(step_fee),
-                "fees_total": float(self.executor.total_fees),
-                "rolling_fee_sum": float(self.rolling_fee_sum),
-                "fee_limit_hit": bool(self.fee_limit_hit),
-                "maint_margin_ratio": maint_margin_ratio_log,
-                "leverage_ratio": float(leverage_ratio),
-                "current_dd": float(current_dd),
-                "stop_loss_triggered": bool(stop_loss_triggered),
-                "liq_triggered": bool(liq_triggered),
-                "risk_budget": float(self.risk_budget),
-                "flip_blocked": bool(flip_blocked),
-                "reward": float(reward),
-                "done": bool(self.done),
-                "termination_reason": termination_reason if termination_reason else "",
-            }
-            self._log_step(step_payload)
-
-        if self.done:
-            if termination_reason:
-                info['termination_reason'] = termination_reason
-            else:
-                info['termination_reason'] = 'other'
-            
-            info['final_balance'] = float(new_equity)
-            info['profit'] = float(new_equity - self.initial_balance)
-            info['profit_rate'] = float((info['profit'] / self.initial_balance) * 100) if self.initial_balance > 0 else 0.0
-            
-            try:
-                info['long_close_count'] = int(self.executor.long_close_count)
-                info['short_close_count'] = int(self.executor.short_close_count)
-                info['total_fees'] = float(self.executor.total_fees)
-                info['episode_steps'] = int(self.episode_steps)
-                info['long_entry_count'] = int(self.executor.long_entry_count)
-                info['short_entry_count'] = int(self.executor.short_entry_count)
-                info['episode_max_steps'] = int(self.episode_max_steps)
-                info['data_len'] = int(len(self.df))
-                info['window_size'] = int(self.window_size)
-                info['episode_stop_loss_count'] = int(self.episode_stop_loss_count)
-                info['episode_liq_count'] = int(self.episode_liq_count)
-                info['max_single_trade_loss_pct'] = float(self.executor.max_trade_loss_pct)
-                info['max_stop_loss_distance_pct'] = float(getattr(self.executor, "max_stop_loss_distance_pct", 0.0))
-            except Exception:
-                pass
-            
-        return self._get_observation(), reward, self.done, False, info
+        # Gymnasium: (obs, reward, terminated, truncated, info)
+        return self._get_observation(), reward, bool(terminated), bool(truncated), info
 
     def render(self, mode='human'):
-        pass
-
+        # 只在 episode 結束時 render，避免訓練中每步繪圖造成效能負擔
+        if not bool(getattr(self, "done", False)):
+            return None
+        renderer = getattr(self, "_renderer", None)
+        if renderer is None:
+            return None
+        try:
+            return renderer.render_episode(env=self, info=getattr(self, "_last_info", None))
+        except Exception:
+            return None
+    
     def close(self):
         pass
+    
+    def set_fee_rate(self, fee_rate: float):
+        self.transaction_fee = float(fee_rate)
+        if hasattr(self, "executor"):
+            self.executor.set_fee_rate(fee_rate)
+            
+    def get_fee_rate(self) -> float:
+        if hasattr(self, "executor"):
+            return self.executor.get_fee_rate()
+        return self.transaction_fee
