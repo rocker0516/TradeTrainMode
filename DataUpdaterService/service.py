@@ -55,7 +55,7 @@ def _run_service_main() -> None:
             self.stop_event = win32event.CreateEvent(None, 0, 0, None)
 
             project_root = _project_root_from_this_file()
-            cfg = DataUpdaterConfig.from_env(project_root=project_root)
+            cfg = DataUpdaterConfig.from_config_file(project_root=project_root)
             self.runner = DataUpdaterRunner(config=cfg, project_root=project_root)
 
             self.update_5m_seconds = max(30, int(cfg.update_5m_seconds))

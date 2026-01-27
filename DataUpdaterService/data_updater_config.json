@@ -1,0 +1,11 @@
+{
+  "data_dir": "Data",
+  "log_dir": "logs/data_updater_service",
+  "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "1000PEPEUSDT"],
+  "exchange": "Binance",
+  "update_5m_seconds": 300,
+  "update_1d_time": "00:30",
+  "initial_backfill_days_5m": 30,
+  "initial_backfill_days_1d": 3650
+}
+

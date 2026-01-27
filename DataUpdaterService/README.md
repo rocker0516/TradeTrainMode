@@ -13,15 +13,36 @@
   - `Data/bitcoin_macro_oscillator_index_history_1d.csv`
 
 ## 環境變數
-- `COINGLASS_API_KEY`（必填：更新 1d coinglass/macro）
-- `DATA_UPDATER_SYMBOLS`（選填，預設：BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT,1000PEPEUSDT）
-- `DATA_UPDATER_EXCHANGE`（選填，預設：Binance）
-- `DATA_DIR`（選填，預設：專案根目錄的 `Data/`）
-- `UPDATE_5M_SECONDS`（選填，預設：300）
-- `UPDATE_1D_TIME`（選填，預設：00:30）
-- `INITIAL_BACKFILL_DAYS_5M`（選填，預設：30；當 CSV 不存在或無法讀到最後時間時使用）
-- `INITIAL_BACKFILL_DAYS_1D`（選填，預設：3650；同上）
-- `DATA_UPDATER_LOG_DIR`（選填，預設：`logs/data_updater_service/`）
+- `COINGLASS_API_KEY`（API 相關、必填：更新 1d coinglass/macro）
+
+> 依專案規則：**環境變數只用於 API 相關設定**；其餘設定請改用 config 檔案。
+
+## Config 檔案（非 API 設定）
+預設路徑：`DataUpdaterService/data_updater_config.json`
+
+範例（已附在 repo，可直接修改）：
+
+```json
+{
+  "data_dir": "Data",
+  "log_dir": "logs/data_updater_service",
+  "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "1000PEPEUSDT"],
+  "exchange": "Binance",
+  "update_5m_seconds": 300,
+  "update_1d_time": "00:30",
+  "initial_backfill_days_5m": 30,
+  "initial_backfill_days_1d": 3650
+}
+```
+
+說明：
+- `data_dir`: Data 目錄（可相對於專案根目錄或使用絕對路徑）
+- `log_dir`: log 目錄（可相對或絕對）
+- `symbols`: 交易對清單（也可用逗號字串，但建議用 array）
+- `exchange`: CoinGlass 的 exchange 參數（預設 `Binance`）
+- `update_5m_seconds`: 5m 更新間隔（秒）
+- `update_1d_time`: 1d 更新時間（HH:MM，local time）
+- `initial_backfill_days_5m` / `initial_backfill_days_1d`: CSV 不存在或讀不到最後時間時的回補天數
 
 ## Windows Service（pywin32）
 > 注意：只有在 Windows 安裝 `pywin32` 後可用。
