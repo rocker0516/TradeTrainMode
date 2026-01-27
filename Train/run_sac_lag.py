@@ -42,6 +42,7 @@ from Train.lagrangian import (
     LagrangianCallback,
 )
 from Train.train_config import TrainConfig
+from Train.resume_utils import resolve_resume_config
 
 
 class EnvFactory:
@@ -117,6 +118,10 @@ def main() -> None:
     # 進度條：預設開啟（避免你忘記加參數而覺得「沒有進度」）
     parser.add_argument("--no_progress_bar", action="store_true", help="關閉 SB3 進度條（預設會顯示）")
     parser.add_argument("--verbose", type=int, default=TrainConfig.SB3_VERBOSE_DEFAULT, help="SB3 verbose 等級（預設：開進度條時=0，否則=1）")
+    # ---- 續訓 / 載入模型 ----
+    # 注意：SB3 的 .zip 通常不包含 replay buffer（除非你另外保存/載入），所以續訓會從空 buffer 重新收集資料。
+    parser.add_argument("--resume", type=str, default=None, help="從指定 SB3 .zip 模型路徑續訓（例：models/.../best_model.zip）")
+    parser.add_argument("--resume_best", action="store_true", help="自動從 models/sac_lag_<SYMBOL>/best_model/best_model.zip 續訓")
     args = parser.parse_args()
 
     # progress bar 預設開啟；除非你顯式指定 --no_progress_bar
@@ -140,6 +145,11 @@ def main() -> None:
         "target_symbol": args.symbol,
         "window_size": TrainConfig.WINDOW_SIZE_5M,
         "window_size_1d": TrainConfig.WINDOW_SIZE_1D,
+        # 訓練用 SubprocVecEnv 不要啟用 render：
+        # - 子進程若載入 matplotlib 的 Tk 後端，Windows 常會在某個時點/退出時噴
+        #   `Tcl_AsyncDelete: async handler deleted by the wrong thread`
+        # - render 只留給 eval env（在主進程）
+        "render_enabled": False,
         # Deadband：抑制微小調倉（避免 action 抖動導致過度成交/手續費爆炸）
         # 注意：Env/config.py 預設可能是 0.0；訓練入口必須顯式傳入才會生效。
         "min_position_change": float(getattr(TrainConfig, "MIN_POSITION_CHANGE", 0.0)),
@@ -168,7 +178,7 @@ def main() -> None:
     # 同時也會自動處理 Reset，讓 SubprocVecEnv 的輸出符合 Gym 介面
     env = VecMonitor(env, filename=f"logs/sac_lag_{args.symbol}")
 
-    # 3. 建立 SAC 模型
+    # 3. 建立 / 載入 SAC 模型
     policy_kwargs = dict(
         features_extractor_class=DualCnnFeatureExtractor,
         features_extractor_kwargs=dict(
@@ -180,27 +190,63 @@ def main() -> None:
         net_arch=dict(pi=list(TrainConfig.PI_ARCH), qf=list(TrainConfig.QF_ARCH)),
     )
 
-    model = SAC(
-        policy="MultiInputPolicy",
-        env=env,
-        policy_kwargs=policy_kwargs,
-        learning_rate=float(TrainConfig.LEARNING_RATE),
-        buffer_size=int(TrainConfig.BUFFER_SIZE),  # 經驗回放池大小
-        # SB3 memory optimization: reduce replay buffer RAM
-        # - Avoid storing next_obs in a separate buffer (saves significant memory for large Dict obs)
-        optimize_memory_usage=True,
-        replay_buffer_class=OptimizedDictReplayBuffer,
-        # Required when optimize_memory_usage=True: disable timeout-specific handling.
-        # (Same constraint as SB3 ReplayBuffer; avoids known bug with timeouts + optimized storage)
-        replay_buffer_kwargs={"handle_timeout_termination": False},
-        batch_size=int(TrainConfig.BATCH_SIZE),
-        ent_coef=TrainConfig.ENT_COEF,
-        train_freq=int(TrainConfig.TRAIN_FREQ),
-        gradient_steps=int(TrainConfig.GRADIENT_STEPS),
-        device=args.device,
-        verbose=sb3_verbose,
-        tensorboard_log=str(TrainConfig.TENSORBOARD_LOG_DIR),
+    resume_cfg = resolve_resume_config(
+        resume_path=getattr(args, "resume", None),
+        resume_best=bool(getattr(args, "resume_best", False)),
+        symbol=str(args.symbol),
+        checkpoint_dir_prefix=str(TrainConfig.CHECKPOINT_DIR_PREFIX),
     )
+
+    if resume_cfg is not None and bool(resume_cfg.enabled):
+        print(f"[TRAIN] Resume from: {resume_cfg.model_path}", flush=True)
+        # SB3 跨版本/跨 Python 版本載入時，偶爾會出現 pickle 反序列化不相容：
+        # - _last_obs / _last_original_obs：只影響「load 後立即 predict」的暫存，訓練會在 reset 後覆蓋
+        # - lr_schedule：舊版本可能用不同 closure/bytecode 表示；我們改用本次訓練流程的 learning_rate 設定
+        # 因此這裡用 custom_objects 置換掉不相容欄位，確保能穩定續訓。
+        custom_objects = {
+            "_last_obs": None,
+            "_last_original_obs": None,
+            "lr_schedule": None,
+        }
+        model = SAC.load(
+            resume_cfg.model_path,
+            env=env,
+            device=args.device,
+            print_system_info=False,
+            custom_objects=custom_objects,
+        )
+        # 確保續訓仍寫入 TensorBoard（SB3 在 learn() 會用 self.tensorboard_log 建 logger）
+        try:
+            model.tensorboard_log = str(TrainConfig.TENSORBOARD_LOG_DIR)
+        except Exception:
+            pass
+        # 對齊 verbose（避免 load 的 verbose 與本次 CLI 不一致）
+        try:
+            model.verbose = int(sb3_verbose)
+        except Exception:
+            pass
+    else:
+        model = SAC(
+            policy="MultiInputPolicy",
+            env=env,
+            policy_kwargs=policy_kwargs,
+            learning_rate=float(TrainConfig.LEARNING_RATE),
+            buffer_size=int(TrainConfig.BUFFER_SIZE),  # 經驗回放池大小
+            # SB3 memory optimization: reduce replay buffer RAM
+            # - Avoid storing next_obs in a separate buffer (saves significant memory for large Dict obs)
+            optimize_memory_usage=True,
+            replay_buffer_class=OptimizedDictReplayBuffer,
+            # Required when optimize_memory_usage=True: disable timeout-specific handling.
+            # (Same constraint as SB3 ReplayBuffer; avoids known bug with timeouts + optimized storage)
+            replay_buffer_kwargs={"handle_timeout_termination": False},
+            batch_size=int(TrainConfig.BATCH_SIZE),
+            ent_coef=TrainConfig.ENT_COEF,
+            train_freq=int(TrainConfig.TRAIN_FREQ),
+            gradient_steps=int(TrainConfig.GRADIENT_STEPS),
+            device=args.device,
+            verbose=sb3_verbose,
+            tensorboard_log=str(TrainConfig.TENSORBOARD_LOG_DIR),
+        )
 
     # 4. 設定 Callbacks
     # LagrangianCallback: 更新 λ 與顯示交易統計
@@ -239,7 +285,8 @@ def main() -> None:
                     "ensure_filled_obs": True,
                     # ---- Render (EVAL) ----
                     "render_enabled": True,
-                    "render_save": True,
+                    # 需求：只開 GUI、不存圖
+                    "render_save": False,
                     "render_show": True,
                     # VecEnv 會在 done 時自動 reset；因此必須在「終止那一步」就 render，並把路徑塞回 info。
                     "render_on_done": True,

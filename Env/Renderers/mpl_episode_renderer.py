@@ -85,6 +85,15 @@ class MplfinanceEpisodeRenderer(BaseEpisodeRenderer):
         except Exception:
             return None
 
+        # 若只顯示不存檔，通常代表「只想看最新一張」：
+        # - 避免每個 episode 開一個新視窗導致爆量視窗/記憶體上升
+        # - 先關閉舊圖，再畫新圖
+        if bool(getattr(self._output, "show", True)) and (not bool(getattr(self._output, "save", True))):
+            try:
+                plt.close("all")
+            except Exception:
+                pass
+
         md = getattr(env, "market_data", None)
         tr = getattr(env, "tracker", None)
         if md is None or tr is None:
@@ -183,6 +192,10 @@ class MplfinanceEpisodeRenderer(BaseEpisodeRenderer):
             xrotation=15,
             datetime_format="%Y-%m-%d %H:%M",
             tight_layout=True,
+            # 避免 mplfinance 在資料量較大時一直噴警告：
+            # - 我們刻意畫完整 episode（便於回看交易點），不代表要每次提醒一次。
+            # - N 設成略大於實際點數即可靜音。
+            warn_too_much_data=int(len(df) + 10),
         )
 
         # Annotations: trade events & SL/LIQ & termination line

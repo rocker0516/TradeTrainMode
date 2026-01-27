@@ -1375,7 +1375,18 @@ class TradingEnvironment(gym.Env):
             return None
     
     def close(self):
-        pass
+        # 重要（Windows 常見崩潰修正）：
+        # Matplotlib 使用 Tk 後端（TkAgg）時，若在程序結束才由 GC 清理，
+        # 可能出現 `main thread is not in main loop` / `Tcl_AsyncDelete`。
+        # 這裡在 env.close() 主動關閉所有 figures，降低結束時清理錯誤機率。
+        try:
+            if getattr(self, "_renderer", None) is not None:
+                import matplotlib.pyplot as plt
+
+                plt.close("all")
+        except Exception:
+            # close 不應阻斷訓練/評估關閉流程
+            pass
     
     def set_fee_rate(self, fee_rate: float):
         self.transaction_fee = float(fee_rate)
