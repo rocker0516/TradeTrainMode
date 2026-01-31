@@ -265,6 +265,8 @@ def _named_vector_specs() -> Dict[str, List[str]]:
             "fee_rate_pct",
             "trend_direction",
             "trend_strength",
+            "position_trend_alignment",
+            "regime_choppy",
         ],
         "time_state": [
             "hour_sin",

@@ -297,16 +297,23 @@ class MarketData:
             return np.zeros(len(self.df_5m), dtype=np.float32)
 
     def get_market_metrics(self, step_idx: int) -> dict:
-        """取得特定時間點的市場指標 (ATR, Price, etc.)"""
-        idx = min(step_idx, len(self.df_5m) - 1)
-        return {
+        """取得特定時間點的市場指標 (ATR, Price, chop/regime 等)。"""
+        idx = min(max(0, step_idx), len(self.df_5m) - 1)
+        out = {
             'close': float(self.close_arr[idx]),
             'high': float(self.high_arr[idx]),
             'low': float(self.low_arr[idx]),
             'atr_ratio': float(self.atr_ratio_arr[idx]),
             'rv_ratio': float(self.rv_ratio_arr[idx]),
-            'trend_score': float(self.trend_score_arr[idx])
+            'trend_score': float(self.trend_score_arr[idx]),
         }
+        # 當前步 5m 的 chop_48（震盪程度，高=震盪、低=趨勢），供 obs 理解市場狀態
+        if hasattr(self, 'cols_5m') and self.cols_5m and 'chop_48' in self.cols_5m:
+            ci = list(self.cols_5m).index('chop_48')
+            out['chop_48'] = float(self.features_5m_arr[idx, ci])
+        else:
+            out['chop_48'] = 0.0
+        return out
 
     def get_price_seq(self, step_idx: int) -> np.ndarray:
         """取得 5m 序列輸入 [window_size, F_5m]"""

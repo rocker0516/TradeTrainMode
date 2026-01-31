@@ -1,6 +1,19 @@
 from __future__ import annotations
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict
+
+import numpy as np
+
+# Freq 通道（交易頻率/調倉幅度）常數
+FREQ_BUFFER_SIZE = 500
+FREQ_BUFFER_MIN_SAMPLES = 30
+FREQ_TAU_QUANTILE = 0.5   # q50(turnover)；可改為 0.6
+FREQ_SCALE_QUANTILE = 0.9
+FREQ_TAU_DEFAULT = 0.05
+FREQ_SCALE_DEFAULT = 0.2
+FREQ_EPS = 1e-12
+
 
 @dataclass(frozen=True)
 class CostWeights:
@@ -17,16 +30,23 @@ class CostCalculator:
     正規化成本計算器 (Normalized Cost Calculator)
 
     設計原則：
-    所有成本皆正規化為「佔當前權益的比例」 (Cost / Equity)，
+    所有成本皆正規化為「佔當前權益的比例」或 0~1 無量綱，
     確保約束條件在不同資金規模下具有尺度不變性 (Scale Invariance)。
 
     公式：
     1. Death Cost: 1.0 (若發生爆倉/破產，視為損失 100% 權益)
-    2. Fric Cost : StepFee / Equity (本步手續費佔權益的比例)
+    2. Fric/Freq Cost: 控制「交易頻率/調倉幅度」，與手續費脫鉤，避免重複懲罰。
+       turnover_t = |pos_t - pos_{t-1}|，c_freq = clip((turnover_t - tau)/scale, 0, 1)；
+       tau = q50(turnover)，scale = max(q90(turnover) - tau, eps)。
     """
 
     def __init__(self, weights: CostWeights | None = None) -> None:
         self.weights = weights or CostWeights()
+        self._turnover_buffer: deque[float] = deque(maxlen=FREQ_BUFFER_SIZE)
+
+    def reset(self) -> None:
+        """Episode 重置時清空 turnover 緩衝，tau/scale 下個 episode 重新累積。"""
+        self._turnover_buffer.clear()
 
     def compute(
         self,
@@ -44,17 +64,16 @@ class CostCalculator:
             liq_triggered: 是否觸發爆倉
             equity: 當前權益 (E_t)
             min_balance: 最低資金門檻
-            step_fee: 本步產生的手續費 (絕對金額；包含加倉/減倉/平倉)
-            step_fee_add_only: （可選，從 kwargs 傳入）僅計入「加碼/加曝險」的手續費，用於排除減倉/平倉的摩擦成本線
+            step_fee: 本步產生的手續費 (絕對金額；供總 cost 或其它用途，freq 通道不用)
+            pos_t: （kwargs）本步實際執行後的持倉比例 (-1~1)，用於 freq 通道
+            pos_prev: （kwargs）上一步實際執行後的持倉比例 (-1~1)
 
         Returns:
             Dict:
             - cost: 總正規化成本 (供單一 Lambda 使用)
-            - cost_risk: 死亡成本 (1.0 or 0.0)（不包含止損事件）
-            - cost_fric: 摩擦成本 (Fee / Equity)
-            - cost_sl_buf: 止損安全緩衝成本（密集、0~1、ATR 無量綱）
-            - cost_sl_event: 止損事件成本（事件型；獨立成本線）
-            - cost_breakdown: 詳細分項
+            - cost_risk: 死亡成本 (1.0 or 0.0)
+            - cost_fric: 頻率/調倉成本 c_freq (0~1)，與手續費脫鉤
+            - cost_sl_buf / cost_sl_event / cost_breakdown: 其餘分項
         """
         # 防除以零保護：使用 min_balance 或極小值做為分母下限
         # 若 equity 已經低於 0，則保護值為 1e-4，避免負值或除零炸裂
@@ -80,18 +99,28 @@ class CostCalculator:
         # 風險通道：只代表死亡事件（你要求「止損獨立出來不能涵蓋在 risk」）。
         c_risk = float(c_death)
 
-        # 2. 摩擦/換手成本 (c_fric)
-        # 定義：手續費佔當前權益的比例
-        # c_fric = Fee_t / E_t
-        #
-        # 重要：若外部提供 step_fee_add_only，則 cost_fric 會「排除減倉/平倉」，
-        # 只在加碼/加曝險時才計入摩擦成本。
-        fee_for_fric = kwargs.get("step_fee_add_only", step_fee)
-        try:
-            fee_for_fric = float(fee_for_fric)
-        except (TypeError, ValueError):
-            fee_for_fric = float(step_fee)
-        c_fric = fee_for_fric / safe_equity
+        # 2. Freq 通道 (c_freq)：控制「交易頻率/調倉幅度」，與手續費脫鉤
+        # turnover_t = |pos_t - pos_{t-1}|；c_freq = clip((turnover_t - tau)/scale, 0, 1)
+        # tau = q50(turnover)，scale = max(q90(turnover) - tau, eps)；pos 為實際執行後持倉比例
+        pos_t = kwargs.get("pos_t")
+        pos_prev = kwargs.get("pos_prev")
+        if pos_t is not None and pos_prev is not None:
+            pos_t_f = float(pos_t)
+            pos_prev_f = float(pos_prev)
+            turnover_t = float(np.clip(abs(pos_t_f - pos_prev_f), 0.0, 2.0))
+            self._turnover_buffer.append(turnover_t)
+            buf = np.array(self._turnover_buffer, dtype=float)
+            if len(buf) >= FREQ_BUFFER_MIN_SAMPLES:
+                tau = float(np.quantile(buf, FREQ_TAU_QUANTILE))
+                q90 = float(np.quantile(buf, FREQ_SCALE_QUANTILE))
+                scale = max(q90 - tau, FREQ_EPS)
+            else:
+                tau = FREQ_TAU_DEFAULT
+                scale = FREQ_SCALE_DEFAULT
+            raw = (turnover_t - tau) / scale
+            c_freq = float(np.clip(raw, 0.0, 1.0))
+        else:
+            c_freq = 0.0
 
         # 3. Stop-Buffer Cost（止損成本線）
         # 定義距離（以 ATR 正規化）：d_t = |P_t - SL_t| / ATR_t
@@ -121,22 +150,19 @@ class CostCalculator:
         # channel 值：若缺 SL，直接視為最大不安全；否則使用 buffer 公式
         c_sl_buf = max(sl_buf_cost, stop_missing_cost)
 
-        # 總成本 (若訓練端只支援單一 cost channel，則相加)
-        # 通常死亡成本 (1.0) 會遠大於摩擦成本 (e.g. 0.001)，
-        # 所以直接相加在數學上是合理的 (死亡是主導項)。
-        # 注意：stop_loss_event_cost 不屬於 sl_buf，因此總成本要把事件成本也加進去。
-        total_cost = c_death + c_fric + c_sl_buf + c_stop_event
+        # 總成本：death + freq + sl_buf + stop_event（freq 為 0~1 無量綱）
+        total_cost = c_death + c_freq + c_sl_buf + c_stop_event
 
         return {
-            "cost": float(total_cost),       # 總和 (供 Env.info['cost'] 使用)
-            "cost_risk": float(c_risk),      # 獨立通道 (供多 Lambda 使用)
-            "cost_fric": float(c_fric),      # 獨立通道 (供多 Lambda 使用)
-            "cost_sl_buf": float(c_sl_buf),  # 獨立通道 (供多 Lambda 使用)
-            "cost_sl_event": float(c_stop_event),  # 獨立通道 (供多 Lambda 使用)
+            "cost": float(total_cost),
+            "cost_risk": float(c_risk),
+            "cost_fric": float(c_freq),  # 對外仍用 cost_fric 鍵名，實為 freq 通道 (0~1)
+            "cost_sl_buf": float(c_sl_buf),
+            "cost_sl_event": float(c_stop_event),
             "cost_breakdown": {
                 "death_cost": float(c_death),
                 "stop_loss_event_cost": float(c_stop_event),
-                "fric_cost": float(c_fric),
+                "fric_cost": float(c_freq),
                 "sl_buf_cost": float(sl_buf_cost),
                 "stop_missing_cost": float(stop_missing_cost),
             },

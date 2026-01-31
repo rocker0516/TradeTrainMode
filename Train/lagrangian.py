@@ -862,10 +862,10 @@ class LagrangianCallback(BaseCallback):
                     # 若是 death_cost (單次=1.0)，則平均值即為發生率
                     if k == "death_cost":
                         print(f"    - {k:<20}: {v:.4f} (Rate: {v*100:.2f}%)")
-                    # 若是 fric_cost，也顯示 Per Step 值
+                    # freq 通道 (c_freq 0~1)：顯示每步平均
                     elif k == "fric_cost":
                         per_step = v / max(1.0, avg_episode_len)
-                        print(f"    - {k:<20}: {v:.4f} (Step: {per_step:.6f})")
+                        print(f"    - {k:<20}: {v:.4f} (Avg/step: {per_step:.4f})")
                     else:
                         print(f"    - {k:<20}: {v:8.4f}")
             

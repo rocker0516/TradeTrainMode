@@ -241,6 +241,7 @@ class TradingEnvironment(gym.Env):
         self.last_trade_step = -999999
         self.position_entry_step = None
         self._last_position_size = 0.0
+        self._prev_executed_pos_pct = 0.0  # freq 通道：上一步實際持倉比例 (-1~1)
         self.episode_stop_loss_count = 0
         self.episode_liq_count = 0
         self.stop_loss_cooldown = 0
@@ -470,6 +471,9 @@ class TradingEnvironment(gym.Env):
             "last_final_pos_pct": 0.0,
             "trade_executed_flag": 0.0,
         }
+        self._prev_executed_pos_pct = 0.0  # freq 通道：上一步實際持倉比例 (-1~1)
+        if hasattr(self.cost_calculator, "reset"):
+            self.cost_calculator.reset()
 
         # 4. Initial Observation
         metrics = self.market_data.get_market_metrics(self.current_step)
@@ -1254,16 +1258,17 @@ class TradingEnvironment(gym.Env):
             self.executor, prices.current_price, prices.atr_est, self.current_step, len(self.market_data.df_5m)
         )
         step_fee_ratio = float(step_fee / self.initial_balance) if self.initial_balance > 0 else 0.0
-        
-        # REFACTORED: 僅傳遞必要參數 (liq_triggered, equity, min_balance, step_fee)
+        # Freq 通道：pos 用實際執行後的持倉比例（投影/shield 後），否則 turnover 失真
+        max_cap = max(new_equity * self.leverage, 1e-12)
+        executed_pos_pct = float(np.clip((float(new_size) * float(prices.current_price)) / max_cap, -1.0, 1.0))
+
         cost_out = self.cost_calculator.compute(
             liq_triggered=bool(liq_triggered),
             equity=float(new_equity),
             min_balance=float(self.min_balance),
             step_fee=float(step_fee),
-            # cost_fric 專用：只計入加碼/加曝險的手續費（排除減倉/平倉）
-            step_fee_add_only=float(step_fee_add_only),
-            # kwargs 傳遞以保留擴充性，但目前 cost.py 主要只用上述四個
+            pos_t=executed_pos_pct,
+            pos_prev=float(self._prev_executed_pos_pct),
             step_fee_ratio=step_fee_ratio,
             turnover_ratio=float(turnover_ratio),
             traded=bool(traded),
@@ -1271,7 +1276,6 @@ class TradingEnvironment(gym.Env):
             risk_signals=risk_post,
             stop_loss_triggered=bool(stop_loss_triggered),
             stop_loss_event_cost=float(getattr(Config, "STOP_LOSS_EVENT_COST", 0.0)),
-            # Stop-Buffer Cost inputs
             has_position=bool(abs(float(new_size)) > 1e-8),
             current_price=float(prices.current_price),
             stop_loss_price=float(getattr(self.executor.position, "stop_loss_price", 0.0) or 0.0),
@@ -1279,6 +1283,7 @@ class TradingEnvironment(gym.Env):
             stop_buffer_d_min=float(getattr(Config, "STOP_BUFFER_D_MIN", 0.3)),
             stop_buffer_d_scale=float(getattr(Config, "STOP_BUFFER_D_SCALE", 0.3)),
         )
+        self._prev_executed_pos_pct = executed_pos_pct
 
         # ---- Record render events (entry/reduce/close/flip/SL/LIQ) ----
         self._record_step_events(

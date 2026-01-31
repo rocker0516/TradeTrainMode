@@ -108,7 +108,7 @@ def main() -> None:
     parser.add_argument("--n_envs", type=int, default=TrainConfig.N_ENVS, help="Number of parallel environments")
     parser.add_argument("--cost_limit", type=float, default=TrainConfig.COST_LIMIT, help="Average cost limit per step (legacy single-lambda)")
     parser.add_argument("--risk_cost_limit", type=float, default=TrainConfig.RISK_COST_LIMIT, help="risk cost limit per step (death)")
-    parser.add_argument("--fric_cost_limit", type=float, default=TrainConfig.FRIC_COST_LIMIT, help="fric cost limit per step (fee/equity)")
+    parser.add_argument("--fric_cost_limit", type=float, default=TrainConfig.FRIC_COST_LIMIT, help="freq channel cost limit per step (c_freq 0~1), suggest 0.05~0.20")
     parser.add_argument("--sl_buf_cost_limit", type=float, default=TrainConfig.SL_BUF_COST_LIMIT, help="sl_buf cost limit per step (stop buffer, 0~1)")
     parser.add_argument("--sl_event_cost_limit", type=float, default=TrainConfig.SL_EVENT_COST_LIMIT, help="sl_event cost limit per step (stop loss event)")
     parser.add_argument("--device", type=str, default=TrainConfig.DEVICE)

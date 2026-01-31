@@ -18,7 +18,7 @@
 |------|--------|----------|
 | `price_seq` | (288, F_5m) | 5m 序列：ret、range、volume、EMA/MACD、price_pos、chop、trend_flip 等 |
 | `price_seq_1d` | (30, F_1d) | 1d 序列：OI、funding、多空比、ret_1d、ema_20_60_spread、fear_greed 等 |
-| `account_state` | (27,) | 倉位、權益、浮盈、止損距離、entry_gap_atr、pos_side one-hot 等 |
+| `account_state` | (31,) | 倉位、權益、浮盈、止損距離、entry_gap_atr、pos_side one-hot、**trend_direction**、**trend_strength**、**position_trend_alignment**（我與市場是否同向）、**regime_choppy**（市場震盪 vs 趨勢）等 |
 | `time_state` | (7,) | 小時/星期/phase 的 sin/cos、是否週末 |
 | `rhythm_state` | (2,) | atr_ratio、rv_ratio |
 | `cost_state` | (27,) | 手續費/風險/止損/預測效果、行為偏差揭露 |

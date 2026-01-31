@@ -61,9 +61,9 @@ class TradingObserver:
 
     def _build_account_space(self) -> dict:
         """定義帳戶狀態相關的觀察空間"""
-        # 27 原有 + 2 趨勢純量（trend_direction [-1,1], trend_strength [0,1]）
+        # 27 原有 + 4：trend_direction, trend_strength, position_trend_alignment, regime_choppy
         return {
-            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(29,), dtype=self.obs_dtype)
+            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(31,), dtype=self.obs_dtype)
         }
 
     def _build_context_space(self) -> dict:
@@ -178,7 +178,9 @@ class TradingObserver:
         market_obs = self._get_market_obs(step_idx, market_data)
         account_obs = self._get_account_obs(
             step_idx, executor, market_data, account_metrics, risk_signals,
-            current_price=current_price, atr_ratio=atr_ratio, trend_score=float(metrics.get("trend_score", 0.0)),
+            current_price=current_price, atr_ratio=atr_ratio,
+            trend_score=float(metrics.get("trend_score", 0.0)),
+            chop_48=float(metrics.get("chop_48", 0.0)),
         )
         context_obs = self._get_context_obs(
             step_idx,
@@ -225,8 +227,9 @@ class TradingObserver:
         current_price: float,
         atr_ratio: float,
         trend_score: float = 0.0,
+        chop_48: float = 0.0,
     ) -> dict:
-        """生成帳戶狀態觀察值（含趨勢方向/強度純量，供 MLP 直接使用）。"""
+        """生成帳戶狀態觀察值（含趨勢、市場狀態、持倉與市場同向，供 MLP 直接使用）。"""
         
         initial_balance = account_metrics['initial_balance']
         max_equity_so_far = account_metrics['max_equity_so_far']
@@ -350,11 +353,23 @@ class TradingObserver:
             fee_rate_pct,
         ], dtype=self.obs_dtype)
 
-        # 趨勢純量：讓 MLP 分支直接看到市場方向/強度（obs 優化 doc 項目 1）
+        # 趨勢純量：市場方向/強度
         trend_dir = float(np.tanh(np.clip(trend_score, -5.0, 5.0)))
         trend_str = float(np.clip(np.abs(trend_score), 0.0, 1.0))
-        account_state = np.concatenate([account_state, np.array([trend_dir, trend_str], dtype=self.obs_dtype)])
-        
+
+        # 持倉與市場同向（我當下位置 vs 市場）：+1 同向、-1 反向、0 空倉或無趨勢
+        # 註：可由 pos_side_oh + trend_dir 完全推得，屬顯式摘要（見 docs/obs_optimization_trend.md 六）
+        pos_sign = 1.0 if size > 0 else (-1.0 if size < 0 else 0.0)
+        position_trend_alignment = float(np.clip(pos_sign * trend_dir, -1.0, 1.0))
+
+        # 市場狀態：震盪 vs 趨勢（chop_48 高=震盪，正規化到 [-1,1]）
+        # 註：與 price_seq 最後一列之 chop_48 通道重複，供 MLP 直接使用（見同上 doc 六）
+        regime_choppy = float(np.clip(chop_48 / 5.0, -1.0, 1.0))
+
+        account_state = np.concatenate([
+            account_state,
+            np.array([trend_dir, trend_str, position_trend_alignment, regime_choppy], dtype=self.obs_dtype),
+        ])
         return {'account_state': account_state}
 
     def _get_context_obs(

@@ -115,7 +115,7 @@ def test_observer_observation_shapes(make_synth_market) -> None:
 
     assert out["price_seq"].shape == (10, md.price_seq_features_dim)
     assert out["price_seq_1d"].shape == (7, md.features_1d_dim)
-    assert out["account_state"].shape == (29,)  # 27 原有 + trend_direction, trend_strength
+    assert out["account_state"].shape == (31,)  # 27 + trend_direction, trend_strength, position_trend_alignment, regime_choppy
     assert out["time_state"].shape == (7,)
     assert out["rhythm_state"].shape == (2,)
     assert out["cost_state"].shape == (27,)
