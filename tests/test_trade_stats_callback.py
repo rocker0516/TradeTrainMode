@@ -19,6 +19,11 @@ def test_compute_trade_stats_empty() -> None:
     assert stats["stop_loss_rate_pct"] == 0.0
     assert stats["active_exit_rate_pct"] == 0.0
     assert stats["exit_coverage_rate_pct"] == 0.0
+    assert stats["total_entries"] == 0
+    assert stats["total_closes"] == 0
+    assert stats["long_entry_share_pct"] == 0.0
+    assert stats["short_entry_share_pct"] == 0.0
+    assert stats["direction_bias_pct"] == 0.0
 
 
 def test_compute_trade_stats_basic() -> None:
@@ -62,5 +67,13 @@ def test_compute_trade_stats_basic() -> None:
     assert stats["active_exit_rate_pct"] == pytest.approx((1 / 3) * 100.0)
     # total_closes = (1+0) + (0+2) = 3 -> coverage = 100%
     assert stats["exit_coverage_rate_pct"] == pytest.approx(100.0)
-
-
+    # total_entries = 2+4 = 6, total_closes = 1+2 = 3
+    assert stats["total_long_entries"] == 2
+    assert stats["total_short_entries"] == 4
+    assert stats["total_entries"] == 6
+    assert stats["total_long_closes"] == 1
+    assert stats["total_short_closes"] == 2
+    assert stats["total_closes"] == 3
+    assert stats["long_entry_share_pct"] == pytest.approx(100.0 * 2 / 6)
+    assert stats["short_entry_share_pct"] == pytest.approx(100.0 * 4 / 6)
+    assert stats["direction_bias_pct"] == pytest.approx(100.0 * (2 - 4) / 6)

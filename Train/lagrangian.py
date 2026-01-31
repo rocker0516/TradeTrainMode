@@ -20,24 +20,14 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
 
     Returns:
         dict，包含：
-        - avg_fee
-        - avg_liq
-        - avg_dd
-        - max_dd: 視窗內最大 drawdown（不排除任何回合）
-        - max_dd_excl_liq: 排除「曾發生強平」回合後的視窗內最大 drawdown
-        - max_dd_excl_stop_loss: 排除「曾發生止損」回合後的視窗內最大 drawdown
-        - avg_long_entries
-        - avg_short_entries
-        - avg_long_closes
-        - avg_short_closes
-        - avg_stop_loss
-        - avg_holding_steps
-        - avg_trade_count
-        - avg_active_exits
-        - stop_loss_rate_pct
-        - active_exit_rate_pct
-        - exit_coverage_rate_pct: (active_exit + stop_loss) / total_closes
-        - stop_loss_per_entry_pct: stop_loss / total_entries（越高通常代表止損偏緊或訊號品質偏差）
+        - avg_fee, avg_liq, avg_dd, max_dd, max_dd_excl_liq, max_dd_excl_stop_loss
+        - avg_long_entries, avg_short_entries, avg_long_closes, avg_short_closes
+        - avg_stop_loss, avg_holding_steps, avg_trade_count, avg_active_exits
+        - stop_loss_rate_pct, active_exit_rate_pct, exit_coverage_rate_pct, stop_loss_per_entry_pct
+        - total_long_entries, total_short_entries, total_long_closes, total_short_closes（視窗內總計）
+        - total_entries, total_closes
+        - long_entry_share_pct, short_entry_share_pct: 多/空開倉佔比（%）
+        - direction_bias_pct: (long-short)/total_entries*100（正=偏多，負=偏空，0=中性）
     """
     if not ep_infos:
         return {
@@ -59,6 +49,15 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
             "active_exit_rate_pct": 0.0,
             "exit_coverage_rate_pct": 0.0,
             "stop_loss_per_entry_pct": 0.0,
+            "total_long_entries": 0,
+            "total_short_entries": 0,
+            "total_long_closes": 0,
+            "total_short_closes": 0,
+            "total_entries": 0,
+            "total_closes": 0,
+            "long_entry_share_pct": 0.0,
+            "short_entry_share_pct": 0.0,
+            "direction_bias_pct": 0.0,
         }
 
     total_fees = [float(x.get("total_fees", 0.0)) for x in ep_infos]
@@ -108,6 +107,21 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
     else:
         stop_loss_per_entry_pct = 0.0
 
+    # 視窗內總計與方向偏好（便於解讀訓練時多/空偏好）
+    total_long_entries = int(np.sum(long_entries)) if long_entries else 0
+    total_short_entries = int(np.sum(short_entries)) if short_entries else 0
+    total_long_closes = int(np.sum(long_closes)) if long_closes else 0
+    total_short_closes = int(np.sum(short_closes)) if short_closes else 0
+    total_closes = total_long_closes + total_short_closes
+    if total_entries > 0:
+        long_entry_share_pct = (total_long_entries / total_entries) * 100.0
+        short_entry_share_pct = (total_short_entries / total_entries) * 100.0
+        direction_bias_pct = ((total_long_entries - total_short_entries) / total_entries) * 100.0
+    else:
+        long_entry_share_pct = 0.0
+        short_entry_share_pct = 0.0
+        direction_bias_pct = 0.0
+
     return {
         "avg_fee": float(np.mean(total_fees)) if total_fees else 0.0,
         "avg_liq": float(np.mean(liq_counts)) if liq_counts else 0.0,
@@ -127,6 +141,15 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
         "active_exit_rate_pct": float(active_exit_rate_pct),
         "exit_coverage_rate_pct": float(exit_coverage_rate_pct),
         "stop_loss_per_entry_pct": float(stop_loss_per_entry_pct),
+        "total_long_entries": total_long_entries,
+        "total_short_entries": total_short_entries,
+        "total_long_closes": total_long_closes,
+        "total_short_closes": total_short_closes,
+        "total_entries": total_entries,
+        "total_closes": total_closes,
+        "long_entry_share_pct": float(long_entry_share_pct),
+        "short_entry_share_pct": float(short_entry_share_pct),
+        "direction_bias_pct": float(direction_bias_pct),
     }
 
 
@@ -469,7 +492,8 @@ class LagrangianCallback(BaseCallback):
         log_freq: int = 20,        # 多少 episodes 顯示一次統計 (Request: 20)
         window_size: int = 100,    # 統計視窗大小 (Request: 100)
         verbose: int = 1,
-        reward_scale: float = 1.0  # 新增：用於顯示統計時的說明
+        reward_scale: float = 1.0,  # 用於顯示統計時的說明
+        cost_window_steps: Optional[int] = None,  # cost 平均視窗步數；None 則用 update_freq*n_envs，設大則 λ 更平滑
     ) -> None:
         super().__init__(verbose)
         self.controller = controller
@@ -477,6 +501,7 @@ class LagrangianCallback(BaseCallback):
         self.log_freq = log_freq
         self.window_size = window_size
         self.reward_scale = float(reward_scale)
+        self.cost_window_steps = int(cost_window_steps) if cost_window_steps is not None and int(cost_window_steps) > 0 else None
         # SubprocVecEnv 下，每個 global step 會收到 n_envs 筆 info。
         # 若 cost buffer 的 maxlen 只用 update_freq，會等效變成只看 (update_freq / n_envs) 個 steps，
         # 導致 avg_cost 視窗過短而常常趨近 0，進而讓 λ 被拉回 0（看起來像「成本失效」）。
@@ -485,7 +510,7 @@ class LagrangianCallback(BaseCallback):
         self._logger_override = None
         
         # Lambda Update Buffer
-        # 先用 update_freq 當 base；實際 maxlen 會在 _on_step() 依 n_envs 動態擴充為 update_freq*n_envs
+        # 實際 maxlen 會在 _on_step() 依 n_envs 與 cost_window_steps 動態設定
         self.cost_buffer: Deque[float] = deque(maxlen=int(update_freq))
         self.cost_buffers: Dict[str, Deque[float]] = {}
         if isinstance(self.controller, MultiSharedLagrangianController):
@@ -540,7 +565,9 @@ class LagrangianCallback(BaseCallback):
         except (TypeError, ValueError):
             n_envs = 1
         if self._cost_buffer_n_envs != n_envs:
-            target_maxlen = int(self.update_freq) * int(n_envs)
+            # cost_window_steps > 0 時拉長視窗，使 avg_cost 更平滑、λ 較少震盪（見 docs/lambda_tuning_optimization.md）
+            window_steps = int(self.cost_window_steps) if self.cost_window_steps is not None and self.cost_window_steps > 0 else int(self.update_freq)
+            target_maxlen = window_steps * int(n_envs)
             target_maxlen = max(1, target_maxlen)
             if isinstance(self.controller, MultiSharedLagrangianController):
                 for k in self.controller.channel_configs.keys():
@@ -720,6 +747,11 @@ class LagrangianCallback(BaseCallback):
         stop_loss_per_entry_pct = float(trade_stats.get("stop_loss_per_entry_pct", 0.0))
         avg_holding_steps = float(trade_stats.get("avg_holding_steps", 0.0))
         avg_trade_count = float(trade_stats.get("avg_trade_count", 0.0))
+        total_entries = int(trade_stats.get("total_entries", 0))
+        total_closes = int(trade_stats.get("total_closes", 0))
+        long_entry_share_pct = float(trade_stats.get("long_entry_share_pct", 0.0))
+        short_entry_share_pct = float(trade_stats.get("short_entry_share_pct", 0.0))
+        direction_bias_pct = float(trade_stats.get("direction_bias_pct", 0.0))
 
         end_stats = compute_end_result_stats(list(self.ep_infos))
         terminated_count = int(end_stats["terminated_count"])
@@ -854,24 +886,31 @@ class LagrangianCallback(BaseCallback):
         # Entropy/Loss 等可從 Tensorboard 查看，這裡顯示最關鍵的 Q 值即可
         print("-" * 60)
         
-        # Section 4: Trade Execution Stats
+        # Section 4: Trade Execution Stats（對齊實際交易口徑：方向偏好、風險、成交量、出場方式）
         print(f"[{'TRADE STATS':^20}]")
+        # --- 方向偏好：一目了然多/空偏好（依「開倉次數」口徑）---
+        print("  --- Direction Preference (from entries) ---")
+        print(f"  Long / Short Share         : Long {long_entry_share_pct:5.1f} %  |  Short {short_entry_share_pct:5.1f} %")
+        print(f"  Direction Bias             : {direction_bias_pct:+6.2f} %  (0=neutral, +=long, -=short)")
+        print(f"  Total in Window            : Entries L+S = {total_entries},  Closes L+S = {total_closes}")
+        print("  --- Risk & Fees ---")
         print(f"  Max Drawdown (Window)       : {max_dd*100:8.2f} %  [all episodes]")
         print(f"  Max DD Excl. Liquidation    : {max_dd_excl_liq*100:8.2f} %")
         print(f"  Max DD Excl. Stop Loss      : {max_dd_excl_stop_loss*100:8.2f} %")
         print(f"  Avg Liq Count               : {avg_liq:8.4f}")
         print(f"  Avg Fees                    : {avg_fee:8.2f}")
-        print(f"  Avg Long Entries            : {avg_long_entries:8.4f}")
-        print(f"  Avg Short Entries           : {avg_short_entries:8.4f}")
-        print(f"  Avg Long Close Count        : {avg_long_closes:8.4f}")
-        print(f"  Avg Short Close Count       : {avg_short_closes:8.4f}")
-        print(f"  Avg Active Exit Count       : {avg_active_exits:8.4f} ({active_exit_rate_pct:5.1f}%)")
-        print(f"  Avg Stop Loss Count         : {avg_stop_loss:8.4f} ({stop_loss_rate_pct:5.1f}%)")
-        # 讓你判斷「止損線是否過緊」的輔助指標（越高通常越緊）
-        print(f"  Stop Loss / Entry Rate      : {stop_loss_per_entry_pct:8.2f} %")
-        print(f"  Avg Holding Steps           : {avg_holding_steps:8.2f}")
-        print(f"  Avg Trade Steps (traded)    : {avg_trade_count:8.2f}")
-        print(f"  Exit Coverage (AE+SL)/Close  : {exit_coverage_rate_pct:8.2f} %")
+        print("  --- Volume (per-episode averages) ---")
+        print(f"  Avg Long Entries            : {avg_long_entries:8.2f}  (open-from-flat events)")
+        print(f"  Avg Short Entries           : {avg_short_entries:8.2f}")
+        print(f"  Avg Long Close Count        : {avg_long_closes:8.2f}  (full or partial close events)")
+        print(f"  Avg Short Close Count       : {avg_short_closes:8.2f}")
+        print(f"  Avg Holding Steps           : {avg_holding_steps:8.2f}  (steps with position)")
+        print(f"  Avg Steps With Trade        : {avg_trade_count:8.2f}  (steps where position changed)")
+        print("  --- Exit Mix ---")
+        print(f"  Avg Active Exit Count       : {avg_active_exits:8.2f} ({active_exit_rate_pct:5.1f}%)")
+        print(f"  Avg Stop Loss Count         : {avg_stop_loss:8.2f} ({stop_loss_rate_pct:5.1f}%)")
+        print(f"  Stop Loss / Entry Rate      : {stop_loss_per_entry_pct:8.2f} %  (tighter SL => higher)")
+        print(f"  Exit Coverage (AE+SL)/Close : {exit_coverage_rate_pct:8.2f} %  (of all close events)")
         print("-" * 60)
 
         # Section 5: End Results (Episode termination summary)
@@ -928,6 +967,11 @@ class LagrangianCallback(BaseCallback):
         self.logger.record("custom/avg_long_closes", avg_long_closes)
         self.logger.record("custom/avg_short_closes", avg_short_closes)
         self.logger.record("custom/exit_coverage_rate_pct", exit_coverage_rate_pct)
+        self.logger.record("custom/direction_bias_pct", direction_bias_pct)
+        self.logger.record("custom/long_entry_share_pct", long_entry_share_pct)
+        self.logger.record("custom/short_entry_share_pct", short_entry_share_pct)
+        self.logger.record("custom/total_entries", total_entries)
+        self.logger.record("custom/total_closes", total_closes)
         self.logger.record("custom/total_episodes", int(self.total_episodes))
         self.logger.record("custom/terminated_rate", terminated_rate)
         self.logger.record("custom/truncated_rate", truncated_rate)

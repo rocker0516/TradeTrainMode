@@ -16,7 +16,7 @@ class Config:
     """交易環境的預設參數集合（類似常數容器）。"""
 
     # ---- 基本資金與交易成本 ----
-    INITIAL_BALANCE: float = 1000.0
+    INITIAL_BALANCE: float = 300.0
     TRANSACTION_FEE: float = 0.01  # (%) 手續費百分比（例如 0.04 代表 0.04%）
 
     # ---- 視窗大小 ----
@@ -31,7 +31,7 @@ class Config:
 
     # ---- 交易參數 ----
     LEVERAGE: float = 10.0
-    MIN_BALANCE: float = INITIAL_BALANCE * 0.5 # 最小餘額 0. 5 代表 50%
+    MIN_BALANCE: float = INITIAL_BALANCE * 0.2 # 最小餘額 0. 5 代表 50%
     MIN_EPISODE_STEPS: int = 288 * 31* 3 # 最小步數 288 * 31 = 8928 步
     MAX_EPISODE_STEPS: int = 288 * 31* 3  # 最大步數 288 * 31 = 8928 步
     # 最小調倉幅度（Deadband, 0.0 ~ 1.0）
@@ -106,8 +106,8 @@ class Config:
     # 你選擇「更近一點」的版本（更不干擾主線）：
     # - d_min=0.3：只有當「距離止損 < 0.3 ATR」才開始被罰 
     # - d_scale=0.3：罰得較溫和;越大代表 cost 變化越慢；理論上要到 d_t≈0（幾乎撞到止損）才會接近 cost=1 
-    STOP_BUFFER_D_MIN: float = 0.4
-    STOP_BUFFER_D_SCALE: float = 0.6
+    STOP_BUFFER_D_MIN: float = 0.2
+    STOP_BUFFER_D_SCALE: float = 0.4
     
     # 這些閾值保留供 Observation 特徵使用 (near_liq, near_stop)，但不參與 Cost 計算
     LIQUIDATION_WARN_PCT: float = 0.3 # 清算警告比例  0.05 代表 5%

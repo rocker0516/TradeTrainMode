@@ -114,6 +114,11 @@ def main() -> None:
     parser.add_argument("--device", type=str, default=TrainConfig.DEVICE)
     parser.add_argument("--log_every_episodes", type=int, default=TrainConfig.LOG_EVERY_EPISODES, help="每 N 回合輸出交易統計")
     parser.add_argument("--update_lambda_every_steps", type=int, default=TrainConfig.UPDATE_LAMBDA_EVERY_STEPS, help="每 N steps 更新一次 lambda")
+    parser.add_argument("--kp", type=float, default=getattr(TrainConfig, "LAGRANGIAN_KP", 0.1), help="Lagrangian P-gain（全通道，越大 λ 反應越快）")
+    parser.add_argument("--lambda_init", type=float, default=getattr(TrainConfig, "LAGRANGIAN_LAMBDA_INIT", 0.0), help="λ 初始值（全通道）")
+    parser.add_argument("--lambda_max", type=float, default=getattr(TrainConfig, "LAGRANGIAN_LAMBDA_MAX", 5.0), help="λ 上限（全通道）")
+    _default_cost_window = getattr(TrainConfig, "COST_WINDOW_STEPS", None)
+    parser.add_argument("--cost_window_steps", type=int, default=(int(_default_cost_window) if _default_cost_window is not None else 0), help="cost 平均視窗步數（0=用 update_freq*n_envs，>0 則拉長視窗使 λ 更平滑）")
     # 進度條：預設開啟（避免你忘記加參數而覺得「沒有進度」）
     parser.add_argument("--no_progress_bar", action="store_true", help="關閉 SB3 進度條（預設會顯示）")
     parser.add_argument("--verbose", type=int, default=TrainConfig.SB3_VERBOSE_DEFAULT, help="SB3 verbose 等級（預設：開進度條時=0，否則=1）")
@@ -125,13 +130,16 @@ def main() -> None:
     sb3_verbose = int(args.verbose) if args.verbose is not None else (0 if show_progress_bar else 1)
 
     # 1. 初始化 Multi Lagrangian Controller（分四條成本線：risk / fric / sl_buf / sl_event）
-    # 注意：仍保留 --cost_limit 參數供舊模式/相容性，但預設訓練會走 multi-lambda。
+    # kp / lambda_init / lambda_max 可由 CLI 覆寫，便於調教 λ（見 docs/lambda_tuning_optimization.md）
+    kp = float(args.kp)
+    lam_init = float(args.lambda_init)
+    lam_max = float(args.lambda_max)
     lag_controller: Any = MultiSharedLagrangianController(
         {
-            "risk": LagrangianChannelConfig(cost_limit=float(args.risk_cost_limit), kp=0.1, lambda_init=0.0, lambda_max=5.0),
-            "fric": LagrangianChannelConfig(cost_limit=float(args.fric_cost_limit), kp=0.1, lambda_init=0.0, lambda_max=5.0),
-            "sl_buf": LagrangianChannelConfig(cost_limit=float(args.sl_buf_cost_limit), kp=0.1, lambda_init=0.0, lambda_max=5.0),
-            "sl_event": LagrangianChannelConfig(cost_limit=float(args.sl_event_cost_limit), kp=0.1, lambda_init=0.0, lambda_max=5.0),
+            "risk": LagrangianChannelConfig(cost_limit=float(args.risk_cost_limit), kp=kp, lambda_init=lam_init, lambda_max=lam_max),
+            "fric": LagrangianChannelConfig(cost_limit=float(args.fric_cost_limit), kp=kp, lambda_init=lam_init, lambda_max=lam_max),
+            "sl_buf": LagrangianChannelConfig(cost_limit=float(args.sl_buf_cost_limit), kp=kp, lambda_init=lam_init, lambda_max=lam_max),
+            "sl_event": LagrangianChannelConfig(cost_limit=float(args.sl_event_cost_limit), kp=kp, lambda_init=lam_init, lambda_max=lam_max),
         }
     )
     
@@ -203,13 +211,15 @@ def main() -> None:
     )
 
     # 4. 設定 Callbacks
-    # LagrangianCallback: 更新 λ 與顯示交易統計
+    # LagrangianCallback: 更新 λ 與顯示交易統計；cost_window_steps>0 時拉長 cost 平均視窗使 λ 更平滑
+    cost_window = int(args.cost_window_steps) if getattr(args, "cost_window_steps", 0) and int(getattr(args, "cost_window_steps", 0)) > 0 else None
     lag_callback = LagrangianCallback(
         controller=lag_controller,
         update_freq=int(args.update_lambda_every_steps),  # 每 N 步更新一次 λ
         log_freq=int(args.log_every_episodes),            # 每 N episodes 顯示一次交易狀態
         window_size=int(TrainConfig.STATS_WINDOW_EPISODES),# 統計視窗大小
-        reward_scale=float(TrainConfig.REWARD_SCALE)                                  # 與 Env wrapper 一致
+        reward_scale=float(TrainConfig.REWARD_SCALE),     # 與 Env wrapper 一致
+        cost_window_steps=cost_window,                     # None 則用 update_freq*n_envs；設大則 λ 更新更平滑
     )
     
     # CheckpointCallback: 定期存檔
@@ -238,11 +248,11 @@ def main() -> None:
                     # eval 的 obs 必須填滿（起點 >= max(WINDOW_SIZE_5M, WINDOW_SIZE_1D*288)）
                     "ensure_filled_obs": True,
                     # ---- Render (EVAL) ----
-                    "render_enabled": True,
-                    "render_save": True,
-                    "render_show": True,
+                    "render_enabled": False,
+                    "render_save": False,
+                    "render_show": False,
                     # VecEnv 會在 done 時自動 reset；因此必須在「終止那一步」就 render，並把路徑塞回 info。
-                    "render_on_done": True,
+                    "render_on_done": False,
                     "render_dir": os.path.join("logs", "renders", f"eval_{args.symbol}"),
                 }
             )

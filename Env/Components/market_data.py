@@ -32,6 +32,14 @@ class MarketData:
         # 1. 時間欄位處理與確保 datetime 格式
         self._ensure_datetime(self.df_5m)
         self._ensure_datetime(self.df_1d)
+
+        # 1.1 1d timestamp 正規化 + 補齊 target_symbol 的 1d OHLC（提升 1d 特徵覆蓋率）
+        # 背景：
+        # - macro/index 資料常出現同一日不同時間點（00:00:00 vs 00:20:01），若不 normalize 會 outer join 成多列。
+        # - target_symbol 的 1d 價格資料可能起始較晚（例如 coinglass 1d 從 2024 才有），導致 price-based 1d 特徵長期為 0。
+        self._normalize_1d_timestamps()
+        self._augment_target_1d_ohlc_from_5m()
+        self._trim_1d_to_5m_range(buffer_days=400)
         
         # 2. 建立 5m 到 1d 的索引映射 (Alignment)
         # 假設: 我們在 5m 時間點 t，只能看到 t 之前（或當下已完成）的 1d 數據
@@ -137,6 +145,121 @@ class MarketData:
         self.price_seq_features_dim = int(self.features_5m_arr.shape[1])
         self.features_1d_dim = int(self.features_1d_arr.shape[1])
         self.market_state_cols = self.cols_5m  # 相容既有介面：提供 5m 特徵欄位名稱
+
+    def _normalize_1d_timestamps(self) -> None:
+        """將 df_1d.timestamp 正規化到日級（00:00:00），避免同一天被拆成多列。"""
+        if "timestamp" not in self.df_1d.columns:
+            return
+        try:
+            ts = pd.to_datetime(self.df_1d["timestamp"], errors="coerce", utc=True)
+            try:
+                ts = ts.dt.tz_convert(None)
+            except (AttributeError, TypeError):
+                ts = pd.to_datetime(ts, errors="coerce")
+            self.df_1d["timestamp"] = ts.dt.normalize()
+        except Exception:
+            # 1d timestamp normalize 失敗不應阻斷訓練（保守退回原樣）
+            return
+
+        # 排序與去重（避免 normalize 後出現同日多筆）
+        try:
+            self.df_1d = self.df_1d.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
+        except Exception:
+            pass
+
+    def _augment_target_1d_ohlc_from_5m(self) -> None:
+        """用 df_5m 推導 target_symbol 的 1d OHLC，填補 df_1d 缺口（不覆蓋既有值）。"""
+        if "timestamp" not in self.df_5m.columns or "timestamp" not in self.df_1d.columns:
+            return
+
+        # 取 target_symbol 的 5m OHLC 欄位（支援 prefixed / 非 prefixed）
+        sym = str(self.target_symbol)
+        col_open = f"{sym}_open"
+        col_high = f"{sym}_high"
+        col_low = f"{sym}_low"
+        col_close = f"{sym}_close"
+
+        if col_close in self.df_5m.columns:
+            o = col_open if col_open in self.df_5m.columns else col_close
+            h = col_high if col_high in self.df_5m.columns else col_close
+            l = col_low if col_low in self.df_5m.columns else col_close
+            c = col_close
+            df_src = self.df_5m[["timestamp", o, h, l, c]].copy()
+            df_src = df_src.rename(columns={o: "open", h: "high", l: "low", c: "close"})
+        elif all(k in self.df_5m.columns for k in ("open", "high", "low", "close")):
+            df_src = self.df_5m[["timestamp", "open", "high", "low", "close"]].copy()
+        else:
+            return
+
+        try:
+            ts = pd.to_datetime(df_src["timestamp"], errors="coerce", utc=True)
+            ts = ts.dt.tz_convert(None)
+            df_src["timestamp"] = ts
+        except Exception:
+            df_src["timestamp"] = pd.to_datetime(df_src["timestamp"], errors="coerce")
+
+        df_src = df_src.dropna(subset=["timestamp"])
+        if df_src.empty:
+            return
+
+        # 以「日」聚合：open=first, high=max, low=min, close=last
+        df_src["day"] = pd.to_datetime(df_src["timestamp"]).dt.normalize()
+        g = df_src.groupby("day", sort=True)
+        daily = pd.DataFrame(
+            {
+                "timestamp": g["day"].first(),
+                f"{sym}_open": g["open"].first(),
+                f"{sym}_high": g["high"].max(),
+                f"{sym}_low": g["low"].min(),
+                f"{sym}_close": g["close"].last(),
+            }
+        ).reset_index(drop=True)
+
+        if daily.empty:
+            return
+
+        # merge 到 df_1d（不覆蓋既有值，只填 NaN）
+        df = self.df_1d.copy()
+        if "timestamp" in df.columns:
+            try:
+                df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce").dt.normalize()
+            except Exception:
+                pass
+
+        merged = df.merge(daily, on="timestamp", how="outer", suffixes=("", "_from5m"))
+        for base in (f"{sym}_open", f"{sym}_high", f"{sym}_low", f"{sym}_close"):
+            from5m = f"{base}_from5m"
+            if from5m not in merged.columns:
+                continue
+            if base not in merged.columns:
+                merged[base] = np.nan
+            merged[base] = merged[base].combine_first(merged[from5m])
+            merged = merged.drop(columns=[from5m])
+
+        merged = merged.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
+        self.df_1d = merged
+
+    def _trim_1d_to_5m_range(self, *, buffer_days: int = 400) -> None:
+        """將 df_1d 裁切到 df_5m 的時間範圍附近，避免過長歷史造成大量缺值列與無意義 rolling。"""
+        if "timestamp" not in self.df_1d.columns or "timestamp" not in self.df_5m.columns:
+            return
+        try:
+            tmin = pd.to_datetime(self.df_5m["timestamp"]).min()
+            tmax = pd.to_datetime(self.df_5m["timestamp"]).max()
+            if pd.isna(tmin) or pd.isna(tmax):
+                return
+            start = pd.Timestamp(tmin).normalize() - pd.Timedelta(days=int(buffer_days))
+            end = pd.Timestamp(tmax).normalize()
+            df = self.df_1d
+            df_ts = pd.to_datetime(df["timestamp"], errors="coerce")
+            mask = (df_ts >= start) & (df_ts <= end)
+            out = df.loc[mask].copy()
+            if out.empty:
+                return
+            out = out.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
+            self.df_1d = out
+        except Exception:
+            return
 
     def _ensure_datetime(self, df):
         # 確保存在 datetime 型態的「時間欄位」：若有 timestamp 或 time，統一轉成 timestamp 欄、且格式為 datetime

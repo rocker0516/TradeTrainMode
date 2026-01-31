@@ -18,6 +18,28 @@ def load_data():
     
     data_dir = 'Data'
 
+    def _normalize_1d_timestamp(ts: pd.Series) -> pd.Series:
+        """
+        將 1d 資料的 timestamp 正規化到「日」級（00:00:00）。
+
+        背景：
+        - 不同資料來源可能在同一天用不同時間點（例如 00:00:00 vs 00:20:01）。
+        - 若直接用精確 timestamp outer join，會造成同一日被拆成多列，
+          進而導致大量 NaN -> 特徵 zscore fillna(0) -> 觀測中「幾乎全 0」。
+
+        做法：
+        - parse 為 datetime（統一 UTC 再轉回 naive），最後 normalize 到午夜。
+        """
+        # 先轉成 UTC aware，避免混入時區導致無法對齊
+        out = pd.to_datetime(ts, errors="coerce", utc=True)
+        # 轉回 naive datetime64[ns]，再 normalize 到日級
+        try:
+            out = out.dt.tz_convert(None)
+        except (AttributeError, TypeError):
+            # 若已是 naive 或不是 dt accessor，保守處理
+            out = pd.to_datetime(out, errors="coerce")
+        return out.dt.normalize()
+
     def _infer_prefix(basename: str) -> str:
         """
         由檔名推導欄位前綴。
@@ -91,9 +113,9 @@ def load_data():
 
             # 處理不同的時間欄位名稱
             if 'timestamp' in df.columns:
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df['timestamp'] = _normalize_1d_timestamp(df['timestamp'])
             elif 'time' in df.columns:
-                df['timestamp'] = pd.to_datetime(df['time'])
+                df['timestamp'] = _normalize_1d_timestamp(df['time'])
             else:
                 raise ValueError(f"CSV missing timestamp/time: {os.path.basename(f)}")
 

@@ -7,7 +7,7 @@ from LiveTradingRunner.runner_core import _build_account_and_context_obs_named, 
 
 def test_print_account_and_context_obs_accepts_expected_shapes(capsys):  # type: ignore[no-untyped-def]
     obs = {
-        "account_state": np.zeros((27,), dtype=np.float32),
+        "account_state": np.zeros((29,), dtype=np.float32),
         "time_state": np.zeros((7,), dtype=np.float32),
         "rhythm_state": np.zeros((2,), dtype=np.float32),
         "cost_state": np.zeros((27,), dtype=np.float32),
@@ -23,7 +23,7 @@ def test_print_account_and_context_obs_accepts_expected_shapes(capsys):  # type:
 
 def test_build_account_and_context_obs_named_has_expected_keys() -> None:
     obs = {
-        "account_state": np.zeros((27,), dtype=np.float32),
+        "account_state": np.zeros((29,), dtype=np.float32),
         "time_state": np.zeros((7,), dtype=np.float32),
         "rhythm_state": np.zeros((2,), dtype=np.float32),
         "cost_state": np.zeros((27,), dtype=np.float32),

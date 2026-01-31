@@ -93,44 +93,37 @@ class FeatureTransformer:
     # 注意：
     # - 這裡的欄位名是「順序規格」，實際輸出會依 feature_symbols 展開跨市場欄位。
     # - 測試與訓練端不應再假設固定為 14 通道；請以 MarketData.price_seq_features_dim 為準。
+    # 5m 通道：已依 CNN_channel_audit 刪除冗餘；順序改為「趨勢類前置」（obs 優化 doc 項目 3）
     BASE_5M_COLS: Final[Tuple[str, ...]] = (
-        # ---- 原本的 14 通道（穩定、可解釋）----
+        # ---- 趨勢類優先（8）----
         "ret_1_z",
-        "ret_15m_z",
         "ret_1h_z",
+        "ret_4h_z",
+        "close_over_ema_12_z",
+        "ema_12_48_spread_z",
+        "macd_atr",
+        "trend_strength_atr",
+        "dir_persist_20",
+        # ---- 基礎報酬/波動/量能（9）----
+        "ret_15m_z",
         "range_z",
-        "body_z",
         "volume_log_z",
-        "quote_volume_log_z",
         "trades_z",
         "vol_imbalance_z",
         "amihud_z",
         "volume_ratio_z",
-        "long_short_ratio_z",
         "atr_ratio_z",
         "rv_ratio_z",
-        # ---- 主市場結構化趨勢/震盪特徵（約 20 條）----
-        "log_close_z",
-        "close_over_ema_12_z",
-        "close_over_ema_48_z",
-        "ema_12_48_spread_z",
-        "ema_12_slope_z",
-        "ema_48_slope_z",
+        # ---- 結構化震盪/位置（8）----
         "price_pos_96",
         "price_pos_288",
         "bb_width_48_z",
         "bb_pos_48",
         "rsi_14",
-        "macd_atr",
-        "macd_signal_atr",
-        "trend_strength_atr",
-        "dir_persist_20",
-        "abs_ret_1_z",
-        "ret_4h_z",
         "hl_range_20_z",
         "chop_48",
         "trend_flip_rate_48",
-        # ---- 跨市場廣度摘要（固定 6 條；依 feature_symbols 中「非 target」集合計算）----
+        # ---- 跨市場廣度摘要（6 條）----
         "alts_ret_15m_mean_z",
         "alts_ret_15m_std_z",
         "alts_rel_ret_15m_abs_mean_z",
@@ -139,7 +132,7 @@ class FeatureTransformer:
         "alts_trend_spread_std_z",
     )
 
-    # ---- 1d：固定通道順序（symbol-specific price+coinglass + global macro）----
+    # 1d 通道：已刪除 close_over_ema_20_z（與 ret_1d_z 實測 ρ=1）
     PRICE_SEQ_1D_SYMBOL_COLS: Final[Tuple[str, ...]] = (
         "oi_close_z",
         "funding_close_z",
@@ -148,10 +141,8 @@ class FeatureTransformer:
         "liq_long_log_z",
         "liq_short_log_z",
         "ob_imbalance_z",
-        # ---- 1d price regime features ----
         "ret_1d_z",
         "range_1d_z",
-        "close_over_ema_20_z",
         "ema_20_60_spread_z",
     )
     PRICE_SEQ_1D_MACRO_COLS: Final[Tuple[str, ...]] = (
@@ -266,9 +257,8 @@ class FeatureTransformer:
         trades = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="trades")
         quote_v = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="quote_volume")
         volume_ratio = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="volume_ratio")
-        long_short_ratio = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="long_short_ratio")
 
-        # 基礎序列：ret / range / body
+        # 基礎序列：ret / range（body_z 已刪除，與 ret_1_z 冗餘）
         log_c = _safe_log(c)
         ret_1 = log_c.diff().fillna(0.0)
         ret_15m = ret_1.rolling(window=3, min_periods=1).sum()
@@ -276,7 +266,6 @@ class FeatureTransformer:
 
         prev_c = c.shift(1).bfill()
         range_raw = (h - l) / np.clip(prev_c, 1e-12, None)
-        body_raw = (c - o) / np.clip(prev_c, 1e-12, None)
 
         # 成交量：先做相對量，再 z
         v_ma20 = v.rolling(window=20, min_periods=1).mean().replace(0.0, np.nan).fillna(1.0)
@@ -289,42 +278,32 @@ class FeatureTransformer:
         # rolling z（只用過去）
         minp = max(20, z_window // 10)
 
-        # ---- 主市場：基礎 14 通道（維持原定義）----
+        # ---- 主市場：基礎通道（已刪 body_z, quote_volume_log_z, long_short_ratio_z）----
         feats = pd.DataFrame(
             {
                 "ret_1_z": _clip(_rolling_zscore(ret_1, z_window, minp)),
                 "ret_15m_z": _clip(_rolling_zscore(ret_15m, z_window, minp)),
                 "ret_1h_z": _clip(_rolling_zscore(ret_1h, z_window, minp)),
                 "range_z": _clip(_rolling_zscore(range_raw, z_window, minp)),
-                "body_z": _clip(_rolling_zscore(body_raw, z_window, minp)),
                 "volume_log_z": _clip(_rolling_zscore(volume_log, z_window, minp)),
-                "quote_volume_log_z": _clip(_rolling_zscore(np.log1p(np.clip(quote_v, 0.0, None)), z_window, minp)),
                 "trades_z": _clip(_rolling_zscore(trades, z_window, minp)),
                 "vol_imbalance_z": _clip(_rolling_zscore(vol_imb, z_window, minp)),
                 "amihud_z": _clip(_rolling_zscore(amihud, z_window, minp)),
                 "volume_ratio_z": _clip(_rolling_zscore(volume_ratio, z_window, minp)),
-                "long_short_ratio_z": _clip(_rolling_zscore(long_short_ratio, z_window, minp)),
                 "atr_ratio_z": _clip(_rolling_zscore(pd.Series(atr_ratio_arr, index=df_5m.index), z_window, minp)),
                 "rv_ratio_z": _clip(_rolling_zscore(pd.Series(rv_ratio_arr, index=df_5m.index), z_window, minp)),
             },
             index=df_5m.index,
         )
 
-        # ---- 主市場：結構化趨勢/震盪特徵（約 20 條）----
-        log_close = _safe_log(c)
+        # ---- 主市場：結構化趨勢/震盪（已刪 log_close_z, close_over_ema_48, ema_12_slope, ema_48_slope）----
         ema12 = self._ema(c, 12)
         ema26 = self._ema(c, 26)
         ema48 = self._ema(c, 48)
-        ema96 = self._ema(c, 96)
 
-        # 價格相對均線（log ratio 更穩）
+        # 價格相對均線（保留 close_over_ema_12 + ema_12_48_spread）
         close_over_ema_12 = np.log(np.clip(c / np.clip(ema12, 1e-12, None), 1e-12, None))
-        close_over_ema_48 = np.log(np.clip(c / np.clip(ema48, 1e-12, None), 1e-12, None))
         ema_12_48_spread = (ema12 - ema48) / np.clip(ema48, 1e-12, None)
-
-        # 斜率（用 log-EMA diff，尺度較一致）
-        ema_12_slope = _safe_log(ema12).diff().fillna(0.0)
-        ema_48_slope = _safe_log(ema48).diff().fillna(0.0)
 
         # 價格位置：在 rolling high/low 區間的相對位置（轉到 [-1,1]）
         hi_96 = h.rolling(96, min_periods=10).max()
@@ -353,22 +332,18 @@ class FeatureTransformer:
         rsi = (100.0 - (100.0 / (1.0 + rs))).fillna(50.0)
         rsi_14 = (((rsi - 50.0) / 50.0).clip(-1.0, 1.0)).astype(float)
 
-        # MACD / ATR（避免價位尺度）
+        # MACD / ATR（保留 macd_atr + trend_strength_atr；已刪 macd_signal_atr）
         macd = (ema12 - ema26)
-        macd_signal = self._ema(macd, 9)
-        # 以 target 的 ATR estimate 做分母：atr_ratio_arr * close
         atr_est = pd.Series(atr_ratio_arr, index=df_5m.index).astype(float) * np.clip(c, 1e-12, None)
         atr_est = atr_est.replace(0.0, np.nan).fillna(1e-8)
         macd_atr = (macd / atr_est).clip(-10.0, 10.0)
-        macd_signal_atr = (macd_signal / atr_est).clip(-10.0, 10.0)
         trend_strength_atr = (macd.abs() / atr_est).clip(0.0, 10.0)
 
         # 方向一致性：近 20 根正報酬比例 -> [-1,1]
         pos_frac_20 = (ret_1 > 0.0).astype(float).rolling(20, min_periods=10).mean().fillna(0.5)
         dir_persist_20 = ((pos_frac_20 * 2.0) - 1.0).clip(-1.0, 1.0)
 
-        # 其他穩健補強：abs_ret、4h 報酬、HL range、chop、trend flip rate
-        abs_ret_1 = ret_1.abs()
+        # 其他穩健補強（已刪 abs_ret_1_z）
         ret_4h = ret_1.rolling(window=48, min_periods=1).sum()
         hl_range_20 = ((h.rolling(20, min_periods=10).max() - l.rolling(20, min_periods=10).min()) / np.clip(c.shift(1).bfill(), 1e-12, None))
 
@@ -389,22 +364,16 @@ class FeatureTransformer:
 
         feats_extra = pd.DataFrame(
             {
-                "log_close_z": _clip(_rolling_zscore(log_close, z_window, minp)),
                 "close_over_ema_12_z": _clip(_rolling_zscore(pd.Series(close_over_ema_12, index=df_5m.index), z_window, minp)),
-                "close_over_ema_48_z": _clip(_rolling_zscore(pd.Series(close_over_ema_48, index=df_5m.index), z_window, minp)),
                 "ema_12_48_spread_z": _clip(_rolling_zscore(pd.Series(ema_12_48_spread, index=df_5m.index), z_window, minp)),
-                "ema_12_slope_z": _clip(_rolling_zscore(ema_12_slope, z_window, minp)),
-                "ema_48_slope_z": _clip(_rolling_zscore(ema_48_slope, z_window, minp)),
                 "price_pos_96": pos_96.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0),
                 "price_pos_288": pos_288.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0),
                 "bb_width_48_z": _clip(_rolling_zscore(bb_width_48, z_window, minp)),
                 "bb_pos_48": bb_pos_48.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 2.0),
                 "rsi_14": rsi_14.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0),
                 "macd_atr": macd_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0),
-                "macd_signal_atr": macd_signal_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0),
                 "trend_strength_atr": trend_strength_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0),
                 "dir_persist_20": dir_persist_20.replace([np.inf, -np.inf], np.nan).fillna(0.0),
-                "abs_ret_1_z": _clip(_rolling_zscore(abs_ret_1, z_window, minp)),
                 "ret_4h_z": _clip(_rolling_zscore(ret_4h, z_window, minp)),
                 "hl_range_20_z": _clip(_rolling_zscore(hl_range_20, z_window, minp)),
                 "chop_48": chop_48.replace([np.inf, -np.inf], np.nan).fillna(0.0),
@@ -413,6 +382,9 @@ class FeatureTransformer:
             index=df_5m.index,
         )
         feats = pd.concat([feats, feats_extra], axis=1)
+        # 趨勢類前置：依 BASE_5M_COLS 重排主市場 25 欄（alts 尚未加入）
+        main_cols = [c for c in self.BASE_5M_COLS if c in feats.columns]
+        feats = feats[main_cols]
 
         # ---- 跨市場摘要（非 target symbols）----
         alt_symbols = [s for s in symbols if s != str(target_symbol)]
@@ -531,7 +503,6 @@ class FeatureTransformer:
         range_1d = (high_1d - low_1d) / np.maximum(close_1d, 1e-12)
         ema_20 = self._ema(close_1d, span=20)
         ema_60 = self._ema(close_1d, span=60)
-        close_over_ema_20 = (close_1d / np.maximum(ema_20, 1e-12)) - 1.0
         ema_20_60_spread = (ema_20 - ema_60) / np.maximum(ema_60, 1e-12)
 
         # 2) coinglass 1d
@@ -565,7 +536,6 @@ class FeatureTransformer:
                 "ob_imbalance_z": _clip(_rolling_zscore(ob_imbalance, z_window_1d, minp)),
                 "ret_1d_z": _clip(_rolling_zscore(ret_1d, z_window_1d, minp)),
                 "range_1d_z": _clip(_rolling_zscore(range_1d, z_window_1d, minp)),
-                "close_over_ema_20_z": _clip(_rolling_zscore(close_over_ema_20, z_window_1d, minp)),
                 "ema_20_60_spread_z": _clip(_rolling_zscore(ema_20_60_spread, z_window_1d, minp)),
                 "fear_greed_z": _clip(_rolling_zscore(fear_greed, z_window_1d, minp)),
                 "altcoin_season_z": _clip(_rolling_zscore(altcoin_season, z_window_1d, minp)),

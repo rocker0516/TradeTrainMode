@@ -38,12 +38,20 @@ class TrainConfig:
     SL_BUF_COST_LIMIT: float = 0.01 # 0.1：代表允許每步平均止損緩衝成本佔權益 10%
     # Stop-Loss Event Cost（事件型）：當步觸發止損時才會出現的成本（獨立成本線，不歸類到 risk）。
     SL_EVENT_COST_LIMIT: float = 0.002 # 0.01：代表允許每步平均止損事件成本佔權益 1%
-    
+
+    # ---- Lagrangian λ 調教（P-Control）----
+    # 詳見 docs/lambda_tuning_optimization.md
+    LAGRANGIAN_KP: float = 0.1  # P-gain，越大 λ 反應越快、易震盪
+    LAGRANGIAN_LAMBDA_INIT: float = 0.0001  # 初始 λ，可略增 risk 以提早壓制風險
+    LAGRANGIAN_LAMBDA_MAX: float = 5.0  # λ 上限，risk 可設大（如 10）讓懲罰夠重
+    # cost 平均視窗步數（None = 使用 update_freq * n_envs，設大則 λ 更新更平滑）
+    COST_WINDOW_STEPS: int | None = None
+
     UPDATE_LAMBDA_EVERY_STEPS: int = 1
     # 交易統計輸出：
     # - LOG_EVERY_EPISODES: 每 N 個 episode 刷新一次統計（建議：20）
     # - STATS_WINDOW_EPISODES: 統計最多取最近 M 個 episode（滾動視窗，建議：100）
-    LOG_EVERY_EPISODES: int = 50
+    LOG_EVERY_EPISODES: int = 100
     STATS_WINDOW_EPISODES: int = 100
     REWARD_SCALE: float = 1 # 獎勵尺度 1.0 代表獎勵不放大
 
@@ -102,7 +110,7 @@ class TrainConfig:
     # - 依規則挑選並保存 best model
     EVAL_ENABLED: bool = True
     # 以「訓練總 timesteps」為基準（使用 SB3 的 model.num_timesteps），確保在 VecEnv 下語意正確
-    EVAL_EVERY_TIMESTEPS: int = 1_000_000
+    EVAL_EVERY_TIMESTEPS: int = 10_000_000
     EVAL_N_EVAL_EPISODES: int = 25
     EVAL_DETERMINISTIC: bool = True
     # Eval 環境設定：避免隨機起點使指標不穩定（可重現）
