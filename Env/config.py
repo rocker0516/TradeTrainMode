@@ -16,7 +16,7 @@ class Config:
     """交易環境的預設參數集合（類似常數容器）。"""
 
     # ---- 基本資金與交易成本 ----
-    INITIAL_BALANCE: float = 300.0
+    INITIAL_BALANCE: float = 1000.0
     TRANSACTION_FEE: float = 0.01  # (%) 手續費百分比（例如 0.04 代表 0.04%）
 
     # ---- 視窗大小 ----

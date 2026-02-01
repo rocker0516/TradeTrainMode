@@ -33,8 +33,9 @@ class TrainConfig:
     # 新版：雙路徑成本限制（risk / friction）- 目前 Controller 尚未完全支援分開的 dual-lambda，
     # 但保留參數供未來擴充。邏輯同上，Risk 應趨近於 0，Fric 容許少量。
     RISK_COST_LIMIT: float = 0.001 # 0.000005 代表 0.0005% 死亡風險(容許極小風險)
-    # Freq 通道：c_freq = clip((turnover_t - tau)/scale, 0, 1)，與手續費脫鉤；每步平均上限建議 0.05~0.20
-    FRIC_COST_LIMIT: float = 0.10  # 每步平均 c_freq 上限，越大越容許調倉
+    # Freq 通道：cost_fric 已乘 Env/Costs/cost.py 的 FREQ_COST_SCALE (0.3)，尺度 [0, 0.3]
+    # 此 limit 應為「原意每步上限 × FREQ_COST_SCALE」，例如 0.1 × 0.3 = 0.03
+    FRIC_COST_LIMIT: float = 0.00005  # 每步平均 cost_fric 上限（對應縮放前 0.1）
     # Stop-Buffer Cost（0~1）：建議先設很小的平均步成本上限，因為「接近止損」應該是短暫狀態
     SL_BUF_COST_LIMIT: float = 0.01 # 0.1：代表允許每步平均止損緩衝成本佔權益 10%
     # Stop-Loss Event Cost（事件型）：當步觸發止損時才會出現的成本（獨立成本線，不歸類到 risk）。

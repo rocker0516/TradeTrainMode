@@ -5,14 +5,53 @@ from typing import Any, Dict
 
 import numpy as np
 
-# Freq 通道（交易頻率/調倉幅度）常數
-FREQ_BUFFER_SIZE = 500
-FREQ_BUFFER_MIN_SAMPLES = 30
-FREQ_TAU_QUANTILE = 0.5   # q50(turnover)；可改為 0.6
+# =============================================================================
+# Freq 通道常數（控制 cost_fric：約束「調倉幅度」的用法，與手續費脫鉤）
+# turnover_t = |pos_t - pos_prev|（每步持倉變動 0~2）；tau/scale 由近期 turnover 分布估計
+# =============================================================================
+
+# 緩衝區大小：最近多少步的 turnover 用來估計 tau / scale（tau = 分位數(turnover)）
+# 調大：tau/scale 對近期行情反應較慢、較平滑；調小：反應快但易受少數步影響
+FREQ_BUFFER_SIZE = 288 * 3
+
+# 最少樣本數：buffer 內至少幾筆 turnover 才用「分位數估計」tau/scale；不足則用 _DEFAULT
+# 調大：episode 前段更久用固定 tau/scale；調小：更快切換到依資料估計
+FREQ_BUFFER_MIN_SAMPLES = 288
+
+# tau 的分位數：tau = 近期 turnover 的第 FREQ_TAU_QUANTILE 分位（例 0.5 = 中位數）
+# 作用：門檻——小於/大於 tau 決定是否被罰（依 FREQ_PENALIZE_SMALL_TRADES）
+# 調大（例 0.6）：tau 變大 → 懲罰小改倉時「小」的範圍變寬；懲罰大改倉時「大」的門檻變高，整體 cost 易降
+# 調小（例 0.4）：tau 變小 → 更多步被算進懲罰區，整體 cost 易升
+FREQ_TAU_QUANTILE = 0.6
+
+# scale 用分位數：scale = q90(turnover) - tau（僅在 FREQ_PENALIZE_SMALL_TRADES=False 時用）
+# 作用：turnover > tau 時 cost = (turnover_t - tau)/scale，scale 愈大 cost 上升愈慢
+# 調大（例 0.95）：scale 變大 → 同一 turnover 的 cost 變小，大改倉被罰得較輕
+# 調小：scale 變小 → 大改倉更容易頂到 cost 上限
 FREQ_SCALE_QUANTILE = 0.9
+
+# buffer 不足時 tau 的固定值（在 FREQ_BUFFER_MIN_SAMPLES 未達時使用）
+# 調大：前段「小改倉罰」門檻變高、「大改倉罰」門檻也變高，前段 cost 整體偏小
 FREQ_TAU_DEFAULT = 0.05
+
+# buffer 不足時 scale 的固定值（僅在 FREQ_PENALIZE_SMALL_TRADES=False 時用）
+# 調大：前段大改倉的 cost 上升較慢；調小：前段大改倉更容易被重罰
 FREQ_SCALE_DEFAULT = 0.2
+
+# 數值保護：scale 分母下限，避免除零
 FREQ_EPS = 1e-12
+
+# 輸出縮放：cost_fric = (0~1 的 c_freq_raw) × FREQ_COST_SCALE，故 cost_fric ∈ [0, FREQ_COST_SCALE]
+# 調大：整條 fric 尺度變大，若 FRIC_COST_LIMIT 不變則易 violation、λ 易升
+# 調小：整條 fric 尺度變小，須同步把 Train/train_config 的 FRIC_COST_LIMIT 改為「原意每步上限 × FREQ_COST_SCALE」
+FREQ_COST_SCALE: float = 0.001
+
+# 懲罰方向（二選一）：
+# True   → 懲罰「小於 tau」的 turnover：0 < turnover < tau 才罰，不改倉(0)不罰、≥ tau 不罰
+#          效果：抑制高頻極小步，鼓勵「要嘛不改、要嘛一次改夠大」
+# False  → 懲罰「大於 tau」的 turnover：turnover > tau 才罰，cost 隨 (turnover - tau)/scale 上升
+#          效果：抑制單步大改倉，鼓勵少改倉或小步改倉
+FREQ_PENALIZE_SMALL_TRADES: bool = True
 
 
 @dataclass(frozen=True)
@@ -35,9 +74,10 @@ class CostCalculator:
 
     公式：
     1. Death Cost: 1.0 (若發生爆倉/破產，視為損失 100% 權益)
-    2. Fric/Freq Cost: 控制「交易頻率/調倉幅度」，與手續費脫鉤，避免重複懲罰。
-       turnover_t = |pos_t - pos_{t-1}|，c_freq = clip((turnover_t - tau)/scale, 0, 1)；
-       tau = q50(turnover)，scale = max(q90(turnover) - tau, eps)。
+    2. Fric/Freq Cost: 控制「交易頻率/調倉幅度」，與手續費脫鉤。
+       turnover_t = |pos_t - pos_{t-1}|，tau = q50(turnover)。
+       FREQ_PENALIZE_SMALL_TRADES=True 時懲罰 0<turnover<tau（小改倉罰）；
+       False 時懲罰 turnover>tau（大改倉罰，原邏輯）。
     """
 
     def __init__(self, weights: CostWeights | None = None) -> None:
@@ -100,8 +140,9 @@ class CostCalculator:
         c_risk = float(c_death)
 
         # 2. Freq 通道 (c_freq)：控制「交易頻率/調倉幅度」，與手續費脫鉤
-        # turnover_t = |pos_t - pos_{t-1}|；c_freq = clip((turnover_t - tau)/scale, 0, 1)
-        # tau = q50(turnover)，scale = max(q90(turnover) - tau, eps)；pos 為實際執行後持倉比例
+        # turnover_t = |pos_t - pos_{t-1}|；tau = q50(turnover)
+        # FREQ_PENALIZE_SMALL_TRADES=True：懲罰 0 < turnover_t < tau（小改倉罰）→ 抑制高頻極小步
+        # FREQ_PENALIZE_SMALL_TRADES=False：懲罰 turnover_t > tau（大改倉罰，原邏輯）
         pos_t = kwargs.get("pos_t")
         pos_prev = kwargs.get("pos_prev")
         if pos_t is not None and pos_prev is not None:
@@ -117,8 +158,21 @@ class CostCalculator:
             else:
                 tau = FREQ_TAU_DEFAULT
                 scale = FREQ_SCALE_DEFAULT
-            raw = (turnover_t - tau) / scale
-            c_freq = float(np.clip(raw, 0.0, 1.0))
+            tau_safe = max(tau, FREQ_EPS)
+            if FREQ_PENALIZE_SMALL_TRADES:
+                # 懲罰小於 tau：0 < turnover_t < tau → cost = (tau - turnover_t)/tau；其餘 0
+                # 不改倉(turnover=0)不罰；小改倉罰；改倉 >= tau 不罰
+                if turnover_t <= 0.0:
+                    c_freq_raw = 0.0
+                elif turnover_t < tau:
+                    c_freq_raw = float((tau_safe - turnover_t) / tau_safe)
+                else:
+                    c_freq_raw = 0.0
+            else:
+                # 原邏輯：懲罰大於 tau
+                raw = (turnover_t - tau) / scale
+                c_freq_raw = float(np.clip(raw, 0.0, 1.0))
+            c_freq = c_freq_raw * FREQ_COST_SCALE
         else:
             c_freq = 0.0
 
@@ -156,7 +210,7 @@ class CostCalculator:
         return {
             "cost": float(total_cost),
             "cost_risk": float(c_risk),
-            "cost_fric": float(c_freq),  # 對外仍用 cost_fric 鍵名，實為 freq 通道 (0~1)
+            "cost_fric": float(c_freq),  # freq 通道，輸出已乘 FREQ_COST_SCALE，尺度 [0, FREQ_COST_SCALE]
             "cost_sl_buf": float(c_sl_buf),
             "cost_sl_event": float(c_stop_event),
             "cost_breakdown": {
