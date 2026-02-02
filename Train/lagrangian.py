@@ -369,6 +369,7 @@ class LagrangianRewardWrapper(gym.Wrapper):
         # 注意：實際 modified_reward 公式是減掉它，所以輸出時通常會以負號呈現。
         self.ep_cost_penalty_total = 0.0
         self.ep_cost_penalty_breakdown = defaultdict(float)
+        self.ep_idle_penalty = 0.0  # 空倉懲罰累計（供 Callback 顯示）
         
     def reset(self, **kwargs):
         self.ep_ret_orig = 0.0
@@ -378,6 +379,7 @@ class LagrangianRewardWrapper(gym.Wrapper):
         self.ep_cost_breakdown.clear()
         self.ep_cost_penalty_total = 0.0
         self.ep_cost_penalty_breakdown.clear()
+        self.ep_idle_penalty = 0.0
         return self.env.reset(**kwargs)
 
     def set_lagrangian_lambdas(self, lambdas: Dict[str, float]) -> None:
@@ -410,6 +412,7 @@ class LagrangianRewardWrapper(gym.Wrapper):
         self.ep_cost += cost
         for k, v in breakdown.items():
             self.ep_cost_breakdown[k] += float(v)
+        self.ep_idle_penalty += float(info.get("idle_penalty", 0.0))
             
         # 3. 計算 Lagrangian Reward (給 Agent 訓練用)
         modified_reward: float
@@ -463,11 +466,11 @@ class LagrangianRewardWrapper(gym.Wrapper):
                 "return_orig_scaled": self.ep_ret_orig_scaled,
                 "return_total": self.ep_ret_total,
                 "return_cost": self.ep_cost,
-                "cost_breakdown": dict(self.ep_cost_breakdown)
-                ,
+                "cost_breakdown": dict(self.ep_cost_breakdown),
                 # penalty 是「正數大小」（= λ * cost），總 reward 公式會減掉它
                 "cost_penalty_total": self.ep_cost_penalty_total,
                 "cost_penalty_breakdown": dict(self.ep_cost_penalty_breakdown),
+                "idle_penalty_total": self.ep_idle_penalty,
             }
             # Reset 在 reset() 做，這裡不急著清空，避免 info 引用錯誤
         
@@ -685,6 +688,7 @@ class LagrangianCallback(BaseCallback):
         ep_ret_orig_scaleds = []
         ep_ret_totals = []
         ep_costs = []
+        ep_idle_penalty_totals = []
         cost_breakdowns = defaultdict(list)
         cost_penalty_totals = []
         cost_penalty_breakdowns = defaultdict(list)
@@ -696,6 +700,7 @@ class LagrangianCallback(BaseCallback):
                 ep_ret_orig_scaleds.append(metrics.get("return_orig_scaled", 0.0))
                 ep_ret_totals.append(metrics.get("return_total", 0.0))
                 ep_costs.append(metrics.get("return_cost", 0.0))
+                ep_idle_penalty_totals.append(metrics.get("idle_penalty_total", 0.0))
                 for k, v in metrics.get("cost_breakdown", {}).items():
                     cost_breakdowns[k].append(v)
                 if "cost_penalty_total" in metrics:
@@ -723,6 +728,7 @@ class LagrangianCallback(BaseCallback):
         avg_total_reward = np.mean(ep_ret_totals) if ep_ret_totals else avg_main_reward
         avg_cost = np.mean(ep_costs) if ep_costs else 0.0
         avg_cost_penalty_total = np.mean(cost_penalty_totals) if cost_penalty_totals else 0.0
+        avg_idle_penalty_total = np.mean(ep_idle_penalty_totals) if ep_idle_penalty_totals else 0.0
         
         avg_breakdown = {}
         for k, v_list in cost_breakdowns.items():
@@ -817,6 +823,7 @@ class LagrangianCallback(BaseCallback):
         
         print("  --- Original Market Performance ---")
         print(f"  Log Return Sum (LogRet)     : {avg_ret_orig:8.4f}")
+        print(f"  Idle Penalty (Ep. Total)    : {avg_idle_penalty_total:8.4f}  [空倉成本，已含於 R_scaled]")
         # 將 Log Return 換算成簡單的 ROI% 估算 (exp(sum_log_ret) - 1)，供參考
         roi_est = (np.exp(avg_ret_orig) - 1.0) * 100.0
         print(f"  Est. ROI (from LogRet)      : {roi_est:8.2f} %")
@@ -944,6 +951,7 @@ class LagrangianCallback(BaseCallback):
         self.logger.record("custom/avg_ret_orig", avg_ret_orig)
         self.logger.record("custom/avg_ret_orig_scaled", avg_ret_orig_scaled)
         self.logger.record("custom/avg_cost_penalty_total", avg_cost_penalty_total)
+        self.logger.record("custom/avg_idle_penalty_total", avg_idle_penalty_total)
         self.logger.record("custom/avg_profit", avg_profit)
         self.logger.record("custom/q_mean", q_mean)
         self.logger.record("custom/ep_cost", avg_cost)

@@ -154,6 +154,7 @@ def main() -> None:
         # No-trade hysteresis（方案2：雙門檻），讓 0 倉位更穩定
         "no_trade_entry_threshold": float(getattr(TrainConfig, "NO_TRADE_ENTRY_THRESHOLD", 0.0)),
         "no_trade_exit_threshold": float(getattr(TrainConfig, "NO_TRADE_EXIT_THRESHOLD", 0.0)),
+        "idle_penalty_per_step": float(getattr(TrainConfig, "IDLE_PENALTY_PER_STEP", 0.0)),
         # daily_risk_base 更新頻率（用於 max_step_pos_change 的「單步加倉上限」基準）
         # 你希望每 288 steps（一日 5m K 數）才更新一次 base 資金，這裡固定跟隨 WINDOW_SIZE_5M。
         "risk_base_update_steps": int(getattr(TrainConfig, "WINDOW_SIZE_5M", 288)),

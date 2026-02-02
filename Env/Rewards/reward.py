@@ -17,14 +17,17 @@ class RewardCalculator:
     - Equity 已內含手續費、滑點、利息。
     - 終局懲罰改移至成本線（death cost）處理，不再在主線扣分。
     - base_log_ret_weight：控制 log-return 影響力（方案 B）
+    - idle_penalty_per_step：空倉時每步扣的 reward，避免最優解收斂到「永遠不交易」（0=不啟用）
     """
     c_liq: float = 0.0
     fee_limit_penalty: float = 0.0
     base_log_ret_weight: float = 1.0
+    idle_penalty_per_step: float = 0.0
 
     # --- Debug / diagnostics (set on every compute call) ---
     last_conviction_bonus: float = 0.0
     last_conviction_active: bool = False
+    last_idle_penalty: float = 0.0  # 本步空倉懲罰量（供 env 寫入 info 顯示）
     
     def compute(
         self,
@@ -48,8 +51,14 @@ class RewardCalculator:
         safe_new = max(new_equity, 1e-8)
         
         log_ret = np.log(safe_new / safe_last)
-        
         reward = float(self.base_log_ret_weight * log_ret)
+        self.last_idle_penalty = 0.0
+        # 空倉懲罰：持倉為 0 時每步扣一點，避免最優解收斂到「永遠不交易」
+        if self.idle_penalty_per_step > 0:
+            abs_pos = float(kwargs.get("abs_position_pct", 0.0))
+            if abs_pos < 1e-6:
+                self.last_idle_penalty = float(self.idle_penalty_per_step)
+                reward -= self.last_idle_penalty
         return reward
     
     def get_info(self) -> dict:
@@ -57,6 +66,7 @@ class RewardCalculator:
             'type': 'log_return_only',
             'c_liq': self.c_liq,
             'base_log_ret_weight': self.base_log_ret_weight,
+            'idle_penalty_per_step': self.idle_penalty_per_step,
         }
 
 # 工廠函數
@@ -64,6 +74,7 @@ def create_default_calculator(
     c_liq: float = 10.0,
     fee_limit_penalty: float = 2.0,
     base_log_ret_weight: float = 1.0,
+    idle_penalty_per_step: float = 0.0,
     conviction_trend_bonus_weight: float = 0.0,
     conviction_trend_min_strength: float = 0.8,
     conviction_min_abs_pos: float = 0.15,
@@ -81,12 +92,14 @@ def create_default_calculator(
         return RewardCalculator(
             c_liq=0.0,
             fee_limit_penalty=0.0,
-            base_log_ret_weight=base_log_ret_weight
+            base_log_ret_weight=base_log_ret_weight,
+            idle_penalty_per_step=float(idle_penalty_per_step),
         )
     return ConvictionTrendRewardCalculator(
         c_liq=0.0,
         fee_limit_penalty=0.0,
         base_log_ret_weight=base_log_ret_weight,
+        idle_penalty_per_step=float(idle_penalty_per_step),
         conviction_trend_bonus_weight=float(conviction_trend_bonus_weight),
         conviction_trend_min_strength=float(conviction_trend_min_strength),
         conviction_min_abs_pos=float(conviction_min_abs_pos),

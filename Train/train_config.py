@@ -29,15 +29,15 @@ class TrainConfig:
     # ---- Lagrangian / 約束 ----
     # 新版 Cost 已正規化為 Cost/Equity。
     # 建議值 0.0005 (5bps) 代表容許每步平均損耗 0.05% 的權益 (含手續費與死亡風險攤提)
-    COST_LIMIT: float = 0.00008
+    COST_LIMIT: float = 0.01
     # 新版：雙路徑成本限制（risk / friction）- 目前 Controller 尚未完全支援分開的 dual-lambda，
     # 但保留參數供未來擴充。邏輯同上，Risk 應趨近於 0，Fric 容許少量。
-    RISK_COST_LIMIT: float = 0.001 # 0.000005 代表 0.0005% 死亡風險(容許極小風險)
+    RISK_COST_LIMIT: float = 0.00 # 0.000005 代表 0.0005% 死亡風險(容許極小風險)
     # Freq 通道：cost_fric 已乘 Env/Costs/cost.py 的 FREQ_COST_SCALE (0.3)，尺度 [0, 0.3]
     # 此 limit 應為「原意每步上限 × FREQ_COST_SCALE」，例如 0.1 × 0.3 = 0.03
-    FRIC_COST_LIMIT: float = 0.00005  # 每步平均 cost_fric 上限（對應縮放前 0.1）
+    FRIC_COST_LIMIT: float = 0.0005  # 每步平均 cost_fric 上限（對應縮放前 0.1）
     # Stop-Buffer Cost（0~1）：建議先設很小的平均步成本上限，因為「接近止損」應該是短暫狀態
-    SL_BUF_COST_LIMIT: float = 0.01 # 0.1：代表允許每步平均止損緩衝成本佔權益 10%
+    SL_BUF_COST_LIMIT: float = 0.1 # 0.1：代表允許每步平均止損緩衝成本佔權益 10%
     # Stop-Loss Event Cost（事件型）：當步觸發止損時才會出現的成本（獨立成本線，不歸類到 risk）。
     SL_EVENT_COST_LIMIT: float = 0.002 # 0.01：代表允許每步平均止損事件成本佔權益 1%
 
@@ -56,9 +56,12 @@ class TrainConfig:
     LOG_EVERY_EPISODES: int = 100
     STATS_WINDOW_EPISODES: int = 100
     REWARD_SCALE: float = 1 # 獎勵尺度 1.0 代表獎勵不放大
+    # 空倉懲罰（每步）：當持倉為 0 時扣一點 reward，避免最優解收斂到「永遠不交易」
+    # 量級建議 1e-4～5e-4；4000 步全空倉約累積 -0.4～-2.0，使「完全不交易」略劣於適度交易
+    IDLE_PENALTY_PER_STEP: float = 1e-4
 
     # ---- SB3 SAC 超參數 ----
-    LEARNING_RATE: float = 5e-5
+    LEARNING_RATE: float = 2e-5
     BUFFER_SIZE: int = 1_600_000
     BATCH_SIZE: int = 256 # 512 / 1_500_000 = 0.034% 
     ENT_COEF: str = "auto"
@@ -81,11 +84,12 @@ class TrainConfig:
     # 用來限制 agent 的「目標持倉百分比」在 [-MAX_POSITION_PCT, +MAX_POSITION_PCT]。
     # 優先順序：在 run_sac_lag 訓練流程中，此值會「覆蓋」Env.config.Config.MAX_POSITION_PCT（因為此處是顯式傳參）。
     MAX_POSITION_PCT: float = 0.7
-    MIN_POSITION_CHANGE: float = 0.2
+    # 降低門檻，避免策略收斂到「不交易」死胡同：允許小動作進場與小步調倉
+    MIN_POSITION_CHANGE: float = 0.1
 
     # ---- No-trade hysteresis（方案2：雙門檻）----
-    # 建議先用很小的值觀察 trade_steps 與 fees 是否下降：
-    # - entry：空倉時需有明確訊號才進場
+    # 降低 entry 門檻，讓 agent 能以較小 conviction 進場，避免 |action|<0.2 全被歸零導致永遠不交易
+    # - entry：空倉時 |action| < 此值 => 強制 0；設小一點（0.05）允許「試探性」進場
     # - exit ：有倉時較容易回到空倉（避免 0 附近抖動）
     # 注意：單位是目標倉位比例（position pct），並且動作會先被 clip 到 [-MAX_POSITION_PCT, +MAX_POSITION_PCT]。
     NO_TRADE_ENTRY_THRESHOLD: float = MIN_POSITION_CHANGE

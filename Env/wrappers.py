@@ -28,6 +28,7 @@ class ActionRepeatWrapper(gym.Wrapper):
         # 累積變數
         total_step_fee = 0.0
         total_cost = 0.0
+        total_idle_penalty = 0.0
         # 注意：訓練端的 LagrangianCallback 會從 info 讀取 cost_* 來更新 λ，
         # 若 repeat>1 但只保留「最後一步」的 cost_*，會導致 avg_cost 低估甚至顯示為 0，造成你以為「違規卻不更新」。
         total_cost_channels = defaultdict(float)   # e.g. cost_risk / cost_fric / cost_sl_buf / cost_sl_event
@@ -61,6 +62,8 @@ class ActionRepeatWrapper(gym.Wrapper):
                         total_cost_breakdown[str(bk)] += float(bv)
                     except (TypeError, ValueError):
                         pass
+            if "idle_penalty" in info:
+                total_idle_penalty += float(info.get("idle_penalty", 0.0))
             
             # --- Safety Break Logic ---
             # 如果觸發止損、強平或任何終止條件，立即停止 Repeat，
@@ -82,6 +85,7 @@ class ActionRepeatWrapper(gym.Wrapper):
         # 同步回填 breakdown（避免 cost 與 breakdown 量級不一致）
         if total_cost_breakdown:
             info["cost_breakdown"] = dict(total_cost_breakdown)
+        info["idle_penalty"] = float(total_idle_penalty)
             
         return obs, total_reward, done, truncated, info
 

@@ -22,7 +22,7 @@ FREQ_BUFFER_MIN_SAMPLES = 288
 # 作用：門檻——小於/大於 tau 決定是否被罰（依 FREQ_PENALIZE_SMALL_TRADES）
 # 調大（例 0.6）：tau 變大 → 懲罰小改倉時「小」的範圍變寬；懲罰大改倉時「大」的門檻變高，整體 cost 易降
 # 調小（例 0.4）：tau 變小 → 更多步被算進懲罰區，整體 cost 易升
-FREQ_TAU_QUANTILE = 0.6
+FREQ_TAU_QUANTILE = 0.4
 
 # scale 用分位數：scale = q90(turnover) - tau（僅在 FREQ_PENALIZE_SMALL_TRADES=False 時用）
 # 作用：turnover > tau 時 cost = (turnover_t - tau)/scale，scale 愈大 cost 上升愈慢
@@ -107,11 +107,13 @@ class CostCalculator:
             step_fee: 本步產生的手續費 (絕對金額；供總 cost 或其它用途，freq 通道不用)
             pos_t: （kwargs）本步實際執行後的持倉比例 (-1~1)，用於 freq 通道
             pos_prev: （kwargs）上一步實際執行後的持倉比例 (-1~1)
+            episode_step: （kwargs）本步前已執行的步數（0-indexed），供 risk 剩餘步數加權
+            max_episode_steps: （kwargs）本 episode 最大步數，供 risk 剩餘步數加權
 
         Returns:
             Dict:
             - cost: 總正規化成本 (供單一 Lambda 使用)
-            - cost_risk: 死亡成本 (1.0 or 0.0)
+            - cost_risk: 死亡成本，依剩餘步數加權 (0~1)：剩餘越多懲罰越大
             - cost_fric: 頻率/調倉成本 c_freq (0~1)，與手續費脫鉤
             - cost_sl_buf / cost_sl_event / cost_breakdown: 其餘分項
         """
@@ -121,8 +123,25 @@ class CostCalculator:
 
         # 1. 死亡/風險成本 (c_risk)
         # 定義：發生死亡事件 = 100% 權益損失風險實現 -> Cost = 1.0
+        # 僅 risk_cost：剩餘步數越多懲罰越大（前期死亡比後期死亡更重）
         is_dead = liq_triggered or (equity <= min_balance)
         c_death = 1.0 if is_dead else 0.0
+        episode_step = kwargs.get("episode_step")
+        max_episode_steps = kwargs.get("max_episode_steps")
+        if episode_step is not None and max_episode_steps is not None:
+            try:
+                step_i = int(episode_step)
+                max_s = int(max_episode_steps)
+            except (TypeError, ValueError):
+                step_i, max_s = 0, 1
+            if max_s <= 0:
+                risk_weight = 1.0
+            else:
+                remaining_steps = max(0, max_s - step_i - 1)  # 本步之後剩餘步數
+                risk_weight = max(0.0, min(1.0, float(remaining_steps) / float(max_s)))
+            c_risk = float(c_death * risk_weight)
+        else:
+            c_risk = float(c_death)
 
         # 1b. 止損事件成本（事件型；獨立成本線，不屬於 risk/sl_buf）
         # 定義：若本 step 觸發止損，給一個固定成本（0~1）。
@@ -135,9 +154,6 @@ class CostCalculator:
             stop_loss_event_cost = 0.0
         stop_loss_event_cost = float(min(1.0, max(0.0, stop_loss_event_cost)))
         c_stop_event = stop_loss_event_cost if (stop_loss_triggered and not is_dead) else 0.0
-
-        # 風險通道：只代表死亡事件（你要求「止損獨立出來不能涵蓋在 risk」）。
-        c_risk = float(c_death)
 
         # 2. Freq 通道 (c_freq)：控制「交易頻率/調倉幅度」，與手續費脫鉤
         # turnover_t = |pos_t - pos_{t-1}|；tau = q50(turnover)
@@ -204,8 +220,8 @@ class CostCalculator:
         # channel 值：若缺 SL，直接視為最大不安全；否則使用 buffer 公式
         c_sl_buf = max(sl_buf_cost, stop_missing_cost)
 
-        # 總成本：death + freq + sl_buf + stop_event（freq 為 0~1 無量綱）
-        total_cost = c_death + c_freq + c_sl_buf + c_stop_event
+        # 總成本：risk（已含剩餘步數加權）+ freq + sl_buf + stop_event
+        total_cost = c_risk + c_freq + c_sl_buf + c_stop_event
 
         return {
             "cost": float(total_cost),
@@ -214,7 +230,7 @@ class CostCalculator:
             "cost_sl_buf": float(c_sl_buf),
             "cost_sl_event": float(c_stop_event),
             "cost_breakdown": {
-                "death_cost": float(c_death),
+                "death_cost": float(c_risk),  # 與 cost_risk 一致（含剩餘步數加權）
                 "stop_loss_event_cost": float(c_stop_event),
                 "fric_cost": float(c_freq),
                 "sl_buf_cost": float(sl_buf_cost),

@@ -162,10 +162,11 @@ class TradingEnvironment(gym.Env):
             stop_loss_liq_buffer_pct=getattr(Config, "STOP_LOSS_LIQ_BUFFER_PCT", 0.0),
         )
         
-        # Reward Calculator
+        # Reward Calculator（idle_penalty 由 kwargs 傳入，避免「不交易」死胡同）
         self.reward_calculator = create_default_calculator(
             c_liq=0.0,
             base_log_ret_weight=1.0,
+            idle_penalty_per_step=float(kwargs.get("idle_penalty_per_step", 0.0)),
             conviction_trend_bonus_weight=0.0,
             conviction_trend_min_strength=0.8,
             conviction_min_abs_pos=0.15,
@@ -1269,6 +1270,8 @@ class TradingEnvironment(gym.Env):
             step_fee=float(step_fee),
             pos_t=executed_pos_pct,
             pos_prev=float(self._prev_executed_pos_pct),
+            episode_step=int(self.episode_steps),
+            max_episode_steps=int(self.episode_max_steps),
             step_fee_ratio=step_fee_ratio,
             turnover_ratio=float(turnover_ratio),
             traded=bool(traded),
@@ -1332,6 +1335,7 @@ class TradingEnvironment(gym.Env):
         if "cost_sl_event" in cost_out:
             info["cost_sl_event"] = float(cost_out["cost_sl_event"])
         info["cost_breakdown"] = dict(cost_out["cost_breakdown"])
+        info["idle_penalty"] = float(getattr(self.reward_calculator, "last_idle_penalty", 0.0))
 
         # cache last info for render()
         self._last_info = dict(info)

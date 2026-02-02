@@ -76,7 +76,7 @@ class Config:
     # - Executor 設定止損時：stop_distance = ATR * STOP_LOSS_ATR
     # - 直覺：越大 => 止損越遠（更不容易被洗出場；但單次虧損可能更大）
     # - 建議範圍（5m 常見）：1.5 ~ 3.0；2.0 屬於中庸值
-    STOP_LOSS_ATR: float = 2
+    STOP_LOSS_ATR: float = 3
     STOP_LOSS_LIQ_BUFFER_PCT: float = 0.2 # 止損相對強平價的安全緩衝（比例） 0.2 代表 20%
     STOP_LOSS_COOLDOWN_STEPS: int = 30 / 5 # 止損冷卻步數
     # 止損事件成本（事件型，非密集）：當本 step 觸發止損時，額外給一個固定成本（0~1）。
