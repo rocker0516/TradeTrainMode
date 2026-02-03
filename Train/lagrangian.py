@@ -437,6 +437,7 @@ class LagrangianRewardWrapper(gym.Wrapper):
                 "fric_cost": "fric",
                 "sl_buf_cost": "sl_buf",
                 "stop_missing_cost": "sl_buf",
+                "trade_freq_cost": "trade_freq",
             }
             lam_sum = float(sum(lams.values()))
             for k, v in breakdown.items():

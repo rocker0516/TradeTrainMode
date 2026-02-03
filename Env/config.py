@@ -66,6 +66,11 @@ class Config:
     # ActionRepeatWrapper：降低決策頻率（Frame Skip）
     ACTION_REPEAT: int = 3
 
+    # ---- 交易頻率硬限制（與 Cost 的 cost_trade_freq 同視窗）----
+    # 當滾動「有交易步數比例」> HARD_LIMIT 時進入冷卻；冷卻中強制 hold 直到比例 <= HARD_LIMIT * RECOVERY_RATIO
+    TRADE_FREQ_HARD_LIMIT: float = 0.15
+    TRADE_FREQ_RECOVERY_RATIO: float = 0.5  # 解除冷卻門檻 = HARD_LIMIT * RECOVERY_RATIO（例如 7.5%）
+
     # ---- 手續費限制 ----
     FEE_LIMIT_ENABLED: bool = False
     FEE_LIMIT_RATIO: float = 0.05

@@ -35,11 +35,16 @@ class TrainConfig:
     RISK_COST_LIMIT: float = 0.00 # 0.000005 代表 0.0005% 死亡風險(容許極小風險)
     # Freq 通道：cost_fric 已乘 Env/Costs/cost.py 的 FREQ_COST_SCALE (0.3)，尺度 [0, 0.3]
     # 此 limit 應為「原意每步上限 × FREQ_COST_SCALE」，例如 0.1 × 0.3 = 0.03
-    FRIC_COST_LIMIT: float = 0.0005  # 每步平均 cost_fric 上限（對應縮放前 0.1）
+    FRIC_COST_LIMIT: float = 0.00005  # 每步平均 cost_fric 上限（對應縮放前 0.1）
     # Stop-Buffer Cost（0~1）：建議先設很小的平均步成本上限，因為「接近止損」應該是短暫狀態
     SL_BUF_COST_LIMIT: float = 0.1 # 0.1：代表允許每步平均止損緩衝成本佔權益 10%
     # Stop-Loss Event Cost（事件型）：當步觸發止損時才會出現的成本（獨立成本線，不歸類到 risk）。
     SL_EVENT_COST_LIMIT: float = 0.002 # 0.01：代表允許每步平均止損事件成本佔權益 1%
+    # 交易頻率成本：近期步數中「有發生調倉」的步數比率上限（與 cost_trade_freq 口徑一致，建議 0.2 = 20%）
+    TRADE_FREQ_COST_LIMIT: float = 0.1
+    # 交易頻率硬限制（與 cost 同視窗）：超過此比例強制冷卻；解除門檻 = HARD_LIMIT * RECOVERY_RATIO
+    TRADE_FREQ_HARD_LIMIT: float = 0.4 # 288 * 0.4 =  115 步
+    TRADE_FREQ_RECOVERY_RATIO: float = 0.5
 
     # ---- Lagrangian λ 調教（P-Control）----
     # 詳見 docs/lambda_tuning_optimization.md
@@ -68,6 +73,9 @@ class TrainConfig:
     TRAIN_FREQ: int = 1 # 1 代表每次更新參數時，只用一個 batch 的資料
     GRADIENT_STEPS: int = 1 # 1 代表每次更新參數時，只用一個 batch 的資料進行梯度下降
 
+    # ---- Auxiliary Loss（做法二方案 C：預測下一步報酬符號，持倉方向對齊學習）----
+    AUX_COEF: float = 0.4  # auxiliary loss 權重，僅在有持倉的 step 計算
+
     # ---- Policy / 網路結構 ----
     EMB_5M: int = 256 # 5m 特徵維度
     EMB_1D: int = 128 # 1d 特徵維度
@@ -79,7 +87,7 @@ class TrainConfig:
     # ---- Wrapper（動作平滑/重複）----
     # 訓練時建議用「更強的降頻/降換手」設定，否則手續費與 turnover 會把主線 log-return 磨成長期負值。
     # 這些會由 Train/run_sac_lag.py 以 CLI 參數覆寫（不必動 Env/config.py 的全域預設）。
-    ACTION_REPEAT: int = 1 # 5 代表 5 步一決策
+    ACTION_REPEAT: int = 6 # 5 代表 5 步一決策
     # 作用：訓練入口 `Train/run_sac_lag.py` 會用這個值建立 `ActionClipWrapper`，
     # 用來限制 agent 的「目標持倉百分比」在 [-MAX_POSITION_PCT, +MAX_POSITION_PCT]。
     # 優先順序：在 run_sac_lag 訓練流程中，此值會「覆蓋」Env.config.Config.MAX_POSITION_PCT（因為此處是顯式傳參）。

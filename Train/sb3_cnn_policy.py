@@ -138,6 +138,9 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
             nn.ReLU(),
         )
 
+        # ---- Auxiliary 頭：預測「下一步報酬符號」(0=跌, 1=平, 2=漲)，供持倉方向對齊學習（做法二方案 C）
+        self.aux_return_sign = nn.Linear(int(out_dim), 3)
+
         # 保存一些資訊，方便 debug
         self._meta: Dict[str, Tuple[int, int]] = {
             "price_seq": (win_5m, feat_5m),
@@ -173,4 +176,14 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
         # ---- 融合 ----
         fused = torch.cat([e5, e1, ev], dim=1)
         return self.fusion(fused)
+
+    def forward_with_aux(self, observations: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        回傳 (主特徵, 報酬符號 logits)。
+        主特徵與 forward() 相同，供 policy 正常使用；
+        aux logits 為 3 類（0=跌、1=平、2=漲），僅在有持倉的 step 計算 auxiliary loss。
+        """
+        features = self.forward(observations)
+        aux_logits = self.aux_return_sign(features)
+        return features, aux_logits
 

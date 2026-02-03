@@ -20,7 +20,7 @@ if _PROJECT_ROOT not in sys.path:
 
 import gymnasium as gym
 import torch
-from stable_baselines3 import SAC
+from Train.sac_with_aux import SACWithAuxiliaryLoss
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor
 from stable_baselines3.common.callbacks import CheckpointCallback
 
@@ -111,6 +111,7 @@ def main() -> None:
     parser.add_argument("--fric_cost_limit", type=float, default=TrainConfig.FRIC_COST_LIMIT, help="freq channel cost limit per step (c_freq 0~1), suggest 0.05~0.20")
     parser.add_argument("--sl_buf_cost_limit", type=float, default=TrainConfig.SL_BUF_COST_LIMIT, help="sl_buf cost limit per step (stop buffer, 0~1)")
     parser.add_argument("--sl_event_cost_limit", type=float, default=TrainConfig.SL_EVENT_COST_LIMIT, help="sl_event cost limit per step (stop loss event)")
+    parser.add_argument("--trade_freq_cost_limit", type=float, default=TrainConfig.TRADE_FREQ_COST_LIMIT, help="trade_freq cost limit (rolling ratio of steps with trade, 0~1)")
     parser.add_argument("--device", type=str, default=TrainConfig.DEVICE)
     parser.add_argument("--log_every_episodes", type=int, default=TrainConfig.LOG_EVERY_EPISODES, help="每 N 回合輸出交易統計")
     parser.add_argument("--update_lambda_every_steps", type=int, default=TrainConfig.UPDATE_LAMBDA_EVERY_STEPS, help="每 N steps 更新一次 lambda")
@@ -140,6 +141,7 @@ def main() -> None:
             "fric": LagrangianChannelConfig(cost_limit=float(args.fric_cost_limit), kp=kp, lambda_init=lam_init, lambda_max=lam_max),
             "sl_buf": LagrangianChannelConfig(cost_limit=float(args.sl_buf_cost_limit), kp=kp, lambda_init=lam_init, lambda_max=lam_max),
             "sl_event": LagrangianChannelConfig(cost_limit=float(args.sl_event_cost_limit), kp=kp, lambda_init=lam_init, lambda_max=lam_max),
+            "trade_freq": LagrangianChannelConfig(cost_limit=float(args.trade_freq_cost_limit), kp=kp, lambda_init=lam_init, lambda_max=lam_max),
         }
     )
     
@@ -155,6 +157,9 @@ def main() -> None:
         "no_trade_entry_threshold": float(getattr(TrainConfig, "NO_TRADE_ENTRY_THRESHOLD", 0.0)),
         "no_trade_exit_threshold": float(getattr(TrainConfig, "NO_TRADE_EXIT_THRESHOLD", 0.0)),
         "idle_penalty_per_step": float(getattr(TrainConfig, "IDLE_PENALTY_PER_STEP", 0.0)),
+        # 交易頻率硬限制（與 cost_trade_freq 同視窗）
+        "trade_freq_hard_limit": float(getattr(TrainConfig, "TRADE_FREQ_HARD_LIMIT", 0.15)),
+        "trade_freq_recovery_ratio": float(getattr(TrainConfig, "TRADE_FREQ_RECOVERY_RATIO", 0.5)),
         # daily_risk_base 更新頻率（用於 max_step_pos_change 的「單步加倉上限」基準）
         # 你希望每 288 steps（一日 5m K 數）才更新一次 base 資金，這裡固定跟隨 WINDOW_SIZE_5M。
         "risk_base_update_steps": int(getattr(TrainConfig, "WINDOW_SIZE_5M", 288)),
@@ -189,7 +194,7 @@ def main() -> None:
         net_arch=dict(pi=list(TrainConfig.PI_ARCH), qf=list(TrainConfig.QF_ARCH)),
     )
 
-    model = SAC(
+    model = SACWithAuxiliaryLoss(
         policy="MultiInputPolicy",
         env=env,
         policy_kwargs=policy_kwargs,
@@ -209,6 +214,7 @@ def main() -> None:
         device=args.device,
         verbose=sb3_verbose,
         tensorboard_log=str(TrainConfig.TENSORBOARD_LOG_DIR),
+        aux_coef=float(getattr(TrainConfig, "AUX_COEF", 0.1)),
     )
 
     # 4. 設定 Callbacks
@@ -295,7 +301,7 @@ def main() -> None:
     print(f"Start training SAC-Lagrangian on {args.symbol} with {args.n_envs} envs...")
     print(
         "Cost Limits (per step): "
-        f"risk={args.risk_cost_limit}, fric={args.fric_cost_limit}, sl_buf={args.sl_buf_cost_limit}, sl_event={args.sl_event_cost_limit} "
+        f"risk={args.risk_cost_limit}, fric={args.fric_cost_limit}, sl_buf={args.sl_buf_cost_limit}, sl_event={args.sl_event_cost_limit}, trade_freq={args.trade_freq_cost_limit} "
         f"(legacy cost_limit={args.cost_limit})"
     )
     

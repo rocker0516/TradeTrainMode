@@ -62,8 +62,9 @@ class TradingObserver:
     def _build_account_space(self) -> dict:
         """定義帳戶狀態相關的觀察空間"""
         # 27 原有 + 4：trend_direction, trend_strength, position_trend_alignment, regime_choppy
+        # + 2：position_signed_pct（帶符號持倉比例，方向+幅度）, last_step_log_return（上一步報酬，供方向對齊學習）
         return {
-            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(31,), dtype=self.obs_dtype)
+            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(33,), dtype=self.obs_dtype)
         }
 
     def _build_context_space(self) -> dict:
@@ -250,6 +251,10 @@ class TradingObserver:
         max_notional = equity * executor.leverage
         pos_size_norm = pos_notional / max_notional if max_notional > 0 else 0.0
         pos_size_norm = np.clip(pos_size_norm, 0.0, 1.0)
+        # 帶符號持倉比例 [-1, 1]：正=多、負=空，絕對值=持倉幅度（讓模型明確區分「方向」與「比例」）
+        position_signed_pct = 0.0
+        if max_notional > 0 and abs(size) > 1e-12:
+            position_signed_pct = float(np.clip((float(size) * current_price) / max_notional, -1.0, 1.0))
         
         upnl = executor.unrealized_pnl(current_price)
         unreal_pnl_ratio = upnl / initial_balance if initial_balance > 0 else 0.0
@@ -366,9 +371,14 @@ class TradingObserver:
         # 註：與 price_seq 最後一列之 chop_48 通道重複，供 MLP 直接使用（見同上 doc 六）
         regime_choppy = float(np.clip(chop_48 / 5.0, -1.0, 1.0))
 
+        # 上一步 log return（供「持倉方向 × 報酬符號」對齊學習）；正規化到合理範圍避免尺度爆炸
+        last_step_log_return = float(account_metrics.get("last_step_log_return", 0.0))
+        last_step_log_return = float(np.clip(last_step_log_return, -0.1, 0.1))
+
         account_state = np.concatenate([
             account_state,
             np.array([trend_dir, trend_str, position_trend_alignment, regime_choppy], dtype=self.obs_dtype),
+            np.array([position_signed_pct, last_step_log_return], dtype=self.obs_dtype),
         ])
         return {'account_state': account_state}
 

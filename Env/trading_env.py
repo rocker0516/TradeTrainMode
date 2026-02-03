@@ -211,6 +211,10 @@ class TradingEnvironment(gym.Env):
         self.fee_limit_enabled = getattr(Config, "FEE_LIMIT_ENABLED", True)
         self.fee_limit_ratio = float(kwargs.get("fee_limit_ratio", Config.FEE_LIMIT_RATIO))
 
+        # 交易頻率硬限制（與 cost_trade_freq 同視窗；可與止損冷卻統整為單一 cooldown）
+        self.trade_freq_hard_limit = float(kwargs.get("trade_freq_hard_limit", getattr(Config, "TRADE_FREQ_HARD_LIMIT", 0.15)))
+        self.trade_freq_recovery_ratio = float(kwargs.get("trade_freq_recovery_ratio", getattr(Config, "TRADE_FREQ_RECOVERY_RATIO", 0.5)))
+
         # Cost / Constraint（供 Lagrangian-SAC 使用）
         # 注意：reward 與 cost 分離，cost 透過 info 回傳，方便訓練端做 λ 更新與解析。
         # REFACTORED: 只保留死亡懲罰 (Liq / Bankrupt) 與 摩擦成本 (Fee/Equity)
@@ -243,9 +247,11 @@ class TradingEnvironment(gym.Env):
         self.position_entry_step = None
         self._last_position_size = 0.0
         self._prev_executed_pos_pct = 0.0  # freq 通道：上一步實際持倉比例 (-1~1)
+        self._last_step_log_return = 0.0  # 上一步 log return，供 obs 與 auxiliary loss 使用
         self.episode_stop_loss_count = 0
         self.episode_liq_count = 0
         self.stop_loss_cooldown = 0
+        self._trade_freq_cooldown = False
         self.daily_risk_base = 0.0
         self.last_risk_base_update_step = 0
 
@@ -454,6 +460,7 @@ class TradingEnvironment(gym.Env):
         self.episode_stop_loss_count = 0
         self.episode_liq_count = 0
         self.stop_loss_cooldown = 0
+        self._trade_freq_cooldown = False
         self.daily_risk_base = self.initial_balance
         self.last_risk_base_update_step = self.current_step
         
@@ -473,6 +480,7 @@ class TradingEnvironment(gym.Env):
             "trade_executed_flag": 0.0,
         }
         self._prev_executed_pos_pct = 0.0  # freq 通道：上一步實際持倉比例 (-1~1)
+        self._last_step_log_return = 0.0
         if hasattr(self.cost_calculator, "reset"):
             self.cost_calculator.reset()
 
@@ -650,7 +658,8 @@ class TradingEnvironment(gym.Env):
             'last_step_fee': self.tracker.last_step_fee,
             'rolling_fee_sum': self.tracker.rolling_fee_sum,
             'fee_limit_ratio': self.fee_limit_ratio,
-            'fee_limit_enabled': self.fee_limit_enabled
+            'fee_limit_enabled': self.fee_limit_enabled,
+            'last_step_log_return': float(self._last_step_log_return),
         }
         
         return self.observer.get_observation(
@@ -847,19 +856,37 @@ class TradingEnvironment(gym.Env):
             atr_est=atr_est,
         )
 
-    def _apply_stop_loss_cooldown(self, action: np.ndarray) -> np.ndarray:
+    def _apply_cooldown(
+        self, action: np.ndarray, last_equity: float, current_price: float
+    ) -> np.ndarray:
         """
-        若處於停損冷卻期，強制本 step 動作為 0。
-
-        Args:
-            action: 原始 action
-
-        Returns:
-            action（可能被覆寫為 0）
+        統整冷卻：止損冷卻或交易頻率硬限制時，強制維持當前持倉（hold）。
+        止損後持倉已為 0，故 hold=0，行為與原止損冷卻一致。
         """
+        max_cap = max(last_equity * self.leverage, 1e-12)
+        current_pos_pct = float(
+            (float(self.executor.position.size) * current_price) / max_cap
+        )
+        current_pos_pct = float(np.clip(current_pos_pct, -1.0, 1.0))
+        hold = np.array([current_pos_pct], dtype=np.float32)
+
         if self.stop_loss_cooldown > 0:
             self.stop_loss_cooldown -= 1
-            return np.zeros_like(action)
+            return hold
+
+        ratio = self.cost_calculator.get_trade_freq_ratio()
+        limit = self.trade_freq_hard_limit
+        recovery = self.trade_freq_recovery_ratio
+        threshold = limit * recovery
+
+        if self._trade_freq_cooldown:
+            if ratio <= threshold:
+                self._trade_freq_cooldown = False
+                return action
+            return hold
+        if ratio > limit:
+            self._trade_freq_cooldown = True
+            return hold
         return action
 
     def _process_action_and_execute(
@@ -880,12 +907,8 @@ class TradingEnvironment(gym.Env):
         Returns:
             (final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, action_overridden_flag)
         """
-        action_used = self._apply_stop_loss_cooldown(action)
-        # action 是否被 env 覆寫（目前主要是 cooldown）
-        try:
-            action_overridden_flag = bool(abs(float(action_used[0]) - float(action[0])) > 1e-8)
-        except (TypeError, ValueError, IndexError):
-            action_overridden_flag = False
+        action_used = action
+        action_overridden_flag = False
 
         target_pos_pct, is_flip = self.action_processor.process_action(
             action_used, self.executor, prices.current_price
@@ -1126,12 +1149,19 @@ class TradingEnvironment(gym.Env):
         last_equity = float(self.executor.equity(prices.current_price))
         prev_size = float(self._last_position_size)
 
-        # 2. Process action + execute
-        final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, action_overridden_flag = self._process_action_and_execute(
+        # 2. 統整冷卻（止損 + 交易頻率硬限制）後再執行
+        orig_action = np.array(action, dtype=np.float32, copy=True)
+        action = self._apply_cooldown(action, last_equity, prices.current_price)
+        # 存下本步執行前的 trade_freq 視窗數據（供 info；compute() 尚未 append 本步）
+        self._step_trade_freq_ratio = self.cost_calculator.get_trade_freq_ratio()
+        self._step_trade_freq_window_count = self.cost_calculator.get_trade_freq_window_trade_count()
+        self._step_trade_freq_window_len = self.cost_calculator.get_trade_freq_window_len()
+        final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, _ = self._process_action_and_execute(
             action=action,
             last_equity=last_equity,
             prices=prices,
         )
+        action_overridden_flag = bool(not np.allclose(orig_action, action_used))
 
         # 3. Post execution updates (for next obs + accounting)
         self._update_action_effects_cache(expected_fee=expected_fee, current_price=prices.current_price)
@@ -1251,7 +1281,10 @@ class TradingEnvironment(gym.Env):
             abs_position_pct=abs(pos_pct_reward),
             trend_score=metrics['trend_score']
         )
-        
+        # 本步 log return（供 obs 下一步與 auxiliary loss 使用）
+        step_log_return = float(np.log(max(float(new_equity), 1e-8) / max(float(last_equity), 1e-8)))
+        self._last_step_log_return = step_log_return
+
         # 9. Cost / Constraint（成本線）
         # 我們使用「當下價格」計算風險訊號（含 stop_loss_missing / 距離爆倉 / margin_ratio 等），
         # 並把總 cost 與分項寫入 info，方便訓練端做 Lagrangian 更新與 debug。
@@ -1334,8 +1367,19 @@ class TradingEnvironment(gym.Env):
             info["cost_sl_buf"] = float(cost_out["cost_sl_buf"])
         if "cost_sl_event" in cost_out:
             info["cost_sl_event"] = float(cost_out["cost_sl_event"])
+        info["cost_trade_freq"] = float(cost_out.get("cost_trade_freq", 0.0))
         info["cost_breakdown"] = dict(cost_out["cost_breakdown"])
         info["idle_penalty"] = float(getattr(self.reward_calculator, "last_idle_penalty", 0.0))
+        info["step_log_return"] = float(step_log_return)
+        info["has_position"] = bool(abs(float(new_size)) > 1e-8)
+
+        # 交易頻率硬限制 / 統整冷卻觀測（視窗數據為本步執行前）
+        info["trade_freq_cooldown"] = bool((self.stop_loss_cooldown > 0) or self._trade_freq_cooldown)
+        info["trade_freq_ratio"] = float(getattr(self, "_step_trade_freq_ratio", 0.0))
+        info["trade_freq_window_trade_count"] = int(getattr(self, "_step_trade_freq_window_count", 0))
+        w_len = int(getattr(self, "_step_trade_freq_window_len", 0))
+        max_allowed = int(np.floor(self.trade_freq_hard_limit * max(w_len, 1)))
+        info["trade_freq_trades_until_limit"] = int(max_allowed - getattr(self, "_step_trade_freq_window_count", 0))
 
         # cache last info for render()
         self._last_info = dict(info)

@@ -33,6 +33,34 @@ from stable_baselines3.common.type_aliases import DictReplayBufferSamples
 from stable_baselines3.common.vec_env import VecNormalize
 
 
+class DictReplayBufferSamplesWithAux:
+    """
+    具備與 DictReplayBufferSamples 相同欄位，外加 step_log_returns、has_positions，
+    供 auxiliary loss（預測 step 報酬符號）使用。SAC 仍可依 batch.observations 等正常使用。
+    """
+    __slots__ = ("observations", "next_observations", "actions", "dones", "rewards", "discounts", "step_log_returns", "has_positions")
+
+    def __init__(
+        self,
+        observations,
+        next_observations,
+        actions,
+        dones,
+        rewards,
+        step_log_returns: th.Tensor,
+        has_positions: th.Tensor,
+        discounts=None,
+    ):
+        self.observations = observations
+        self.next_observations = next_observations
+        self.actions = actions
+        self.dones = dones
+        self.rewards = rewards
+        self.discounts = discounts
+        self.step_log_returns = step_log_returns
+        self.has_positions = has_positions
+
+
 class OptimizedDictReplayBuffer(ReplayBuffer):
     """
     Dict Replay buffer with optimize_memory_usage support (for SB3 >= 2.0).
@@ -86,6 +114,9 @@ class OptimizedDictReplayBuffer(ReplayBuffer):
         )
         self.rewards = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.dones = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
+        # 供 auxiliary loss（預測 step 報酬符號）使用
+        self.step_log_returns = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
+        self.has_positions = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
 
         self.handle_timeout_termination = handle_timeout_termination
         self.timeouts = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
@@ -125,6 +156,8 @@ class OptimizedDictReplayBuffer(ReplayBuffer):
         self.actions[self.pos] = np.array(action)
         self.rewards[self.pos] = np.array(reward)
         self.dones[self.pos] = np.array(done)
+        self.step_log_returns[self.pos] = np.array([float(info.get("step_log_return", 0.0)) for info in infos])
+        self.has_positions[self.pos] = np.array([1.0 if info.get("has_position", False) else 0.0 for info in infos])
 
         if self.handle_timeout_termination:
             self.timeouts[self.pos] = np.array([info.get("TimeLimit.truncated", False) for info in infos])
@@ -134,7 +167,7 @@ class OptimizedDictReplayBuffer(ReplayBuffer):
             self.full = True
             self.pos = 0
 
-    def sample(self, batch_size: int, env: Optional[VecNormalize] = None) -> DictReplayBufferSamples:  # type: ignore[override]
+    def sample(self, batch_size: int, env: Optional[VecNormalize] = None):  # type: ignore[override]
         # Match SB3 ReplayBuffer behavior when optimize_memory_usage=True:
         # Do not sample index `self.pos` because transition is invalid (next_obs overlaps).
         if not self.optimize_memory_usage:
@@ -171,11 +204,17 @@ class OptimizedDictReplayBuffer(ReplayBuffer):
         observations = {key: self.to_torch(obs) for key, obs in obs_.items()}
         next_observations = {key: self.to_torch(obs) for key, obs in next_obs_.items()}
 
-        return DictReplayBufferSamples(
+        step_log_returns = self.to_torch(self.step_log_returns[batch_inds, env_indices].reshape(-1, 1))
+        has_positions = self.to_torch(self.has_positions[batch_inds, env_indices].reshape(-1, 1))
+
+        return DictReplayBufferSamplesWithAux(
             observations=observations,
-            actions=self.to_torch(self.actions[batch_inds, env_indices]),
             next_observations=next_observations,
+            actions=self.to_torch(self.actions[batch_inds, env_indices]),
             dones=self.to_torch(self.dones[batch_inds, env_indices] * (1 - self.timeouts[batch_inds, env_indices])).reshape(-1, 1),
             rewards=self.to_torch(self._normalize_reward(self.rewards[batch_inds, env_indices].reshape(-1, 1), env)),
+            step_log_returns=step_log_returns,
+            has_positions=has_positions,
+            discounts=None,
         )
 

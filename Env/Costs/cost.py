@@ -22,7 +22,7 @@ FREQ_BUFFER_MIN_SAMPLES = 288
 # 作用：門檻——小於/大於 tau 決定是否被罰（依 FREQ_PENALIZE_SMALL_TRADES）
 # 調大（例 0.6）：tau 變大 → 懲罰小改倉時「小」的範圍變寬；懲罰大改倉時「大」的門檻變高，整體 cost 易降
 # 調小（例 0.4）：tau 變小 → 更多步被算進懲罰區，整體 cost 易升
-FREQ_TAU_QUANTILE = 0.4
+FREQ_TAU_QUANTILE = 0.3
 
 # scale 用分位數：scale = q90(turnover) - tau（僅在 FREQ_PENALIZE_SMALL_TRADES=False 時用）
 # 作用：turnover > tau 時 cost = (turnover_t - tau)/scale，scale 愈大 cost 上升愈慢
@@ -52,6 +52,14 @@ FREQ_COST_SCALE: float = 0.001
 # False  → 懲罰「大於 tau」的 turnover：turnover > tau 才罰，cost 隨 (turnover - tau)/scale 上升
 #          效果：抑制單步大改倉，鼓勵少改倉或小步改倉
 FREQ_PENALIZE_SMALL_TRADES: bool = True
+
+# =============================================================================
+# 交易頻率通道常數（cost_trade_freq：約束「有交易的步數比例」，與 fric 型態約束區分）
+# cost_trade_freq = 近期 W 步內「有發生調倉」的步數 / W，即 rolling ratio ∈ [0, 1]
+# Fric 約束「調倉幅度型態」；本線約束「有交易的步數比例」。同一筆交易會同時影響兩者，語意不同。
+# =============================================================================
+TRADE_FREQ_WINDOW_SIZE: int = 288
+TRADE_FREQ_MIN_SAMPLES: int = 288 / 4 # 288 / 4 = 72 筆資料
 
 
 @dataclass(frozen=True)
@@ -83,10 +91,29 @@ class CostCalculator:
     def __init__(self, weights: CostWeights | None = None) -> None:
         self.weights = weights or CostWeights()
         self._turnover_buffer: deque[float] = deque(maxlen=FREQ_BUFFER_SIZE)
+        self._traded_buffer: deque[float] = deque(maxlen=TRADE_FREQ_WINDOW_SIZE)
 
     def reset(self) -> None:
-        """Episode 重置時清空 turnover 緩衝，tau/scale 下個 episode 重新累積。"""
+        """Episode 重置時清空 turnover / traded 緩衝，下個 episode 重新累積。"""
         self._turnover_buffer.clear()
+        self._traded_buffer.clear()
+
+    def get_trade_freq_ratio(self) -> float:
+        """
+        回傳視窗內「有交易」步數比例（不修改 buffer）。
+        在每步執行前呼叫時，buffer 只含之前步數，故為「到上一步為止」的滾動比例。
+        """
+        if len(self._traded_buffer) >= TRADE_FREQ_MIN_SAMPLES:
+            return float(np.mean(self._traded_buffer))
+        return 0.0
+
+    def get_trade_freq_window_trade_count(self) -> int:
+        """視窗內有交易的步數（整數）。"""
+        return int(sum(self._traded_buffer))
+
+    def get_trade_freq_window_len(self) -> int:
+        """視窗當前長度（未滿時為實際累積步數）。"""
+        return len(self._traded_buffer)
 
     def compute(
         self,
@@ -220,8 +247,16 @@ class CostCalculator:
         # channel 值：若缺 SL，直接視為最大不安全；否則使用 buffer 公式
         c_sl_buf = max(sl_buf_cost, stop_missing_cost)
 
-        # 總成本：risk（已含剩餘步數加權）+ freq + sl_buf + stop_event
-        total_cost = c_risk + c_freq + c_sl_buf + c_stop_event
+        # 4. 交易頻率通道 (c_trade_freq)：近期步數中「有發生調倉」的步數比率 ∈ [0, 1]
+        traded = bool(kwargs.get("traded", False))
+        self._traded_buffer.append(1.0 if traded else 0.0)
+        if len(self._traded_buffer) >= TRADE_FREQ_MIN_SAMPLES:
+            c_trade_freq = float(np.mean(self._traded_buffer))
+        else:
+            c_trade_freq = 0.0
+
+        # 總成本：risk + freq + sl_buf + stop_event + trade_freq
+        total_cost = c_risk + c_freq + c_sl_buf + c_stop_event + c_trade_freq
 
         return {
             "cost": float(total_cost),
@@ -229,11 +264,13 @@ class CostCalculator:
             "cost_fric": float(c_freq),  # freq 通道，輸出已乘 FREQ_COST_SCALE，尺度 [0, FREQ_COST_SCALE]
             "cost_sl_buf": float(c_sl_buf),
             "cost_sl_event": float(c_stop_event),
+            "cost_trade_freq": float(c_trade_freq),
             "cost_breakdown": {
                 "death_cost": float(c_risk),  # 與 cost_risk 一致（含剩餘步數加權）
                 "stop_loss_event_cost": float(c_stop_event),
                 "fric_cost": float(c_freq),
                 "sl_buf_cost": float(sl_buf_cost),
                 "stop_missing_cost": float(stop_missing_cost),
+                "trade_freq_cost": float(c_trade_freq),
             },
         }
