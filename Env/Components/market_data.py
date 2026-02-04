@@ -93,13 +93,7 @@ class MarketData:
         else:
             raise ValueError(f"Price columns for '{self.target_symbol}' (e.g. {col_close}) not found in df_5m columns: {self.df_5m.columns.tolist()[:10]}...")
         
-        # 4. 時間特徵 (5m)
-        ts = self.df_5m['timestamp']
-        self.hour_arr = ts.dt.hour.values.astype(np.float32)
-        self.dow_arr = ts.dt.dayofweek.values.astype(np.float32)
-        self.is_weekend_arr = (ts.dt.dayofweek.values >= 5).astype(np.float32)# 0: Monday, 1: Tuesday, ..., 4: Friday, 5: Saturday, 6: Sunday
-
-        # 5. 計算 ATR Ratio (用於 ENV 內部的動態止損計算，非僅作為特徵)
+        # 4. 計算 ATR Ratio (用於 ENV 內部的動態止損計算，非僅作為特徵)
         prev_close = pd.Series(self.close_arr).shift(1)
         true_range = np.maximum.reduce([
             (self.high_arr - self.low_arr),
@@ -109,7 +103,7 @@ class MarketData:
         atr = pd.Series(true_range).rolling(14, min_periods=5).mean().fillna(0.0)
         self.atr_ratio_arr = (atr / np.maximum(self.close_arr, 1e-12)).astype(np.float32).values
 
-        # 6. 計算 Rhythm Feature (RV Ratio) - 維持原邏輯供 Env 使用
+        # 5. 計算 Rhythm Feature (RV Ratio) - 維持原邏輯供 Env 使用
         self.rv_ratio_arr = self._compute_rv_ratio()
         
         # 計算 Trend Score (簡單移動平均趨勢) - 補足缺失的屬性
@@ -117,7 +111,7 @@ class MarketData:
         ma_200 = pd.Series(self.close_arr).rolling(window=200, min_periods=1).mean()
         self.trend_score_arr = ((ma_50 - ma_200) / (ma_200 + 1e-8)).fillna(0.0).values.astype(np.float32)
         
-        # 7. 透過 FeatureTransformer 建立固定特徵（可解釋、固定 shape）
+        # 6. 透過 FeatureTransformer 建立固定特徵（可解釋、固定 shape）
         # 重要：只針對 target_symbol 產生特徵，避免把其他幣種的整套 OHLCV 混入 state。
         self.features_5m_arr, self.cols_5m = self._transformer.build_5m_features(
             self.df_5m,
@@ -133,7 +127,7 @@ class MarketData:
             z_window_1d=max(60, self.feature_lookback_1d * 2),
         )
 
-        # 8. 定義特徵維度供 Observer 使用（固定、可控）
+        # 7. 定義特徵維度供 Observer 使用（固定、可控）
         self.price_seq_features_dim = int(self.features_5m_arr.shape[1])
         self.features_1d_dim = int(self.features_1d_arr.shape[1])
         self.market_state_cols = self.cols_5m  # 相容既有介面：提供 5m 特徵欄位名稱

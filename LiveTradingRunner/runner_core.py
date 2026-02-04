@@ -31,7 +31,7 @@ def _build_account_and_context_obs_named(obs: dict) -> Dict[str, Dict[str, float
     說明：
     - 欄位順序完全對齊 `Env/Components/observer.py`：
       - `TradingObserver._get_account_obs()` 的 `account_state = np.array([...])`
-      - `TradingObserver._get_context_obs()` 的 time/rhythm/cost index 定義
+      - `TradingObserver._get_context_obs()` 的 cost index 定義
     """
 
     account_state_names = [
@@ -62,19 +62,6 @@ def _build_account_and_context_obs_named(obs: dict) -> Dict[str, Dict[str, float
         "liq_distance_pct",
         "stop_distance_pct",
         "fee_rate_pct",
-    ]
-    time_state_names = [
-        "hour_sin",
-        "hour_cos",
-        "dow_sin",
-        "dow_cos",
-        "phase8_sin",
-        "phase8_cos",
-        "is_weekend",
-    ]
-    rhythm_state_names = [
-        "atr_ratio",
-        "rv_ratio",
     ]
     cost_state_names = [
         "step_fee_ratio_stable",
@@ -123,8 +110,6 @@ def _build_account_and_context_obs_named(obs: dict) -> Dict[str, Dict[str, float
 
     return {
         "account_state": _named_values(obs.get("account_state"), account_state_names),
-        "time_state": _named_values(obs.get("time_state"), time_state_names),
-        "rhythm_state": _named_values(obs.get("rhythm_state"), rhythm_state_names),
         "cost_state": _named_values(obs.get("cost_state"), cost_state_names),
     }
 

@@ -66,10 +66,8 @@ class TradingObserver:
         }
 
     def _build_context_space(self) -> dict:
-        """定義環境狀態、時間與成本風險相關的觀察空間"""
+        """定義環境狀態與成本風險相關的觀察空間"""
         return {
-            'time_state': spaces.Box(low=-np.inf, high=np.inf, shape=(7,), dtype=self.obs_dtype),
-            'rhythm_state': spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=self.obs_dtype),
             # cost_state (27):
             # 0~18: 原有成本/風險/預測效果特徵
             # 19~26: 行為「偏差揭露」特徵（讓 agent 知道 raw action 是否被覆寫/限幅/未成交）
@@ -363,28 +361,6 @@ class TradingObserver:
     ) -> dict:
         """生成環境與成本狀態觀察值"""
         
-        # --- Time State (7) ---
-        time_state = np.zeros(7, dtype=self.obs_dtype)
-        hour = market_data.hour_arr[step_idx]
-        dow = market_data.dow_arr[step_idx]
-        is_weekend = market_data.is_weekend_arr[step_idx]
-        
-        time_state[0] = np.sin(2 * np.pi * hour / 24.0)
-        time_state[1] = np.cos(2 * np.pi * hour / 24.0)
-        time_state[2] = np.sin(2 * np.pi * dow / 7.0)
-        time_state[3] = np.cos(2 * np.pi * dow / 7.0)
-        phase = (hour % 8.0) / 8.0
-        time_state[4] = np.sin(2 * np.pi * phase)
-        time_state[5] = np.cos(2 * np.pi * phase)
-        time_state[6] = is_weekend
-        
-        # --- Rhythm State (2) ---
-        rhythm_state = np.zeros(2, dtype=self.obs_dtype)
-        rhythm_state[0] = float(atr_ratio)
-        # rv_ratio 不必再從 metrics 讀（已在 env 的 market_data 裡快取），避免重複 get_market_metrics
-        rv_ratio = float(market_data.rv_ratio_arr[step_idx]) if step_idx < len(market_data.rv_ratio_arr) else 0.0
-        rhythm_state[1] = float(np.clip(rv_ratio, 0.0, 10.0))
-        
         # --- Cost State (27) ---
         cost_state = np.zeros(27, dtype=self.obs_dtype)
         last_step_fee = account_metrics.get('last_step_fee', 0.0)
@@ -492,7 +468,5 @@ class TradingObserver:
         cost_state[26] = float(effects.get("trade_executed_flag", 0.0))
         
         return {
-            'time_state': time_state,
-            'rhythm_state': rhythm_state,
             'cost_state': cost_state
         }

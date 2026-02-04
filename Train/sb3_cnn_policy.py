@@ -7,7 +7,7 @@ SB3（stable-baselines3）用的多輸入觀測編碼器：雙分支 CNN + 向�
 - 你的 observation 是 Dict：
   - price_seq: (window_size, F_5m)     # 5m 序列（主幹；F_5m 會隨特徵集合擴充）
   - price_seq_1d: (window_size_1d, F_1d)  # 1d 序列（regime 背景）
-  - account_state/time_state/rhythm_state/cost_state: 向量特徵
+  - account_state/cost_state: 向量特徵
 - 我們希望「5m / 1d 使用不同 CNN 設計」：
   - 5m 序列長（288），用稍深一點的 CNN 抽型態
   - 1d 序列短（30），用小 CNN 即可，避免過度容量/過擬合
@@ -62,7 +62,7 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
     結構：
     - 5m 分支（較深）：Conv1d -> Conv1d -> Conv1d -> GAP -> Linear -> emb_5m
     - 1d 分支（小 CNN）：Conv1d -> Conv1d -> GAP -> Linear -> emb_1d
-    - 向量分支（MLP）：concat(account/time/rhythm/cost) -> MLP -> emb_vec
+    - 向量分支（MLP）：concat(account/cost) -> MLP -> emb_vec
     - 融合：concat(emb_5m, emb_1d, emb_vec) -> Linear -> out_dim
     """
 
@@ -90,7 +90,7 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
 
         # 向量分支輸入維度（把所有向量 state 串起來）
         vdim = 0
-        for k in ("account_state", "time_state", "rhythm_state", "cost_state"):
+        for k in ("account_state", "cost_state"):
             shp = observation_space.spaces[k].shape
             if shp is None or len(shp) != 1:
                 raise ValueError(f"{k} 必須是 1D 向量 spaces.Box")
@@ -162,8 +162,6 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
         v = torch.cat(
             [
                 obs["account_state"],
-                obs["time_state"],
-                obs["rhythm_state"],
                 obs["cost_state"],
             ],
             dim=1,
