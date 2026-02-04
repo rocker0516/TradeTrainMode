@@ -118,7 +118,7 @@ def test_observer_observation_shapes(make_synth_market) -> None:
     assert out["account_state"].shape == (31,)  # 27 + trend_direction, trend_strength, position_trend_alignment, regime_choppy
     assert out["time_state"].shape == (7,)
     assert out["rhythm_state"].shape == (2,)
-    assert out["cost_state"].shape == (27,)
+    assert out["cost_state"].shape == (29,)  # 27 原有 + trade_freq_ratio, trade_freq_cooldown
     # dtype 必須與 observation_space 一致（預設 float16）
     assert out["price_seq"].dtype == obs.observation_space["price_seq"].dtype
     assert out["account_state"].dtype == obs.observation_space["account_state"].dtype

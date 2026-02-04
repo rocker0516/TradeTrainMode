@@ -6,6 +6,18 @@ from typing import Any, Dict
 import numpy as np
 
 # =============================================================================
+# 各成本線「尺度」調整位置一覽
+# =============================================================================
+# 通道           | 輸出範圍        | 尺度調整位置
+# ----------------|-----------------|---------------------------------------------
+# risk (death)    | c_risk ∈ [0,1]  | 無倍率；Lagrangian limit → Train/train_config.RISK_COST_LIMIT
+# sl_event        | c_stop_event    | 單次事件成本 → Env/config.Config.STOP_LOSS_EVENT_COST (0~1)
+# fric            | [0,FREQ_COST_SCALE] | 本檔下方 FREQ_COST_SCALE；limit → train_config.FRIC_COST_LIMIT
+# sl_buf          | [0,1]           | 敏感度 → Env/config STOP_BUFFER_D_MIN, STOP_BUFFER_D_SCALE；limit → train_config.SL_BUF_COST_LIMIT
+# trade_freq      | [0,TRADE_FREQ_COST_SCALE] | 本檔下方 TRADE_FREQ_COST_SCALE；limit → train_config.TRADE_FREQ_COST_LIMIT
+# =============================================================================
+
+# =============================================================================
 # Freq 通道常數（控制 cost_fric：約束「調倉幅度」的用法，與手續費脫鉤）
 # turnover_t = |pos_t - pos_prev|（每步持倉變動 0~2）；tau/scale 由近期 turnover 分布估計
 # =============================================================================
@@ -22,7 +34,7 @@ FREQ_BUFFER_MIN_SAMPLES = 288
 # 作用：門檻——小於/大於 tau 決定是否被罰（依 FREQ_PENALIZE_SMALL_TRADES）
 # 調大（例 0.6）：tau 變大 → 懲罰小改倉時「小」的範圍變寬；懲罰大改倉時「大」的門檻變高，整體 cost 易降
 # 調小（例 0.4）：tau 變小 → 更多步被算進懲罰區，整體 cost 易升
-FREQ_TAU_QUANTILE = 0.3
+FREQ_TAU_QUANTILE = 0.5
 
 # scale 用分位數：scale = q90(turnover) - tau（僅在 FREQ_PENALIZE_SMALL_TRADES=False 時用）
 # 作用：turnover > tau 時 cost = (turnover_t - tau)/scale，scale 愈大 cost 上升愈慢
@@ -44,7 +56,8 @@ FREQ_EPS = 1e-12
 # 輸出縮放：cost_fric = (0~1 的 c_freq_raw) × FREQ_COST_SCALE，故 cost_fric ∈ [0, FREQ_COST_SCALE]
 # 調大：整條 fric 尺度變大，若 FRIC_COST_LIMIT 不變則易 violation、λ 易升
 # 調小：整條 fric 尺度變小，須同步把 Train/train_config 的 FRIC_COST_LIMIT 改為「原意每步上限 × FREQ_COST_SCALE」
-FREQ_COST_SCALE: float = 0.001
+# 注意：FREQ_COST_SCALE=0.001 時，fric 僅在 0<turnover<tau 時非零，且單步上限 0.001，故「avg fric≈0」屬正常。
+FREQ_COST_SCALE: float = 0.01
 
 # 懲罰方向（二選一）：
 # True   → 懲罰「小於 tau」的 turnover：0 < turnover < tau 才罰，不改倉(0)不罰、≥ tau 不罰
@@ -55,11 +68,14 @@ FREQ_PENALIZE_SMALL_TRADES: bool = True
 
 # =============================================================================
 # 交易頻率通道常數（cost_trade_freq：約束「有交易的步數比例」，與 fric 型態約束區分）
-# cost_trade_freq = 近期 W 步內「有發生調倉」的步數 / W，即 rolling ratio ∈ [0, 1]
+# raw_ratio = 近期 W 步內「有發生調倉」的步數 / W ∈ [0, 1]
+# cost_trade_freq = raw_ratio × TRADE_FREQ_COST_SCALE，與 fric 同尺度，避免總 cost 被單一通道主導。
 # Fric 約束「調倉幅度型態」；本線約束「有交易的步數比例」。同一筆交易會同時影響兩者，語意不同。
 # =============================================================================
 TRADE_FREQ_WINDOW_SIZE: int = 288
-TRADE_FREQ_MIN_SAMPLES: int = 288 / 4 # 288 / 4 = 72 筆資料
+TRADE_FREQ_MIN_SAMPLES: int = 288 / 10  # 288 / 10 = 28.8 筆資料
+# 輸出縮放：與 FREQ_COST_SCALE 一致，cost_trade_freq ∈ [0, TRADE_FREQ_COST_SCALE]；limit 需用同一尺度（例 10% ratio → 0.1*0.001=0.0001）
+TRADE_FREQ_COST_SCALE: float = 0.1
 
 
 @dataclass(frozen=True)
@@ -90,18 +106,21 @@ class CostCalculator:
 
     def __init__(self, weights: CostWeights | None = None) -> None:
         self.weights = weights or CostWeights()
-        self._turnover_buffer: deque[float] = deque(maxlen=FREQ_BUFFER_SIZE)
+        self._turnover_arr = np.zeros(FREQ_BUFFER_SIZE, dtype=np.float64)
+        self._turnover_pos = 0
+        self._turnover_len = 0
+        self._turnover_idx = np.arange(FREQ_BUFFER_SIZE, dtype=np.intp)
         self._traded_buffer: deque[float] = deque(maxlen=TRADE_FREQ_WINDOW_SIZE)
 
     def reset(self) -> None:
         """Episode 重置時清空 turnover / traded 緩衝，下個 episode 重新累積。"""
-        self._turnover_buffer.clear()
+        self._turnover_pos = 0
+        self._turnover_len = 0
         self._traded_buffer.clear()
 
     def get_trade_freq_ratio(self) -> float:
         """
         回傳視窗內「有交易」步數比例（不修改 buffer）。
-        在每步執行前呼叫時，buffer 只含之前步數，故為「到上一步為止」的滾動比例。
         """
         if len(self._traded_buffer) >= TRADE_FREQ_MIN_SAMPLES:
             return float(np.mean(self._traded_buffer))
@@ -114,6 +133,18 @@ class CostCalculator:
     def get_trade_freq_window_len(self) -> int:
         """視窗當前長度（未滿時為實際累積步數）。"""
         return len(self._traded_buffer)
+
+    def get_trade_freq_stats(self) -> tuple[float, int, int]:
+        """
+        單次遍歷視窗回傳 (ratio, trade_count, window_len)，避免 step 熱路徑重複遍歷 buffer。
+        """
+        n = len(self._traded_buffer)
+        if n == 0:
+            return 0.0, 0, 0
+        total = sum(self._traded_buffer)
+        count = int(total)
+        ratio = float(total / n) if n >= TRADE_FREQ_MIN_SAMPLES else 0.0
+        return ratio, count, n
 
     def compute(
         self,
@@ -192,9 +223,13 @@ class CostCalculator:
             pos_t_f = float(pos_t)
             pos_prev_f = float(pos_prev)
             turnover_t = float(np.clip(abs(pos_t_f - pos_prev_f), 0.0, 2.0))
-            self._turnover_buffer.append(turnover_t)
-            buf = np.array(self._turnover_buffer, dtype=float)
-            if len(buf) >= FREQ_BUFFER_MIN_SAMPLES:
+            self._turnover_arr[self._turnover_pos] = turnover_t
+            self._turnover_pos = (self._turnover_pos + 1) % FREQ_BUFFER_SIZE
+            self._turnover_len = min(self._turnover_len + 1, FREQ_BUFFER_SIZE)
+            if self._turnover_len >= FREQ_BUFFER_MIN_SAMPLES:
+                start = (self._turnover_pos - self._turnover_len) % FREQ_BUFFER_SIZE
+                idx = (start + self._turnover_idx[: self._turnover_len]) % FREQ_BUFFER_SIZE
+                buf = self._turnover_arr[idx]
                 tau = float(np.quantile(buf, FREQ_TAU_QUANTILE))
                 q90 = float(np.quantile(buf, FREQ_SCALE_QUANTILE))
                 scale = max(q90 - tau, FREQ_EPS)
@@ -247,11 +282,12 @@ class CostCalculator:
         # channel 值：若缺 SL，直接視為最大不安全；否則使用 buffer 公式
         c_sl_buf = max(sl_buf_cost, stop_missing_cost)
 
-        # 4. 交易頻率通道 (c_trade_freq)：近期步數中「有發生調倉」的步數比率 ∈ [0, 1]
+        # 4. 交易頻率通道 (c_trade_freq)：近期步數中「有發生調倉」的步數比率，乘 SCALE 與 fric 同尺度
         traded = bool(kwargs.get("traded", False))
         self._traded_buffer.append(1.0 if traded else 0.0)
         if len(self._traded_buffer) >= TRADE_FREQ_MIN_SAMPLES:
-            c_trade_freq = float(np.mean(self._traded_buffer))
+            raw_ratio = float(np.mean(self._traded_buffer))
+            c_trade_freq = raw_ratio * TRADE_FREQ_COST_SCALE
         else:
             c_trade_freq = 0.0
 

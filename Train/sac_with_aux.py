@@ -18,8 +18,11 @@ from stable_baselines3.sac.sac import SAC
 from Train.optimized_dict_replay_buffer import DictReplayBufferSamplesWithAux
 
 
-# 報酬符號對應類別：負 -> 0，近零 -> 1，正 -> 2
+# 報酬符號對應類別：負 -> 0，近零 -> 1，正 -> 2（與 equity 報酬方向一致：漲=賺、跌=虧）
 _THRESH = 1e-6
+
+# 供 TensorBoard / 除錯：類別對應關係
+AUX_CLASS_NAMES = ("down", "flat", "up")  # 0, 1, 2
 
 
 def _step_log_return_to_class(step_log_returns: th.Tensor) -> th.Tensor:
@@ -56,6 +59,11 @@ class SACWithAuxiliaryLoss(SAC):
         ent_coef_losses, ent_coefs = [], []
         actor_losses, critic_losses = [], []
         aux_losses_list: list[float] = []
+        aux_n_pos_list: list[float] = []  # 診斷：每個 batch 有持倉樣本數
+        aux_has_data_count = 0  # 診斷：有 aux 資料的 step 數
+        aux_acc_list: list[float] = []  # 方向驗證：預測類別 vs 目標類別準確率
+        aux_target_frac_sum: list[float] = [0.0, 0.0, 0.0]  # 目標類別 0/1/2 累計比例
+        aux_target_count = 0
 
         for gradient_step in range(gradient_steps):
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
@@ -102,7 +110,7 @@ class SACWithAuxiliaryLoss(SAC):
             actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
             actor_losses.append(actor_loss.item())
 
-            # Auxiliary loss：僅在有持倉的樣本上預測「下一步報酬符號」
+            # Auxiliary loss：預測「下一步報酬符號」；有持倉時僅在有持倉樣本上算 loss，否則用全 batch 避免恆為 0
             step_log_returns = getattr(replay_data, "step_log_returns", None)
             has_positions = getattr(replay_data, "has_positions", None)
             if (
@@ -110,15 +118,31 @@ class SACWithAuxiliaryLoss(SAC):
                 and has_positions is not None
                 and hasattr(self.policy.features_extractor, "forward_with_aux")
             ):
+                aux_has_data_count += 1
                 _, aux_logits = self.policy.features_extractor.forward_with_aux(replay_data.observations)
                 target_class = _step_log_return_to_class(step_log_returns)
                 mask = (has_positions.view(-1) > 0.5).float()
                 n_pos = mask.sum().item()
+                aux_n_pos_list.append(float(n_pos))
+
+                aux_loss_per_sample = F.cross_entropy(aux_logits, target_class, reduction="none")
                 if n_pos > 0:
-                    aux_loss = F.cross_entropy(aux_logits, target_class, reduction="none")
-                    aux_loss = (aux_loss * mask).sum() / (mask.sum() + 1e-8)
-                    actor_loss = actor_loss + self.aux_coef * aux_loss
-                    aux_losses_list.append(aux_loss.item())
+                    aux_loss = (aux_loss_per_sample * mask).sum() / (mask.sum() + 1e-8)
+                else:
+                    # 無持倉樣本時用全 batch 平均，讓 aux 頭有梯度且 log 不恆為 0
+                    aux_loss = aux_loss_per_sample.mean()
+                actor_loss = actor_loss + self.aux_coef * aux_loss
+                aux_losses_list.append(aux_loss.item())
+
+                # 方向驗證：預測 vs 目標準確率、目標類別分佈（確認 0=跌/1=平/2=漲 對齊）
+                with th.no_grad():
+                    pred_class = aux_logits.argmax(dim=-1)
+                    acc = (pred_class == target_class).float().mean().item()
+                    aux_acc_list.append(acc)
+                    n = target_class.shape[0]
+                    for k in range(3):
+                        aux_target_frac_sum[k] += (target_class == k).float().sum().item()
+                    aux_target_count += n
 
             self.actor.optimizer.zero_grad()
             actor_loss.backward()
@@ -135,8 +159,24 @@ class SACWithAuxiliaryLoss(SAC):
         self.logger.record("train/critic_loss", np.mean(critic_losses))
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
-        # 一律寫入，方便 TensorBoard 顯示；無持倉樣本時記 0.0
+        # 一律寫入；有 aux 資料時必有一筆 loss（有持倉用 mask，無持倉用全 batch）
         self.logger.record(
             "train/aux_return_sign_loss",
             np.mean(aux_losses_list) if len(aux_losses_list) > 0 else 0.0,
         )
+        # 一律寫入，讓 TensorBoard 一定看得到（無 aux 資料時為 0）
+        self.logger.record(
+            "train/aux_batch_n_pos",
+            np.mean(aux_n_pos_list) if len(aux_n_pos_list) > 0 else 0.0,
+        )
+        self.logger.record(
+            "train/aux_has_data_ratio",
+            float(aux_has_data_count) / float(gradient_steps) if gradient_steps > 0 else 0.0,
+        )
+        # 方向驗證：準確率 > 1/3 表示有學到方向；目標分佈可確認標籤 0=跌/1=平/2=漲 是否合理
+        if len(aux_acc_list) > 0:
+            self.logger.record("train/aux_accuracy", np.mean(aux_acc_list))
+        if aux_target_count > 0:
+            total = float(aux_target_count)
+            for k, name in enumerate(AUX_CLASS_NAMES):
+                self.logger.record(f"train/aux_target_frac_{name}", aux_target_frac_sum[k] / total)

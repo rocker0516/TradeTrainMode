@@ -111,7 +111,7 @@ def main() -> None:
     parser.add_argument("--fric_cost_limit", type=float, default=TrainConfig.FRIC_COST_LIMIT, help="freq channel cost limit per step (c_freq 0~1), suggest 0.05~0.20")
     parser.add_argument("--sl_buf_cost_limit", type=float, default=TrainConfig.SL_BUF_COST_LIMIT, help="sl_buf cost limit per step (stop buffer, 0~1)")
     parser.add_argument("--sl_event_cost_limit", type=float, default=TrainConfig.SL_EVENT_COST_LIMIT, help="sl_event cost limit per step (stop loss event)")
-    parser.add_argument("--trade_freq_cost_limit", type=float, default=TrainConfig.TRADE_FREQ_COST_LIMIT, help="trade_freq cost limit (rolling ratio of steps with trade, 0~1)")
+    parser.add_argument("--trade_freq_cost_limit", type=float, default=TrainConfig.TRADE_FREQ_COST_LIMIT, help="trade_freq cost limit per step (scaled 0~0.001; 0.0001 = 10%% ratio)")
     parser.add_argument("--device", type=str, default=TrainConfig.DEVICE)
     parser.add_argument("--log_every_episodes", type=int, default=TrainConfig.LOG_EVERY_EPISODES, help="每 N 回合輸出交易統計")
     parser.add_argument("--update_lambda_every_steps", type=int, default=TrainConfig.UPDATE_LAMBDA_EVERY_STEPS, help="每 N steps 更新一次 lambda")

@@ -42,7 +42,7 @@ def _make_minimal_obs() -> dict:
         "account_state": np.zeros((31,), dtype=np.float32),
         "time_state": np.zeros((7,), dtype=np.float32),
         "rhythm_state": np.zeros((2,), dtype=np.float32),
-        "cost_state": np.zeros((27,), dtype=np.float32),
+        "cost_state": np.zeros((29,), dtype=np.float32),
     }
 
 

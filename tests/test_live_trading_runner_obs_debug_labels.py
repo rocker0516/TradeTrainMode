@@ -10,7 +10,7 @@ def test_print_account_and_context_obs_accepts_expected_shapes(capsys):  # type:
         "account_state": np.zeros((31,), dtype=np.float32),
         "time_state": np.zeros((7,), dtype=np.float32),
         "rhythm_state": np.zeros((2,), dtype=np.float32),
-        "cost_state": np.zeros((27,), dtype=np.float32),
+        "cost_state": np.zeros((29,), dtype=np.float32),
     }
     _print_account_and_context_obs(obs)
     out = capsys.readouterr().out
@@ -26,7 +26,7 @@ def test_build_account_and_context_obs_named_has_expected_keys() -> None:
         "account_state": np.zeros((31,), dtype=np.float32),
         "time_state": np.zeros((7,), dtype=np.float32),
         "rhythm_state": np.zeros((2,), dtype=np.float32),
-        "cost_state": np.zeros((27,), dtype=np.float32),
+        "cost_state": np.zeros((29,), dtype=np.float32),
     }
     named = _build_account_and_context_obs_named(obs)
     assert set(named.keys()) == {"account_state", "time_state", "rhythm_state", "cost_state"}

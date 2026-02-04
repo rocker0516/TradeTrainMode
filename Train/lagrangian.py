@@ -298,6 +298,8 @@ class MultiSharedLagrangianController:
         if not channel_configs:
             raise ValueError("channel_configs must not be empty.")
         self.channel_configs: Dict[str, LagrangianChannelConfig] = dict(channel_configs)
+        # 使用 multiprocessing.Value 使 λ 在 SubprocVecEnv 子進程間共享；主進程 update() 寫入後，
+        # 子進程直接讀 current_lambdas 即可，無需 callback 每步 env_method 同步（避免 IPC 瓶頸）。
         self._lambda_vals: Dict[str, multiprocessing.Value] = {
             k: multiprocessing.Value("d", float(cfg.lambda_init))
             for k, cfg in self.channel_configs.items()
@@ -419,8 +421,8 @@ class LagrangianRewardWrapper(gym.Wrapper):
 
         # --- multi-lambda path ---
         if isinstance(self.controller, MultiSharedLagrangianController):
-            # 優先使用 callback 同步過來的 λ（避免子進程讀到的 shared 值不同步）
-            lams = self._synced_lambdas if self._synced_lambdas is not None else self.controller.current_lambdas
+            # 直接讀取 controller 的 multiprocessing.Value（跨進程共享），不再依賴 callback 的 env_method 同步
+            lams = self.controller.current_lambdas
             channel_costs = {
                 k: float(info.get(f"cost_{k}", 0.0))
                 for k in self.controller.channel_configs.keys()
@@ -617,15 +619,7 @@ class LagrangianCallback(BaseCallback):
                         avg_c - float(self.controller.channel_configs[k].cost_limit),
                     )
 
-                # --- Sync lambdas to sub-process envs (Route B) ---
-                # SubprocVecEnv（spawn）下，子進程可能讀不到主進程更新後的 shared λ；
-                # 這裡用 VecEnv.env_method 明確同步到每個 LagrangianRewardWrapper。
-                try:
-                    if getattr(self, "training_env", None) is not None:
-                        self.training_env.env_method("set_lagrangian_lambdas", dict(new_lams))
-                except Exception:
-                    # 同步失敗不應中斷訓練（例如 unit test 沒有 vec env）
-                    pass
+                # λ 已寫入 controller 的 multiprocessing.Value，子進程直接讀 current_lambdas，不再做 env_method 同步（根本消除 IPC 瓶頸）
             else:
                 if len(self.cost_buffer) > 0:
                     avg_cost = np.mean(self.cost_buffer)
@@ -637,13 +631,6 @@ class LagrangianCallback(BaseCallback):
                     self.logger.record("lagrangian/avg_cost_step", avg_cost)
                     self.logger.record("lagrangian/avg_cost", avg_cost)
                     self.logger.record("lagrangian/cost_violation", avg_cost - self.controller.cost_limit)
-
-                    # --- Sync single lambda to sub-process envs (Route B) ---
-                    try:
-                        if getattr(self, "training_env", None) is not None:
-                            self.training_env.env_method("set_lagrangian_lambda", float(new_lambda))
-                    except Exception:
-                        pass
 
         # 4. 定期顯示統計 (每 log_freq 回合)
         # 檢查是否累積了足夠的新回合
@@ -913,7 +900,10 @@ class LagrangianCallback(BaseCallback):
         print(f"  Avg Long Close Count        : {avg_long_closes:8.2f}  (full or partial close events)")
         print(f"  Avg Short Close Count       : {avg_short_closes:8.2f}")
         print(f"  Avg Holding Steps           : {avg_holding_steps:8.2f}  (steps with position)")
+        # 交易步數比例 = 有調倉的步數/總步數；常卡在 ~28–30% 因 trade_freq 硬限制(0.4)與解除門檻(0.08)形成區間
+        trades_per_step_ratio = (avg_trade_count / avg_episode_len * 100.0) if avg_episode_len > 0 else 0.0
         print(f"  Avg Steps With Trade        : {avg_trade_count:8.2f}  (steps where position changed)")
+        print(f"  Trades/Step Ratio           : {trades_per_step_ratio:5.1f} %  (bounded by trade_freq hard limit ~40%% / recovery ~8%%)")
         print("  --- Exit Mix ---")
         print(f"  Avg Active Exit Count       : {avg_active_exits:8.2f} ({active_exit_rate_pct:5.1f}%)")
         print(f"  Avg Stop Loss Count         : {avg_stop_loss:8.2f} ({stop_loss_rate_pct:5.1f}%)")

@@ -309,6 +309,8 @@ def _named_vector_specs() -> Dict[str, List[str]]:
             "last_final_pos_pct",
             "executed_pos_pct",
             "trade_executed_flag",
+            "trade_freq_ratio",
+            "trade_freq_cooldown",
         ],
     }
 

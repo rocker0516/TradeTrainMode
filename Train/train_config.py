@@ -23,10 +23,11 @@ class TrainConfig:
     # - 注意：Gym observation_space 必須固定 shape，因此這裡用「固定清單」，而不是隨 Data 目錄動態增減。
     FEATURE_SYMBOLS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "1000PEPEUSDT")
     TOTAL_TIMESTEPS: int = 100_000_000
-    N_ENVS: int = 64
+    N_ENVS: int = 8 * 8
     DEVICE: str = "auto"  # "cuda" / "cpu" / "auto"
 
     # ---- Lagrangian / 約束 ----
+    # 各成本線「尺度」在 Env/Costs/cost.py 頂部註解；此處為「每步平均 cost 上限」(limit)。
     # 新版 Cost 已正規化為 Cost/Equity。
     # 建議值 0.0005 (5bps) 代表容許每步平均損耗 0.05% 的權益 (含手續費與死亡風險攤提)
     COST_LIMIT: float = 0.01
@@ -35,16 +36,19 @@ class TrainConfig:
     RISK_COST_LIMIT: float = 0.00 # 0.000005 代表 0.0005% 死亡風險(容許極小風險)
     # Freq 通道：cost_fric 已乘 Env/Costs/cost.py 的 FREQ_COST_SCALE (0.3)，尺度 [0, 0.3]
     # 此 limit 應為「原意每步上限 × FREQ_COST_SCALE」，例如 0.1 × 0.3 = 0.03
-    FRIC_COST_LIMIT: float = 0.00005  # 每步平均 cost_fric 上限（對應縮放前 0.1）
+    FRIC_COST_LIMIT: float = 0.0005  # 每步平均 cost_fric 上限（對應縮放前 0.1）
     # Stop-Buffer Cost（0~1）：建議先設很小的平均步成本上限，因為「接近止損」應該是短暫狀態
     SL_BUF_COST_LIMIT: float = 0.1 # 0.1：代表允許每步平均止損緩衝成本佔權益 10%
     # Stop-Loss Event Cost（事件型）：當步觸發止損時才會出現的成本（獨立成本線，不歸類到 risk）。
     SL_EVENT_COST_LIMIT: float = 0.002 # 0.01：代表允許每步平均止損事件成本佔權益 1%
-    # 交易頻率成本：近期步數中「有發生調倉」的步數比率上限（與 cost_trade_freq 口徑一致，建議 0.2 = 20%）
-    TRADE_FREQ_COST_LIMIT: float = 0.1
+    # 交易頻率成本：與 cost.py 的 TRADE_FREQ_COST_SCALE (0.1) 同尺度；cost_trade_freq = ratio×0.1 ∈ [0,0.1]
+    # limit=0.01 表示希望「每步平均」cost_trade_freq ≤ 0.01（即視窗內約 10% 步數有交易）。agent 需能「看到」obs 中的 trade_freq_ratio 才能學習降頻。
+    TRADE_FREQ_COST_LIMIT: float = 0.01
+
     # 交易頻率硬限制（與 cost 同視窗）：超過此比例強制冷卻；解除門檻 = HARD_LIMIT * RECOVERY_RATIO
-    TRADE_FREQ_HARD_LIMIT: float = 0.4 # 288 * 0.4 =  115 步
-    TRADE_FREQ_RECOVERY_RATIO: float = 0.5
+    # 因此 Avg Steps With Trade 常落在 (0.08~0.4)*episode_len，約 28–30% → 看起來像卡在 ~3600（episode≈12k 時）
+    TRADE_FREQ_HARD_LIMIT: float = 0.4   # 視窗內有交易步數比例上限（> 此值即強制冷卻）0.4 = 0.4 *288 = 115 步
+    TRADE_FREQ_RECOVERY_RATIO: float = 0.2  # 解除冷卻門檻 = HARD_LIMIT * 此值（例 0.4*0.2=0.08）0.2 = 0.2 *288 = 57 步
 
     # ---- Lagrangian λ 調教（P-Control）----
     # 詳見 docs/lambda_tuning_optimization.md
@@ -67,7 +71,7 @@ class TrainConfig:
 
     # ---- SB3 SAC 超參數 ----
     LEARNING_RATE: float = 2e-5
-    BUFFER_SIZE: int = 1_600_000
+    BUFFER_SIZE: int = 1_200_000
     BATCH_SIZE: int = 256 # 512 / 1_500_000 = 0.034% 
     ENT_COEF: str = "auto"
     TRAIN_FREQ: int = 1 # 1 代表每次更新參數時，只用一個 batch 的資料
@@ -87,7 +91,7 @@ class TrainConfig:
     # ---- Wrapper（動作平滑/重複）----
     # 訓練時建議用「更強的降頻/降換手」設定，否則手續費與 turnover 會把主線 log-return 磨成長期負值。
     # 這些會由 Train/run_sac_lag.py 以 CLI 參數覆寫（不必動 Env/config.py 的全域預設）。
-    ACTION_REPEAT: int = 6 # 5 代表 5 步一決策
+    ACTION_REPEAT: int = 1 # 5 代表 5 步一決策
     # 作用：訓練入口 `Train/run_sac_lag.py` 會用這個值建立 `ActionClipWrapper`，
     # 用來限制 agent 的「目標持倉百分比」在 [-MAX_POSITION_PCT, +MAX_POSITION_PCT]。
     # 優先順序：在 run_sac_lag 訓練流程中，此值會「覆蓋」Env.config.Config.MAX_POSITION_PCT（因為此處是顯式傳參）。
@@ -104,7 +108,7 @@ class TrainConfig:
     NO_TRADE_EXIT_THRESHOLD: float = 0.1
 
     # ---- 環境參數 ----
-    WINDOW_SIZE_5M: int = 288
+    WINDOW_SIZE_5M: int = 288 / 24
     WINDOW_SIZE_1D: int = 14
 
     # ---- 資料切分（Train/Eval 分離）----

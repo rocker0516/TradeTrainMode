@@ -221,6 +221,15 @@ class TradingEnvironment(gym.Env):
         # CostCalculator 現在不再需要 weights (已內建正規化公式)，這裡維持空建構
         self.cost_calculator = CostCalculator()
 
+        # 快取 step 熱路徑用到的 Config，避免每步 getattr
+        self._config_stop_loss_cooldown_steps = int(getattr(Config, "STOP_LOSS_COOLDOWN_STEPS", 0) or 0)
+        self._config_stop_loss_event_cost = float(getattr(Config, "STOP_LOSS_EVENT_COST", 0.0))
+        self._config_stop_buffer_d_min = float(getattr(Config, "STOP_BUFFER_D_MIN", 0.3))
+        self._config_stop_buffer_d_scale = float(getattr(Config, "STOP_BUFFER_D_SCALE", 0.3))
+
+        # 預分配 cooldown 用 hold action，避免每步 np.array 分配
+        self._hold_buf = np.zeros(1, dtype=np.float32)
+
         # Runtime State
         self.current_step = 0
         self.episode_steps = 0
@@ -660,6 +669,9 @@ class TradingEnvironment(gym.Env):
             'fee_limit_ratio': self.fee_limit_ratio,
             'fee_limit_enabled': self.fee_limit_enabled,
             'last_step_log_return': float(self._last_step_log_return),
+            # 交易頻率：供 agent 學習「高 ratio 時少交易」以降低 cost_trade_freq 懲罰
+            'trade_freq_ratio': float(getattr(self, '_step_trade_freq_ratio', 0.0)),
+            'trade_freq_cooldown': 1.0 if getattr(self, '_trade_freq_cooldown', False) else 0.0,
         }
         
         return self.observer.get_observation(
@@ -868,13 +880,17 @@ class TradingEnvironment(gym.Env):
             (float(self.executor.position.size) * current_price) / max_cap
         )
         current_pos_pct = float(np.clip(current_pos_pct, -1.0, 1.0))
-        hold = np.array([current_pos_pct], dtype=np.float32)
+        self._hold_buf[0] = current_pos_pct
+
+        ratio, w_count, w_len = self.cost_calculator.get_trade_freq_stats()
+        self._step_trade_freq_ratio = ratio
+        self._step_trade_freq_window_count = w_count
+        self._step_trade_freq_window_len = w_len
 
         if self.stop_loss_cooldown > 0:
             self.stop_loss_cooldown -= 1
-            return hold
+            return self._hold_buf
 
-        ratio = self.cost_calculator.get_trade_freq_ratio()
         limit = self.trade_freq_hard_limit
         recovery = self.trade_freq_recovery_ratio
         threshold = limit * recovery
@@ -883,10 +899,10 @@ class TradingEnvironment(gym.Env):
             if ratio <= threshold:
                 self._trade_freq_cooldown = False
                 return action
-            return hold
+            return self._hold_buf
         if ratio > limit:
             self._trade_freq_cooldown = True
-            return hold
+            return self._hold_buf
         return action
 
     def _process_action_and_execute(
@@ -1129,8 +1145,8 @@ class TradingEnvironment(gym.Env):
         stop_loss_triggered = bool(self.executor.stop_loss_triggered)
         if stop_loss_triggered:
             self.episode_stop_loss_count += 1
-            if getattr(Config, "STOP_LOSS_COOLDOWN_STEPS", 0) > 0:
-                self.stop_loss_cooldown = int(Config.STOP_LOSS_COOLDOWN_STEPS)
+            if self._config_stop_loss_cooldown_steps > 0:
+                self.stop_loss_cooldown = self._config_stop_loss_cooldown_steps
 
         liq_triggered = bool(self.executor.liq_triggered)
         if liq_triggered:
@@ -1152,10 +1168,6 @@ class TradingEnvironment(gym.Env):
         # 2. 統整冷卻（止損 + 交易頻率硬限制）後再執行
         orig_action = np.array(action, dtype=np.float32, copy=True)
         action = self._apply_cooldown(action, last_equity, prices.current_price)
-        # 存下本步執行前的 trade_freq 視窗數據（供 info；compute() 尚未 append 本步）
-        self._step_trade_freq_ratio = self.cost_calculator.get_trade_freq_ratio()
-        self._step_trade_freq_window_count = self.cost_calculator.get_trade_freq_window_trade_count()
-        self._step_trade_freq_window_len = self.cost_calculator.get_trade_freq_window_len()
         final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, _ = self._process_action_and_execute(
             action=action,
             last_equity=last_equity,
@@ -1194,12 +1206,6 @@ class TradingEnvironment(gym.Env):
             new_equity=new_equity,
             new_size=new_size,
         )
-        # Add-only friction fee（排除減倉/平倉；翻倉只算新方向開倉）
-        step_fee_add_only = self._estimate_add_only_fee(
-            prev_size=float(prev_size),
-            new_size=float(new_size),
-            current_price=float(prices.current_price),
-        )
         # Episode metrics: turnover / holding / trade count
         try:
             turnover_notional_change = float(position_change) * float(prices.current_price)
@@ -1222,12 +1228,8 @@ class TradingEnvironment(gym.Env):
         # traded flag（供下一個 observation 使用）
         self._last_action_effects["trade_executed_flag"] = 1.0 if bool(traded) else 0.0
         # cooldown remaining norm（供下一個 observation 使用）
-        try:
-            cd = float(getattr(self, "stop_loss_cooldown", 0) or 0)
-            cd_max = float(max(1, int(getattr(Config, "STOP_LOSS_COOLDOWN_STEPS", 0) or 0)))
-            self._last_action_effects["cooldown_remaining_norm"] = float(np.clip(cd / cd_max, 0.0, 1.0))
-        except (TypeError, ValueError):
-            self._last_action_effects["cooldown_remaining_norm"] = 0.0
+        cd_max = max(1, self._config_stop_loss_cooldown_steps)
+        self._last_action_effects["cooldown_remaining_norm"] = float(np.clip(self.stop_loss_cooldown / cd_max, 0.0, 1.0))
         # Episode metrics: 主動出場次數（平倉到 0 且非 stop loss / liq）
         try:
             closed_to_flat = (abs(prev_size) > 1e-8) and (abs(float(new_size)) <= 1e-8)
@@ -1311,13 +1313,13 @@ class TradingEnvironment(gym.Env):
             current_dd=float(current_dd),
             risk_signals=risk_post,
             stop_loss_triggered=bool(stop_loss_triggered),
-            stop_loss_event_cost=float(getattr(Config, "STOP_LOSS_EVENT_COST", 0.0)),
+            stop_loss_event_cost=self._config_stop_loss_event_cost,
             has_position=bool(abs(float(new_size)) > 1e-8),
             current_price=float(prices.current_price),
             stop_loss_price=float(getattr(self.executor.position, "stop_loss_price", 0.0) or 0.0),
             atr=float(prices.atr_est),
-            stop_buffer_d_min=float(getattr(Config, "STOP_BUFFER_D_MIN", 0.3)),
-            stop_buffer_d_scale=float(getattr(Config, "STOP_BUFFER_D_SCALE", 0.3)),
+            stop_buffer_d_min=self._config_stop_buffer_d_min,
+            stop_buffer_d_scale=self._config_stop_buffer_d_scale,
         )
         self._prev_executed_pos_pct = executed_pos_pct
 

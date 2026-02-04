@@ -72,10 +72,11 @@ class TradingObserver:
         return {
             'time_state': spaces.Box(low=-np.inf, high=np.inf, shape=(7,), dtype=self.obs_dtype),
             'rhythm_state': spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=self.obs_dtype),
-            # cost_state (27):
+            # cost_state (29):
             # 0~18: 原有成本/風險/預測效果特徵
-            # 19~26: 行為「偏差揭露」特徵（讓 agent 知道 raw action 是否被覆寫/限幅/未成交）
-            'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(27,), dtype=self.obs_dtype)
+            # 19~26: 行為「偏差揭露」特徵
+            # 27~28: 交易頻率（讓 agent 能學習「高 ratio 時少交易」以降低 trade_freq 懲罰）
+            'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(29,), dtype=self.obs_dtype)
         }
 
     def compute_risk_signals(
@@ -418,8 +419,8 @@ class TradingObserver:
         rv_ratio = float(market_data.rv_ratio_arr[step_idx]) if step_idx < len(market_data.rv_ratio_arr) else 0.0
         rhythm_state[1] = float(np.clip(rv_ratio, 0.0, 10.0))
         
-        # --- Cost State (27) ---
-        cost_state = np.zeros(27, dtype=self.obs_dtype)
+        # --- Cost State (29) ---
+        cost_state = np.zeros(29, dtype=self.obs_dtype)
         last_step_fee = account_metrics.get('last_step_fee', 0.0)
         rolling_fee_sum = account_metrics.get('rolling_fee_sum', 0.0)
         fee_limit_ratio = account_metrics.get('fee_limit_ratio', 1.0)
@@ -523,7 +524,11 @@ class TradingObserver:
         cost_state[25] = float(np.clip(executed_pos_pct, -1.0, 1.0))
         # 26) trade_executed_flag: 本步是否真的成交/改變持倉（0/1；由 env 計算後注入）
         cost_state[26] = float(effects.get("trade_executed_flag", 0.0))
-        
+        # 27) trade_freq_ratio: 近期視窗內「有交易」步數比例（0~1），供 agent 學習降低頻率
+        cost_state[27] = float(np.clip(account_metrics.get("trade_freq_ratio", 0.0), 0.0, 1.0))
+        # 28) trade_freq_cooldown: 是否因超過硬限制而強制冷卻（0/1）
+        cost_state[28] = float(account_metrics.get("trade_freq_cooldown", 0.0))
+
         return {
             'time_state': time_state,
             'rhythm_state': rhythm_state,
