@@ -253,9 +253,7 @@ class TradingObserver:
         holding_steps = account_metrics['holding_steps']
         cooldown_remaining = account_metrics.get('cooldown_remaining', 0.0)
         rolling_fee_sum = account_metrics.get('rolling_fee_sum', 0.0)
-        fee_limit_ratio = account_metrics.get('fee_limit_ratio', 0.05)
-        fee_limit_enabled = account_metrics.get('fee_limit_enabled', False)
-        
+
         size = executor.position.size
         
         # 1. position_side [-1, 0, 1]
@@ -332,14 +330,9 @@ class TradingObserver:
         rolling_fee_ratio = rolling_fee_sum / equity if equity > 0 else 0.0
         rolling_fee_ratio = np.clip(rolling_fee_ratio, 0.0, 1.0)
         
-        # 13. fee_budget_remaining [0, 1]
-        if fee_limit_enabled and equity > 0:
-            limit_amount = equity * fee_limit_ratio
-            fee_budget_remaining = 1.0 - (rolling_fee_sum / limit_amount) if limit_amount > 0 else 1.0
-            fee_budget_remaining = np.clip(fee_budget_remaining, 0.0, 1.0)
-        else:
-            fee_budget_remaining = 1.0  # 未啟用限制時，預算為 100%
-        
+        # 13. fee_budget_remaining [0, 1]（固定 1.0，Fee Limit 功能已移除）
+        fee_budget_remaining = 1.0
+
         # 14. trade_count_log [0, ∞)
         trade_count = executor.long_entry_count + executor.short_entry_count
         trade_count_log = np.log1p(float(trade_count))

@@ -1080,10 +1080,15 @@ class FeatureTransformer:
             # 如果没有时间信息，使用默认值
             timestamps = pd.date_range(start='2020-01-01', periods=len(df_1d), freq='D')
         
-        hour = timestamps.hour
+        # Series 用 .dt；DatetimeIndex 用屬性
+        if isinstance(timestamps, pd.Series):
+            hour = timestamps.dt.hour
+            day_of_week = timestamps.dt.dayofweek
+        else:
+            hour = timestamps.hour
+            day_of_week = timestamps.dayofweek
         hour_sin = np.sin(2 * np.pi * hour / 24)
         hour_cos = np.cos(2 * np.pi * hour / 24)
-        day_of_week = timestamps.dayofweek
         day_sin = np.sin(2 * np.pi * day_of_week / 7)
         day_cos = np.cos(2 * np.pi * day_of_week / 7)
         

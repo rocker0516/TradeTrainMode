@@ -158,8 +158,6 @@ class LiveObsBuilder:
             "holding_steps": 0.0,
             "last_step_fee": 0.0,
             "rolling_fee_sum": 0.0,
-            "fee_limit_ratio": float(getattr(Config, "FEE_LIMIT_RATIO", 0.05)),
-            "fee_limit_enabled": bool(getattr(Config, "FEE_LIMIT_ENABLED", False)),
         }
 
         obs = observer.get_observation(

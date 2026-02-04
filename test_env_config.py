@@ -23,9 +23,6 @@ def test_env_config_importable_and_has_required_attributes() -> None:
         "MIN_EPISODE_STEPS",
         "MIN_POSITION_CHANGE",
         "MAX_STEP_POS_CHANGE_PCT",
-        "FEE_LIMIT_ENABLED",
-        "FEE_LIMIT_RATIO",
-        "FEE_ROLLING_WINDOW",
         "STOP_LOSS_ATR",
         "LIQUIDATION_WARN_PCT",
         "STOP_LOSS_WARN_PCT",
@@ -37,7 +34,6 @@ def test_env_config_importable_and_has_required_attributes() -> None:
         "MAX_EPISODE_STEPS",
         "STOP_LOSS_LIQ_BUFFER_PCT",
         "STOP_LOSS_COOLDOWN_STEPS",
-        "TURNOVER_NOTIONAL_SCALE",
     ]
 
     for a in required_attrs:

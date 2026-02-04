@@ -206,10 +206,6 @@ class TradingEnvironment(gym.Env):
             except Exception:
                 self._renderer = None
         
-        # Fee Limit
-        self.fee_limit_enabled = getattr(Config, "FEE_LIMIT_ENABLED", True)
-        self.fee_limit_ratio = float(kwargs.get("fee_limit_ratio", Config.FEE_LIMIT_RATIO))
-
         # Cost / Constraint（供 Lagrangian-SAC 使用）
         # 注意：reward 與 cost 分離，cost 透過 info 回傳，方便訓練端做 λ 更新與解析。
         # REFACTORED: 只保留死亡懲罰 (Liq / Bankrupt) 與 摩擦成本 (Fee/Equity)
@@ -644,8 +640,6 @@ class TradingEnvironment(gym.Env):
             'holding_steps': float(self.current_step - self.position_entry_step) if self.position_entry_step is not None else 0.0,
             'last_step_fee': self.tracker.last_step_fee,
             'rolling_fee_sum': self.tracker.rolling_fee_sum,
-            'fee_limit_ratio': self.fee_limit_ratio,
-            'fee_limit_enabled': self.fee_limit_enabled,
             'cooldown_remaining': float(self.stop_loss_cooldown)
         }
         
@@ -1020,19 +1014,14 @@ class TradingEnvironment(gym.Env):
 
     def _update_fee_tracking(self, *, current_price: float) -> Tuple[float, float]:
         """
-        更新 rolling fee tracking，並回傳 step_fee 與 safe_equity（供 fee_budget_ratio 使用）。
+        更新 rolling fee tracking，並回傳 step_fee 與 safe_equity。
 
         Returns:
             (step_fee, safe_equity)
         """
         self.tracker.update_fee_tracking(self.current_step, self.executor.total_fees)
         step_fee = float(self.tracker.last_step_fee)
-
-        # Fee Limit Check（維持原邏輯：使用 current_price 當下估 equity）
         safe_equity = max(float(self.executor.equity(current_price)), self.initial_balance * 0.5)
-        if self.fee_limit_enabled:
-            _limit_amount = safe_equity * self.fee_limit_ratio
-            _fee_limit_hit = self.tracker.rolling_fee_sum >= _limit_amount
         return step_fee, float(safe_equity)
 
     def _mark_to_market(self) -> Tuple[float, float]:
@@ -1242,7 +1231,7 @@ class TradingEnvironment(gym.Env):
             termination_reason=termination_reason,
             step_fee_ratio=step_fee / self.initial_balance if self.initial_balance > 0 else 0.0,
             current_dd=current_dd,
-            fee_budget_ratio=1.0 - (self.tracker.rolling_fee_sum / (safe_equity * self.fee_limit_ratio)) if self.fee_limit_enabled else 1.0,
+            fee_budget_ratio=1.0,
             position_pct=pos_pct_reward,
             abs_position_pct=abs(pos_pct_reward),
             trend_score=metrics['trend_score']

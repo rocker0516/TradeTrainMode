@@ -85,8 +85,6 @@ def test_observer_observation_shapes(make_synth_market) -> None:
         "holding_steps": 0.0,
         "last_step_fee": 0.0,
         "rolling_fee_sum": 0.0,
-        "fee_limit_ratio": 0.05,
-        "fee_limit_enabled": True,
     }
     last_action_effects = {
         "expected_fee_if_trade": 0.0,
