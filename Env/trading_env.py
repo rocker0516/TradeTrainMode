@@ -645,7 +645,8 @@ class TradingEnvironment(gym.Env):
             'last_step_fee': self.tracker.last_step_fee,
             'rolling_fee_sum': self.tracker.rolling_fee_sum,
             'fee_limit_ratio': self.fee_limit_ratio,
-            'fee_limit_enabled': self.fee_limit_enabled
+            'fee_limit_enabled': self.fee_limit_enabled,
+            'cooldown_remaining': float(self.stop_loss_cooldown)
         }
         
         return self.observer.get_observation(

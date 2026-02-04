@@ -35,33 +35,22 @@ def _build_account_and_context_obs_named(obs: dict) -> Dict[str, Dict[str, float
     """
 
     account_state_names = [
-        "pos_size_norm",
-        "unreal_pnl_ratio",
-        "equity_ratio",
-        "max_equity_ratio",
-        "dd",
-        "maint_margin_ratio",
-        "profit_rate",
-        "long_entry_count_x0p01",
-        "short_entry_count_x0p01",
-        "episode_stop_loss_count_x0p1",
-        "episode_liq_count_x1p0",
-        "dist_to_sl_norm",
-        "risk_budget",
-        "pos_side_long_oh",
-        "pos_side_short_oh",
-        "pos_side_flat_oh",
-        "entry_gap_atr",
-        "breakeven_gap_atr",
-        "steps_since_trade_norm",
-        "holding_time_norm",
-        "wallet_balance_ratio",
-        "used_margin_ratio",
-        "available_balance_ratio",
-        "equity_to_position_notional",
-        "liq_distance_pct",
-        "stop_distance_pct",
-        "fee_rate_pct",
+        "position_side",              # 1
+        "position_size_norm",          # 2
+        "equity_ratio",               # 3
+        "realized_pnl_ratio",          # 4
+        "unrealized_pnl_atr",          # 5
+        "drawdown",                    # 6
+        "liq_distance_atr",           # 7
+        "stop_loss_distance_atr",      # 8
+        "margin_usage_ratio",         # 9
+        "cooldown_remaining_norm",     # 10
+        "fee_rate",                   # 11
+        "rolling_fee_ratio",          # 12
+        "fee_budget_remaining",       # 13
+        "trade_count_log",            # 14
+        "stop_loss_count_log",         # 15
+        "holding_time_log",           # 16
     ]
     cost_state_names = [
         "placeholder",  # 佔位欄位（cost_state 已清空）

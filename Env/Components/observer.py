@@ -80,7 +80,7 @@ class TradingObserver:
     def _build_account_space(self) -> dict:
         """定義帳戶狀態相關的觀察空間"""
         return {
-            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(27,), dtype=self.obs_dtype)
+            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(16,), dtype=self.obs_dtype)
         }
 
     def _build_context_space(self) -> dict:
@@ -241,128 +241,132 @@ class TradingObserver:
         current_price: float,
         atr_ratio: float,
     ) -> dict:
-        """生成帳戶狀態觀察值"""
+        """生成帳戶狀態觀察值（16個欄位，優化後）"""
+        
+        # 緩存常用計算值（優化效率）
+        equity = executor.equity(current_price)
+        atr_est = max(1e-8, atr_ratio * max(current_price, 1e-8))
         
         initial_balance = account_metrics['initial_balance']
         max_equity_so_far = account_metrics['max_equity_so_far']
         episode_stop_loss_count = account_metrics['episode_stop_loss_count']
-        episode_liq_count = account_metrics['episode_liq_count']
-        risk_budget = account_metrics['risk_budget']
+        holding_steps = account_metrics['holding_steps']
+        cooldown_remaining = account_metrics.get('cooldown_remaining', 0.0)
+        rolling_fee_sum = account_metrics.get('rolling_fee_sum', 0.0)
+        fee_limit_ratio = account_metrics.get('fee_limit_ratio', 0.05)
+        fee_limit_enabled = account_metrics.get('fee_limit_enabled', False)
         
-        equity = executor.equity(current_price)
         size = executor.position.size
         
-        # --- Account Status (27) ---
-        pos_side_oh = np.zeros(3, dtype=np.float32)
-        if size > 0: pos_side_oh[0] = 1.0
-        elif size < 0: pos_side_oh[1] = 1.0
-        else: pos_side_oh[2] = 1.0
+        # 1. position_side [-1, 0, 1]
+        if size > 0:
+            position_side = 1.0  # long
+        elif size < 0:
+            position_side = -1.0  # short
+        else:
+            position_side = 0.0  # flat
         
+        # 2. position_size_norm [0, 1]
         pos_notional = abs(size) * current_price
         max_notional = equity * executor.leverage
-        pos_size_norm = pos_notional / max_notional if max_notional > 0 else 0.0
-        pos_size_norm = np.clip(pos_size_norm, 0.0, 1.0)
+        position_size_norm = pos_notional / max_notional if max_notional > 0 else 0.0
+        position_size_norm = np.clip(position_size_norm, 0.0, 1.0)
         
-        upnl = executor.unrealized_pnl(current_price)
-        unreal_pnl_ratio = upnl / initial_balance if initial_balance > 0 else 0.0
-        unreal_pnl_ratio = np.clip(unreal_pnl_ratio, -2.0, 2.0)
-        
+        # 3. equity_ratio [0, 5]
         equity_ratio = equity / initial_balance if initial_balance > 0 else 0.0
         equity_ratio = np.clip(equity_ratio, 0.0, 5.0)
         
-        max_equity_ratio = max_equity_so_far / initial_balance if initial_balance > 0 else 0.0
-        max_equity_ratio = np.clip(max_equity_ratio, 0.0, 5.0)
+        # 4. realized_pnl_ratio [-1, 5]
+        wallet_balance = float(executor.wallet_balance)
+        realized_pnl = wallet_balance - initial_balance
+        realized_pnl_ratio = realized_pnl / initial_balance if initial_balance > 0 else 0.0
+        realized_pnl_ratio = np.clip(realized_pnl_ratio, -1.0, 5.0)
         
-        dd = (max_equity_so_far - equity) / max_equity_so_far if max_equity_so_far > 0 else 0.0
-        dd = np.clip(dd, 0.0, 1.0)
+        # 5. unrealized_pnl_atr [-10, 10]
+        upnl = executor.unrealized_pnl(current_price)
+        unrealized_pnl_atr = upnl / (initial_balance * atr_ratio) if (initial_balance > 0 and atr_ratio > 0) else 0.0
+        unrealized_pnl_atr = np.clip(unrealized_pnl_atr, -10.0, 10.0)
         
-        maint_margin_ratio = 0.0
+        # 6. drawdown [0, 1]
+        drawdown = (max_equity_so_far - equity) / max_equity_so_far if max_equity_so_far > 0 else 0.0
+        drawdown = np.clip(drawdown, 0.0, 1.0)
+        
+        # 7. liq_distance_atr [0, 10]
+        liq_price = float(risk_signals.get("liq_price", 0.0))
+        if liq_price > 0 and current_price > 0:
+            liq_distance_atr = abs(current_price - liq_price) / atr_est
+        else:
+            liq_distance_atr = 10.0  # 無持倉或無強平價時設為最大值
+        liq_distance_atr = np.clip(liq_distance_atr, 0.0, 10.0)
+        
+        # 8. stop_loss_distance_atr [-10, 10] (signed)
+        stop_loss_distance_atr = 0.0
+        if abs(size) > 1e-12 and executor.position.stop_loss_price > 0:
+            sl_price = executor.position.stop_loss_price
+            if size > 0:  # 多倉
+                stop_loss_distance_atr = (current_price - sl_price) / atr_est
+            else:  # 空倉
+                stop_loss_distance_atr = (sl_price - current_price) / atr_est
+        stop_loss_distance_atr = np.clip(stop_loss_distance_atr, -10.0, 10.0)
+        
+        # 9. margin_usage_ratio [0, 1.1]
+        margin_usage_ratio = 0.0
         if equity > 0 and abs(size) > 0:
             mmr = getattr(executor, 'maintenance_margin_rate', 0.005)
             maint_margin = pos_notional * mmr
-            maint_margin_ratio = maint_margin / equity
+            margin_usage_ratio = maint_margin / equity
         elif equity <= 0:
-            maint_margin_ratio = 1.1
-        maint_margin_ratio = np.clip(maint_margin_ratio, 0.0, 1.1)
+            margin_usage_ratio = 1.1
+        margin_usage_ratio = np.clip(margin_usage_ratio, 0.0, 1.1)
         
-        profit_rate = (equity - initial_balance) / initial_balance if initial_balance > 0 else 0.0
-        profit_rate = np.clip(profit_rate, -1.0, 5.0)
+        # 10. cooldown_remaining_norm [0, 1]
+        cooldown_max = max(1.0, float(getattr(Config, 'STOP_LOSS_COOLDOWN_STEPS', 0) or 0))
+        cooldown_remaining_norm = np.clip(cooldown_remaining / cooldown_max, 0.0, 1.0)
         
-        dist_to_sl_norm = 0.0
-        if abs(size) > 0 and executor.position.stop_loss_price > 0:
-            sl_price = executor.position.stop_loss_price
-            dist = abs(current_price - sl_price)
-            if current_price > 0:
-                dist_to_sl_norm = np.clip((dist / current_price) * 10.0, 0.0, 5.0)
-
-        wallet_balance = float(executor.wallet_balance)
-        used_margin = float(getattr(executor, "used_margin", 0.0))
-        available_balance = float(executor.available_balance())
+        # 11. fee_rate [0, 0.05]
         fee_rate_pct = float(executor.get_fee_rate())
+        fee_rate = fee_rate_pct / 100.0
+        fee_rate = np.clip(fee_rate, 0.0, 0.05)
         
-        wallet_balance_ratio = np.clip(wallet_balance / initial_balance if initial_balance > 0 else 0.0, 0.0, 5.0)
-        used_margin_ratio = np.clip(used_margin / max(1e-8, equity) if equity > 0 else 0.0, 0.0, 5.0)
-        available_balance_ratio = np.clip(available_balance / max(1e-8, equity) if equity > 0 else 0.0, -5.0, 5.0)
-        equity_to_position_notional = np.clip(equity / max(1e-8, pos_notional) if pos_notional > 0 else 0.0, 0.0, 5.0)
+        # 12. rolling_fee_ratio [0, 1]
+        rolling_fee_ratio = rolling_fee_sum / equity if equity > 0 else 0.0
+        rolling_fee_ratio = np.clip(rolling_fee_ratio, 0.0, 1.0)
         
-        liq_price = float(risk_signals.get("liq_price", 0.0))
-        liq_distance_pct = abs(current_price - liq_price) / current_price if (current_price > 0 and liq_price > 0) else 0.0
-        liq_distance_pct = np.clip(liq_distance_pct, 0.0, 5.0)
+        # 13. fee_budget_remaining [0, 1]
+        if fee_limit_enabled and equity > 0:
+            limit_amount = equity * fee_limit_ratio
+            fee_budget_remaining = 1.0 - (rolling_fee_sum / limit_amount) if limit_amount > 0 else 1.0
+            fee_budget_remaining = np.clip(fee_budget_remaining, 0.0, 1.0)
+        else:
+            fee_budget_remaining = 1.0  # 未啟用限制時，預算為 100%
         
-        entry_price = float(executor.position.entry_price)
-        stop_price = float(executor.position.stop_loss_price)
-        stop_distance_pct = abs(entry_price - stop_price) / entry_price if (abs(size) > 1e-12 and entry_price > 0 and stop_price > 0) else 0.0
-        stop_distance_pct = np.clip(stop_distance_pct, 0.0, 5.0)
-        fee_rate_pct = np.clip(fee_rate_pct, 0.0, 1.0)
+        # 14. trade_count_log [0, ∞)
+        trade_count = executor.long_entry_count + executor.short_entry_count
+        trade_count_log = np.log1p(float(trade_count))
         
-        atr_est = max(1e-8, atr_ratio * max(current_price, 1e-8))
-        fee_frac = fee_rate_pct / 100.0
-        fee_frac = np.clip(fee_frac, 0.0, 0.05)
+        # 15. stop_loss_count_log [0, ∞)
+        stop_loss_count_log = np.log1p(float(episode_stop_loss_count))
         
-        entry_gap_atr = 0.0
-        breakeven_gap_atr = 0.0
-        if abs(size) > 1e-12 and entry_price > 0.0:
-            signed = 1.0 if size > 0 else -1.0
-            entry_gap_atr = signed * ((current_price - entry_price) / atr_est)
-            if size > 0:
-                be_price = entry_price * (1.0 + 2.0 * fee_frac)
-            else:
-                be_price = entry_price * (1.0 - 2.0 * fee_frac)
-            breakeven_gap_atr = signed * ((current_price - be_price) / atr_est)
-        entry_gap_atr = np.clip(entry_gap_atr, -10.0, 10.0)
-        breakeven_gap_atr = np.clip(breakeven_gap_atr, -10.0, 10.0)
+        # 16. holding_time_log [0, ∞)
+        holding_time_log = np.log1p(max(0.0, holding_steps))
         
-        steps_since_trade_norm = np.clip(account_metrics['steps_since_trade'] / max(1.0, float(self.window_size)), 0.0, 5.0)
-        holding_time_norm = np.clip(account_metrics['holding_steps'] / max(1.0, float(self.window_size)), 0.0, 5.0)
-
         account_state = np.array([
-            pos_size_norm,
-            unreal_pnl_ratio,
-            equity_ratio,
-            max_equity_ratio,
-            dd,
-            maint_margin_ratio,
-            profit_rate,
-            executor.long_entry_count * 0.01,
-            executor.short_entry_count * 0.01,
-            episode_stop_loss_count * 0.1,
-            episode_liq_count * 1.0,
-            dist_to_sl_norm,
-            float(risk_budget),
-            pos_side_oh[0],
-            pos_side_oh[1],
-            pos_side_oh[2],
-            entry_gap_atr,
-            breakeven_gap_atr,
-            steps_since_trade_norm,
-            holding_time_norm,
-            wallet_balance_ratio,
-            used_margin_ratio,
-            available_balance_ratio,
-            equity_to_position_notional,
-            liq_distance_pct,
-            stop_distance_pct,
-            fee_rate_pct,
+            position_side,              # 1
+            position_size_norm,         # 2
+            equity_ratio,               # 3
+            realized_pnl_ratio,         # 4
+            unrealized_pnl_atr,          # 5
+            drawdown,                   # 6
+            liq_distance_atr,           # 7
+            stop_loss_distance_atr,      # 8
+            margin_usage_ratio,         # 9
+            cooldown_remaining_norm,    # 10
+            fee_rate,                   # 11
+            rolling_fee_ratio,          # 12
+            fee_budget_remaining,       # 13
+            trade_count_log,            # 14
+            stop_loss_count_log,         # 15
+            holding_time_log,           # 16
         ], dtype=self.obs_dtype)
         
         return {'account_state': account_state}
