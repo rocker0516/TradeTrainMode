@@ -13,6 +13,12 @@ class TradingObserver:
     def __init__(self, window_size: int, window_size_1d: int, market_data: MarketData, *, obs_dtype: str | np.dtype | None = None):
         self.window_size = window_size
         self.window_size_1d = window_size_1d
+        # 新的分离特征维度
+        self.price_seq_target_features_dim = market_data.price_seq_target_features_dim
+        self.price_seq_others_features_dim = market_data.price_seq_others_features_dim
+        self.price_seq_1d_target_features_dim = market_data.price_seq_1d_target_features_dim
+        self.price_seq_1d_others_features_dim = market_data.price_seq_1d_others_features_dim
+        # 兼容性：保留旧接口
         self.price_seq_features_dim = market_data.price_seq_features_dim
         self.features_1d_dim = market_data.features_1d_dim
 
@@ -43,18 +49,30 @@ class TradingObserver:
         })
 
     def _build_market_space(self) -> dict:
-        """定義市場數據相關的觀察空間 (5m & 1d 序列)"""
+        """定義市場數據相關的觀察空間 (5m & 1d 序列，分离的 target 和 others)"""
         return {
-            'price_seq': spaces.Box(
+            'price_seq_target': spaces.Box(
                 low=-np.inf, 
                 high=np.inf, 
-                shape=(self.window_size, self.price_seq_features_dim), 
+                shape=(self.window_size, self.price_seq_target_features_dim), 
                 dtype=self.obs_dtype
             ),
-            'price_seq_1d': spaces.Box(
+            'price_seq_others': spaces.Box(
                 low=-np.inf, 
                 high=np.inf, 
-                shape=(self.window_size_1d, self.features_1d_dim), 
+                shape=(self.window_size, self.price_seq_others_features_dim), 
+                dtype=self.obs_dtype
+            ),
+            'price_seq_1d_target': spaces.Box(
+                low=-np.inf, 
+                high=np.inf, 
+                shape=(self.window_size_1d, self.price_seq_1d_target_features_dim), 
+                dtype=self.obs_dtype
+            ),
+            'price_seq_1d_others': spaces.Box(
+                low=-np.inf, 
+                high=np.inf, 
+                shape=(self.window_size_1d, self.price_seq_1d_others_features_dim), 
                 dtype=self.obs_dtype
             )
         }
@@ -204,10 +222,14 @@ class TradingObserver:
         return out
 
     def _get_market_obs(self, step_idx: int, market_data: MarketData) -> dict:
-        """生成市場數據觀察值"""
+        """生成市場數據觀察值（分离的 target 和 others）"""
+        seq_target, seq_others = market_data.get_price_seq(step_idx)
+        seq_1d_target, seq_1d_others = market_data.get_1d_seq(step_idx, self.window_size_1d)
         return {
-            'price_seq': market_data.get_price_seq(step_idx).astype(self.obs_dtype, copy=False),
-            'price_seq_1d': market_data.get_1d_seq(step_idx, self.window_size_1d).astype(self.obs_dtype, copy=False),
+            'price_seq_target': seq_target.astype(self.obs_dtype, copy=False),
+            'price_seq_others': seq_others.astype(self.obs_dtype, copy=False),
+            'price_seq_1d_target': seq_1d_target.astype(self.obs_dtype, copy=False),
+            'price_seq_1d_others': seq_1d_others.astype(self.obs_dtype, copy=False),
         }
 
     def _get_account_obs(

@@ -32,6 +32,7 @@ SB3（stable-baselines3）用的多輸入觀測編碼器：雙分支 CNN + 向�
 - cost_state 仍會被 MLP 分支吃進去，讓策略能看到成本/風險接近程度。
 """
 
+import math
 from typing import Dict, Tuple
 
 import gymnasium as gym
@@ -55,40 +56,184 @@ def _as_bcl(x: torch.Tensor) -> torch.Tensor:
     return x.transpose(1, 2).contiguous()
 
 
+class Target5mCNN(nn.Module):
+    """
+    Target Symbol 5m CNN（精简特征 + 关键缺失特征）：
+    - 输入：(B, L=432, C=28-30) - target_symbol 的精简特征（移除长时尺度干扰，添加关键价位和订单簿）
+    - 架构：3层Conv1d（保持原有深度）
+    - 输出：emb_target_5m (128维)
+    """
+    def __init__(self, in_channels: int = 30, emb_dim: int = 128):
+        super().__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv1d(in_channels, 32, kernel_size=7, padding=3),
+            nn.ReLU(),
+            nn.Conv1d(32, 64, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(64, emb_dim),
+            nn.ReLU()
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, L, C) -> (B, C, L)
+        x = x.transpose(1, 2).contiguous()
+        return self.cnn(x)
+
+
+class Others5mCNN(nn.Module):
+    """
+    Other Symbols 5m CNN（紧凑特征）：
+    - 输入：(B, L=432, C=32-40) - 4个币种 * 8-10通道
+    - 架构：2层Conv1d（较浅，因为特征已压缩）
+    - 输出：emb_others_5m (64维)
+    """
+    def __init__(self, in_channels: int = 40, emb_dim: int = 64):
+        super().__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv1d(in_channels, 32, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.Conv1d(32, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(32, emb_dim),
+            nn.ReLU()
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.transpose(1, 2).contiguous()
+        return self.cnn(x)
+
+
+class Target1dCNN(nn.Module):
+    """
+    Target Symbol 1d CNN（详细特征 + 长期关键价位 + 时间特征）：
+    - 输入：(B, L=30, C=18) - target_symbol 的详细 1d 特征（包含长期关键价位、VWAP、时间特征）
+    - 输出：emb_target_1d (64维)
+    """
+    def __init__(self, in_channels: int = 18, emb_dim: int = 64):
+        super().__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv1d(in_channels, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(32, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(32, emb_dim),
+            nn.ReLU()
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.transpose(1, 2).contiguous()
+        return self.cnn(x)
+
+
+class Others1dCNN(nn.Module):
+    """
+    Other Symbols + Macro 1d CNN（紧凑特征）：
+    - 输入：(B, L=30, C=28) - 4个币种 * 6通道 + 4个macro
+    - 输出：emb_others_1d (32维)
+    """
+    def __init__(self, in_channels: int = 28, emb_dim: int = 32):
+        super().__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv1d(in_channels, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(16, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(16, emb_dim),
+            nn.ReLU()
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.transpose(1, 2).contiguous()
+        return self.cnn(x)
+
+
+class CrossTimeframeAttention(nn.Module):
+    """
+    5m 和 1d 特征之间的交互：
+    - Target 5m <-> Target 1d（主要交互）
+    - Others 5m <-> Others 1d（辅助交互）
+    """
+    def __init__(self, emb_5m: int = 192, emb_1d: int = 96, hidden_dim: int = 128):
+        super().__init__()
+        # emb_5m = 128(target) + 64(others)
+        # emb_1d = 64(target) + 32(others)
+        self.q_proj = nn.Linear(emb_5m, hidden_dim)
+        self.k_proj = nn.Linear(emb_1d, hidden_dim)
+        self.v_proj = nn.Linear(emb_1d, hidden_dim)
+        self.out_proj = nn.Linear(hidden_dim, emb_5m)
+        self.hidden_dim = hidden_dim
+        
+    def forward(self, emb_5m: torch.Tensor, emb_1d: torch.Tensor) -> torch.Tensor:
+        # 5m 关注 1d 的宏观背景
+        # emb_5m: (B, 192), emb_1d: (B, 96)
+        q = self.q_proj(emb_5m)  # (B, hidden_dim)
+        k = self.k_proj(emb_1d)  # (B, hidden_dim)
+        v = self.v_proj(emb_1d)  # (B, hidden_dim)
+        
+        # Scaled dot-product attention
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.hidden_dim)  # (B, hidden_dim)
+        attn = torch.softmax(attn_scores, dim=-1)  # (B, hidden_dim)
+        out = torch.matmul(attn, v)  # (B, hidden_dim)
+        out = self.out_proj(out)  # (B, emb_5m)
+        return out + emb_5m  # 残差连接
+
+
 class DualCnnFeatureExtractor(BaseFeaturesExtractor):
     """
-    雙分支 CNN 特徵抽取器（SB3 MultiInputPolicy）。
-
-    結構：
-    - 5m 分支（較深）：Conv1d -> Conv1d -> Conv1d -> GAP -> Linear -> emb_5m
-    - 1d 分支（小 CNN）：Conv1d -> Conv1d -> GAP -> Linear -> emb_1d
-    - 向量分支（MLP）：concat(account/cost) -> MLP -> emb_vec
-    - 融合：concat(emb_5m, emb_1d, emb_vec) -> Linear -> out_dim
+    新架构：双CNN分离 + Cross-Attention
+    1. Target 5m CNN -> emb_target_5m (128)
+    2. Others 5m CNN -> emb_others_5m (64)
+    3. Target 1d CNN -> emb_target_1d (64)
+    4. Others 1d CNN -> emb_others_1d (32)
+    5. 融合 5m: concat(emb_target_5m, emb_others_5m) -> emb_5m (192)
+    6. 融合 1d: concat(emb_target_1d, emb_others_1d) -> emb_1d (96)
+    7. Cross-Attention（5m <-> 1d）
+    8. 最终融合 + 向量分支
     """
 
     def __init__(
         self,
         observation_space: gym.spaces.Dict,
         *,
-        emb_5m: int = 128,
-        emb_1d: int = 64,
+        emb_5m_target: int = 128,
+        emb_5m_others: int = 64,
+        emb_1d_target: int = 64,
+        emb_1d_others: int = 32,
         emb_vec: int = 128,
         out_dim: int = 256,
+        use_cross_attention: bool = True,
     ) -> None:
-        # BaseFeaturesExtractor 需要指定 features_dim（也就是本 extractor 的輸出維度）
         super().__init__(observation_space, features_dim=int(out_dim))
 
         # ---- 解析 observation_space ----
-        # price_seq: (window, F_5m)
-        seq_5m_shape = observation_space.spaces["price_seq"].shape
-        seq_1d_shape = observation_space.spaces["price_seq_1d"].shape
-        if seq_5m_shape is None or seq_1d_shape is None:
-            raise ValueError("price_seq / price_seq_1d 必須是具體 shape 的 spaces.Box")
+        # 新的分离 observation space
+        seq_5m_target_shape = observation_space.spaces["price_seq_target"].shape
+        seq_5m_others_shape = observation_space.spaces["price_seq_others"].shape
+        seq_1d_target_shape = observation_space.spaces["price_seq_1d_target"].shape
+        seq_1d_others_shape = observation_space.spaces["price_seq_1d_others"].shape
+        
+        if (seq_5m_target_shape is None or seq_5m_others_shape is None or 
+            seq_1d_target_shape is None or seq_1d_others_shape is None):
+            raise ValueError("所有 price_seq 相关空间必须具有具体 shape")
 
-        win_5m, feat_5m = int(seq_5m_shape[0]), int(seq_5m_shape[1])
-        win_1d, feat_1d = int(seq_1d_shape[0]), int(seq_1d_shape[1])
+        win_5m = int(seq_5m_target_shape[0])
+        feat_5m_target = int(seq_5m_target_shape[1])
+        feat_5m_others = int(seq_5m_others_shape[1])
+        win_1d = int(seq_1d_target_shape[0])
+        feat_1d_target = int(seq_1d_target_shape[1])
+        feat_1d_others = int(seq_1d_others_shape[1])
 
-        # 向量分支輸入維度（把所有向量 state 串起來）
+        # 向量分支輸入維度
         vdim = 0
         for k in ("account_state", "cost_state"):
             shp = observation_space.spaces[k].shape
@@ -96,34 +241,24 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
                 raise ValueError(f"{k} 必須是 1D 向量 spaces.Box")
             vdim += int(shp[0])
 
-        # ---- 5m CNN（主幹：對 288 長序列更有力）----
-        # kernel 取 7/5/3 是常見穩定配置：先抓較粗型態，再細化
-        self.cnn_5m = nn.Sequential(
-            nn.Conv1d(in_channels=feat_5m, out_channels=32, kernel_size=7, padding=3),
-            nn.ReLU(),
-            nn.Conv1d(in_channels=32, out_channels=64, kernel_size=5, padding=2),
-            nn.ReLU(),
-            nn.Conv1d(in_channels=64, out_channels=64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(output_size=1),  # (B,64,1)
-            nn.Flatten(),  # (B,64)
-            nn.Linear(64, emb_5m),
-            nn.ReLU(),
-        )
+        # ---- 双CNN架构 ----
+        self.cnn_5m_target = Target5mCNN(in_channels=feat_5m_target, emb_dim=emb_5m_target)
+        self.cnn_5m_others = Others5mCNN(in_channels=feat_5m_others, emb_dim=emb_5m_others)
+        self.cnn_1d_target = Target1dCNN(in_channels=feat_1d_target, emb_dim=emb_1d_target)
+        self.cnn_1d_others = Others1dCNN(in_channels=feat_1d_others, emb_dim=emb_1d_others)
 
-        # ---- 1d 小 CNN（短序列：30）----
-        self.cnn_1d = nn.Sequential(
-            nn.Conv1d(in_channels=feat_1d, out_channels=32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(in_channels=32, out_channels=32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(output_size=1),  # (B,32,1)
-            nn.Flatten(),  # (B,32)
-            nn.Linear(32, emb_1d),
-            nn.ReLU(),
-        )
+        # ---- Cross-Attention ----
+        self.use_cross_attention = use_cross_attention
+        if use_cross_attention:
+            emb_5m_fused = emb_5m_target + emb_5m_others
+            emb_1d_fused = emb_1d_target + emb_1d_others
+            self.cross_attn = CrossTimeframeAttention(
+                emb_5m=emb_5m_fused,
+                emb_1d=emb_1d_fused,
+                hidden_dim=128
+            )
 
-        # ---- 向量 MLP（成本/帳戶/時間等結構化特徵）----
+        # ---- 向量 MLP ----
         self.mlp_vec = nn.Sequential(
             nn.Linear(vdim, 128),
             nn.ReLU(),
@@ -132,7 +267,8 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
         )
 
         # ---- 融合層 ----
-        fusion_in = int(emb_5m + emb_1d + emb_vec)
+        # 如果使用 cross-attention，5m 特征已经被增强
+        fusion_in = int(emb_5m_target + emb_5m_others + emb_1d_target + emb_1d_others + emb_vec)
         self.fusion = nn.Sequential(
             nn.Linear(fusion_in, int(out_dim)),
             nn.ReLU(),
@@ -140,8 +276,10 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
 
         # 保存一些資訊，方便 debug
         self._meta: Dict[str, Tuple[int, int]] = {
-            "price_seq": (win_5m, feat_5m),
-            "price_seq_1d": (win_1d, feat_1d),
+            "price_seq_target": (win_5m, feat_5m_target),
+            "price_seq_others": (win_5m, feat_5m_others),
+            "price_seq_1d_target": (win_1d, feat_1d_target),
+            "price_seq_1d_others": (win_1d, feat_1d_others),
             "vec_dim": (vdim, 1),
         }
 
@@ -150,13 +288,19 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
         # 為了讓卷積/MLP 訓練更穩定，這裡統一轉回 float32 做計算。
         obs = {k: v.float() for k, v in observations.items()}
 
-        # ---- 5m 分支 ----
-        x5 = _as_bcl(obs["price_seq"])
-        e5 = self.cnn_5m(x5)
+        # ---- 5m 分支（分离）----
+        e5_target = self.cnn_5m_target(obs["price_seq_target"])
+        e5_others = self.cnn_5m_others(obs["price_seq_others"])
+        e5_fused = torch.cat([e5_target, e5_others], dim=1)  # (B, 192)
 
-        # ---- 1d 分支 ----
-        x1 = _as_bcl(obs["price_seq_1d"])
-        e1 = self.cnn_1d(x1)
+        # ---- 1d 分支（分离）----
+        e1_target = self.cnn_1d_target(obs["price_seq_1d_target"])
+        e1_others = self.cnn_1d_others(obs["price_seq_1d_others"])
+        e1_fused = torch.cat([e1_target, e1_others], dim=1)  # (B, 96)
+
+        # ---- Cross-Attention ----
+        if self.use_cross_attention:
+            e5_fused = self.cross_attn(e5_fused, e1_fused)  # (B, 192)
 
         # ---- 向量分支 ----
         v = torch.cat(
@@ -169,6 +313,6 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
         ev = self.mlp_vec(v)
 
         # ---- 融合 ----
-        fused = torch.cat([e5, e1, ev], dim=1)
+        fused = torch.cat([e5_fused, e1_fused, ev], dim=1)
         return self.fusion(fused)
 

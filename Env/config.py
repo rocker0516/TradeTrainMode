@@ -20,7 +20,7 @@ class Config:
     TRANSACTION_FEE: float = 0.01  # (%) 手續費百分比（例如 0.04 代表 0.04%）
 
     # ---- 視窗大小 ----
-    WINDOW_SIZE: int = 288 * 3  # 5m * 288 = 1 day
+    WINDOW_SIZE: int = 432  # 5m * 432 = 1.5 days (优化：从 864 缩短到 432，聚焦短期模式)
     WINDOW_SIZE_1D: int = 30
 
     # ---- 風險基準資金更新頻率 ----

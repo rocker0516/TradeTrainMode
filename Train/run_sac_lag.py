@@ -172,10 +172,13 @@ def main() -> None:
     policy_kwargs = dict(
         features_extractor_class=DualCnnFeatureExtractor,
         features_extractor_kwargs=dict(
-            emb_5m=TrainConfig.EMB_5M,
-            emb_1d=TrainConfig.EMB_1D,
+            emb_5m_target=getattr(TrainConfig, "EMB_5M_TARGET", 128),
+            emb_5m_others=getattr(TrainConfig, "EMB_5M_OTHERS", 64),
+            emb_1d_target=getattr(TrainConfig, "EMB_1D_TARGET", 64),
+            emb_1d_others=getattr(TrainConfig, "EMB_1D_OTHERS", 32),
             emb_vec=TrainConfig.EMB_VEC,
             out_dim=TrainConfig.OUT_DIM,
+            use_cross_attention=True,
         ),
         net_arch=dict(pi=list(TrainConfig.PI_ARCH), qf=list(TrainConfig.QF_ARCH)),
     )

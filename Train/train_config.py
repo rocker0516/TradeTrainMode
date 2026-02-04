@@ -56,10 +56,16 @@ class TrainConfig:
     GRADIENT_STEPS: int = 1 # 1 代表每次更新參數時，只用一個 batch 的資料進行梯度下降
 
     # ---- Policy / 網路結構 ----
-    EMB_5M: int = 256 # 5m 特徵維度
-    EMB_1D: int = 128 # 1d 特徵維度
-    EMB_VEC: int = 128 # 向量特徵維度
-    OUT_DIM: int = 256 # 輸出維度
+    # 新的双CNN架构参数
+    EMB_5M_TARGET: int = 128  # Target 5m 特征维度
+    EMB_5M_OTHERS: int = 64   # Others 5m 特征维度
+    EMB_1D_TARGET: int = 64   # Target 1d 特征维度
+    EMB_1D_OTHERS: int = 32   # Others 1d 特征维度
+    EMB_VEC: int = 128        # 向量特征维度
+    OUT_DIM: int = 256        # 输出维度
+    # 兼容性：保留旧参数（用于向后兼容）
+    EMB_5M: int = 256
+    EMB_1D: int = 128
     PI_ARCH: tuple[int, int] = (256, 256) # P 網路結構
     QF_ARCH: tuple[int, int] = (128, 128) # Q 網路結構
 

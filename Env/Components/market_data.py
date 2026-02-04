@@ -1,3 +1,4 @@
+from typing import Tuple
 import numpy as np
 import pandas as pd
 from Env.config import Config
@@ -111,9 +112,9 @@ class MarketData:
         ma_200 = pd.Series(self.close_arr).rolling(window=200, min_periods=1).mean()
         self.trend_score_arr = ((ma_50 - ma_200) / (ma_200 + 1e-8)).fillna(0.0).values.astype(np.float32)
         
-        # 6. 透過 FeatureTransformer 建立固定特徵（可解釋、固定 shape）
-        # 重要：只針對 target_symbol 產生特徵，避免把其他幣種的整套 OHLCV 混入 state。
-        self.features_5m_arr, self.cols_5m = self._transformer.build_5m_features(
+        # 6. 透過 FeatureTransformer 建立分离的特徵（target 和 others）
+        # 重要：使用新的分离特征提取方法
+        self.features_5m_target_arr, self.features_5m_others_arr, self.cols_5m_target, self.cols_5m_others = self._transformer.build_5m_features_split(
             self.df_5m,
             target_symbol=self.target_symbol,
             atr_ratio_arr=self.atr_ratio_arr,
@@ -121,16 +122,26 @@ class MarketData:
             z_window=self.feature_lookback,
             feature_symbols=self.feature_symbols,
         )
-        self.features_1d_arr, self.cols_1d = self._transformer.build_1d_features(
+        self.features_1d_target_arr, self.features_1d_others_arr, self.cols_1d_target, self.cols_1d_others = self._transformer.build_1d_features_split(
             self.df_1d,
+            self.df_5m,
             target_symbol=self.target_symbol,
             z_window_1d=max(60, self.feature_lookback_1d * 2),
+            feature_symbols=self.feature_symbols,
         )
 
         # 7. 定義特徵維度供 Observer 使用（固定、可控）
-        self.price_seq_features_dim = int(self.features_5m_arr.shape[1])
-        self.features_1d_dim = int(self.features_1d_arr.shape[1])
-        self.market_state_cols = self.cols_5m  # 相容既有介面：提供 5m 特徵欄位名稱
+        self.price_seq_target_features_dim = int(self.features_5m_target_arr.shape[1])
+        self.price_seq_others_features_dim = int(self.features_5m_others_arr.shape[1])
+        self.price_seq_1d_target_features_dim = int(self.features_1d_target_arr.shape[1])
+        self.price_seq_1d_others_features_dim = int(self.features_1d_others_arr.shape[1])
+        
+        # 兼容性：保留旧接口
+        self.price_seq_features_dim = self.price_seq_target_features_dim
+        self.features_1d_dim = self.price_seq_1d_target_features_dim
+        self.cols_5m = self.cols_5m_target
+        self.cols_1d = self.cols_1d_target
+        self.market_state_cols = self.cols_5m_target  # 相容既有介面：提供 5m 特徵欄位名稱
 
     def _ensure_datetime(self, df):
         # 確保存在 datetime 型態的「時間欄位」：若有 timestamp 或 time，統一轉成 timestamp 欄、且格式為 datetime
@@ -179,17 +190,30 @@ class MarketData:
             'trend_score': float(self.trend_score_arr[idx])
         }
 
-    def get_price_seq(self, step_idx: int) -> np.ndarray:
-        """取得 5m 序列輸入 [window_size, F_5m]"""
+    def get_price_seq(self, step_idx: int) -> Tuple[np.ndarray, np.ndarray]:
+        """取得分离的 5m 序列輸入 [window_size, F_target], [window_size, F_others]"""
         start = step_idx - self.window_size
         end = step_idx
+        
+        # Target 序列
         if start < 0:
-            pad = np.zeros((abs(start), self.features_5m_arr.shape[1]), dtype=np.float32)
-            data = self.features_5m_arr[0:end]
-            return np.vstack([pad, data])
-        return self.features_5m_arr[start:end]
+            pad_target = np.zeros((abs(start), self.features_5m_target_arr.shape[1]), dtype=np.float32)
+            data_target = self.features_5m_target_arr[0:end]
+            seq_target = np.vstack([pad_target, data_target])
+        else:
+            seq_target = self.features_5m_target_arr[start:end]
+        
+        # Others 序列
+        if start < 0:
+            pad_others = np.zeros((abs(start), self.features_5m_others_arr.shape[1]), dtype=np.float32)
+            data_others = self.features_5m_others_arr[0:end]
+            seq_others = np.vstack([pad_others, data_others])
+        else:
+            seq_others = self.features_5m_others_arr[start:end]
+        
+        return seq_target, seq_others
 
-    def get_1d_seq(self, step_idx: int, window_size_1d: int = 30) -> np.ndarray:
+    def get_1d_seq(self, step_idx: int, window_size_1d: int = 30) -> Tuple[np.ndarray, np.ndarray]:
         """
         取得 1d 序列輸入 [window_size_1d, F_1d]
         根據 step_idx (5m) 找到對應的 1d 索引，再往回取 window。
@@ -205,23 +229,30 @@ class MarketData:
         # 由 map_5m_to_1d 的構建邏輯決定。
         
         # 注意：為了支援 VecEnv（多環境堆疊），此函式必須「無論任何邊界狀況」都回傳固定 shape：
-        #   (window_size_1d, F_1d)
-        out = np.zeros((int(window_size_1d), self.features_1d_arr.shape[1]), dtype=np.float32)
+        #   (window_size_1d, F_target), (window_size_1d, F_others)
+        out_target = np.zeros((int(window_size_1d), self.features_1d_target_arr.shape[1]), dtype=np.float32)
+        out_others = np.zeros((int(window_size_1d), self.features_1d_others_arr.shape[1]), dtype=np.float32)
 
         idx_1d_current = int(idx_1d_current)
         if idx_1d_current < 0:
             # 沒有任何已收盤日線可用 -> 全 0
-            return out
+            return out_target, out_others
 
         end = idx_1d_current + 1  # slice end（不含）
         start = end - int(window_size_1d)
 
-        # 取可用區間並放到 out 尾端（不足前面補 0）
+        # Target 序列
         src_start = max(0, start)
-        src_end = min(end, len(self.features_1d_arr))
-        src = self.features_1d_arr[src_start:src_end]
-        if len(src) == 0:
-            return out
-
-        out[-len(src) :] = src
-        return out
+        src_end = min(end, len(self.features_1d_target_arr))
+        src_target = self.features_1d_target_arr[src_start:src_end]
+        if len(src_target) > 0:
+            out_target[-len(src_target) :] = src_target
+        
+        # Others 序列
+        src_start = max(0, start)
+        src_end = min(end, len(self.features_1d_others_arr))
+        src_others = self.features_1d_others_arr[src_start:src_end]
+        if len(src_others) > 0:
+            out_others[-len(src_others) :] = src_others
+        
+        return out_target, out_others
