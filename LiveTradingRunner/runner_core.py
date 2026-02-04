@@ -64,33 +64,7 @@ def _build_account_and_context_obs_named(obs: dict) -> Dict[str, Dict[str, float
         "fee_rate_pct",
     ]
     cost_state_names = [
-        "step_fee_ratio_stable",
-        "rolling_fee_ratio",
-        "maint_margin_ratio",
-        "dd",
-        "leverage_ratio",
-        "remaining_fee_budget_ratio",
-        "gap_pct",
-        "abs_gap_pct",
-        "margin_ratio",
-        "sl_gap_atr",
-        "stop_loss_missing",
-        "near_liq",
-        "near_margin",
-        "near_stop",
-        "expected_fee_if_trade_ratio",
-        "predicted_used_margin_ratio",
-        "predicted_available_balance_ratio",
-        "predicted_liq_distance_after_action",
-        "predicted_stop_distance_after_action",
-        "cooldown_remaining_norm",
-        "action_overridden_flag",
-        "last_action_raw",
-        "last_action_used",
-        "last_target_pos_pct",
-        "last_final_pos_pct",
-        "executed_pos_pct",
-        "trade_executed_flag",
+        "placeholder",  # 佔位欄位（cost_state 已清空）
     ]
 
     def _named_values(x: Any, names: list[str]) -> dict[str, float]:

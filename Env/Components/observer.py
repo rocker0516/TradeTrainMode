@@ -86,10 +86,8 @@ class TradingObserver:
     def _build_context_space(self) -> dict:
         """定義環境狀態與成本風險相關的觀察空間"""
         return {
-            # cost_state (27):
-            # 0~18: 原有成本/風險/預測效果特徵
-            # 19~26: 行為「偏差揭露」特徵（讓 agent 知道 raw action 是否被覆寫/限幅/未成交）
-            'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(27,), dtype=self.obs_dtype)
+            # cost_state (1): 佔位欄位（已清空，保留 shape 以維持兼容性）
+            'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=self.obs_dtype)
         }
 
     def compute_risk_signals(
@@ -381,113 +379,10 @@ class TradingObserver:
         current_price: float,
         atr_ratio: float,
     ) -> dict:
-        """生成環境與成本狀態觀察值"""
+        """生成環境與成本狀態觀察值（已清空，只返回佔位欄位）"""
         
-        # --- Cost State (27) ---
-        cost_state = np.zeros(27, dtype=self.obs_dtype)
-        last_step_fee = account_metrics.get('last_step_fee', 0.0)
-        rolling_fee_sum = account_metrics.get('rolling_fee_sum', 0.0)
-        fee_limit_ratio = account_metrics.get('fee_limit_ratio', 1.0)
-        initial_balance = account_metrics['initial_balance']
-        
-        # Need equity and pos_notional again here, or pass it? 
-        # For simplicity recalculate (cheap)
-        equity = executor.equity(current_price)
-        size = executor.position.size
-        pos_notional = abs(size) * current_price
-        
-        # Maint margin ratio again
-        maint_margin_ratio = 0.0
-        if equity > 0 and abs(size) > 0:
-            mmr = getattr(executor, 'maintenance_margin_rate', 0.005)
-            maint_margin = pos_notional * mmr
-            maint_margin_ratio = maint_margin / equity
-        elif equity <= 0:
-            maint_margin_ratio = 1.1
-        maint_margin_ratio = np.clip(maint_margin_ratio, 0.0, 1.1)
-        
-        max_equity_so_far = account_metrics['max_equity_so_far']
-        dd = (max_equity_so_far - equity) / max_equity_so_far if max_equity_so_far > 0 else 0.0
-        dd = np.clip(dd, 0.0, 1.0)
-
-        step_fee_ratio_stable = np.clip((last_step_fee / initial_balance if initial_balance > 0 else 0.0), 0.0, 0.1)
-        rolling_fee_ratio = np.clip(rolling_fee_sum / equity if equity > 0 else 0.0, 0.0, 1.0)
-        
-        remaining_fee_budget_ratio = 1.0
-        if account_metrics.get('fee_limit_enabled', False):
-             safe_equity = max(equity, initial_balance * 0.5)
-             limit_amount = max(1e-8, safe_equity * fee_limit_ratio)
-             remaining_fee_budget_ratio = np.clip(1.0 - (rolling_fee_sum / limit_amount), 0.0, 1.0)
-        
-        leverage_ratio = pos_notional / equity if equity > 0 else 0.0
-        
-        cost_state[0] = step_fee_ratio_stable
-        cost_state[1] = rolling_fee_ratio
-        cost_state[2] = maint_margin_ratio
-        cost_state[3] = dd
-        cost_state[4] = np.clip(leverage_ratio, 0.0, 10.0)
-        cost_state[5] = remaining_fee_budget_ratio
-        
-        cost_state[6] = np.clip(risk_signals['gap_pct'], -5.0, 5.0)
-        cost_state[7] = np.clip(risk_signals['abs_gap_pct'], 0.0, 5.0)
-        cost_state[8] = np.clip(risk_signals['margin_ratio'], 0.0, 5.0)
-        # 止損距離：改用 ATR-normalized（讓 agent 能直接對齊 sl_buf / 波動 regime）
-        # sl_gap_atr > 0 表示在「安全側」且距離止損越遠；接近 0 表示貼近止損。
-        cost_state[9] = np.clip(float(risk_signals.get('sl_gap_atr', 0.0)), -10.0, 10.0)
-        cost_state[10] = float(risk_signals['stop_loss_missing'])
-        cost_state[11] = float(risk_signals['near_liq'])
-        cost_state[12] = float(risk_signals['near_margin'])
-        cost_state[13] = float(risk_signals['near_stop'])
-        
-        effects = last_action_effects
-
-        # ---- Action Effects (5) ----
-        # 重要：這些欄位若直接用「USDT 絕對值」在 float16 下很容易 overflow -> inf，
-        # 進而讓 policy / replay buffer 出現 NaN，導致 SB3 actor 直接崩潰。
-        # 因此改用「相對權益比例」表示，並做有限值/clip 保護。
-        safe_equity = float(max(float(equity), 1e-8))
-
-        def _safe_ratio(x: object, *, denom: float, low: float, high: float) -> float:
-            """將任意輸入轉成 (x/denom) 並 clip，若不可轉或非有限值則回傳 0。"""
-            try:
-                v = float(x) / float(denom)
-            except (TypeError, ValueError, ZeroDivisionError):
-                return 0.0
-            if not np.isfinite(v):
-                return 0.0
-            return float(np.clip(v, float(low), float(high)))
-
-        # 14) expected_fee_if_trade_ratio: 預估手續費 / equity（0~0.2）
-        cost_state[14] = _safe_ratio(effects.get("expected_fee_if_trade", 0.0), denom=safe_equity, low=0.0, high=0.2)
-        # 15) predicted_used_margin_ratio: used_margin / equity（0~10）
-        cost_state[15] = _safe_ratio(effects.get("predicted_used_margin_after_action", 0.0), denom=safe_equity, low=0.0, high=10.0)
-        # 16) predicted_available_balance_ratio: available_balance / equity（-10~10）
-        cost_state[16] = _safe_ratio(effects.get("predicted_available_balance_after_action", 0.0), denom=safe_equity, low=-10.0, high=10.0)
-
-        # 17) predicted_liq_distance_after_action: 已在 env 端做過 clip，但仍做 finite/clip 防呆（0~5）
-        cost_state[17] = _safe_ratio(effects.get("predicted_liq_distance_after_action", 0.0), denom=1.0, low=0.0, high=5.0)
-        # 18) predicted_stop_distance_after_action: 已在 env 端做過 clip，但仍做 finite/clip 防呆（0~5）
-        cost_state[18] = _safe_ratio(effects.get("predicted_stop_distance_after_action", 0.0), denom=1.0, low=0.0, high=5.0)
-
-        # ---- Action vs Execution discrepancy (8) ----
-        # 19) cooldown_remaining_norm: 下一步是否會強制 action=0（0~1）
-        cost_state[19] = float(effects.get("cooldown_remaining_norm", 0.0))
-        # 20) action_overridden_flag: 上一步 action 是否被 env 覆寫（0/1）
-        cost_state[20] = float(effects.get("action_overridden_flag", 0.0))
-        # 21) last_action_raw: policy 原始輸出（-1~1）
-        cost_state[21] = float(effects.get("last_action_raw", 0.0))
-        # 22) last_action_used: 實際送入 processor/executor 的 action（-1~1；例如 cooldown 會變 0）
-        cost_state[22] = float(effects.get("last_action_used", 0.0))
-        # 23) last_target_pos_pct: processor 的 target_pos_pct（-1~1）
-        cost_state[23] = float(effects.get("last_target_pos_pct", 0.0))
-        # 24) last_final_pos_pct: 經 max_step_pos_change 等限制後的最終執行目標（-1~1）
-        cost_state[24] = float(effects.get("last_final_pos_pct", 0.0))
-        # 25) executed_pos_pct: 由實際持倉 size 反推的 signed exposure pct（-1~1）
-        max_cap = max(float(equity) * float(executor.leverage), 1e-12)
-        executed_pos_pct = (float(size) * float(current_price)) / max_cap
-        cost_state[25] = float(np.clip(executed_pos_pct, -1.0, 1.0))
-        # 26) trade_executed_flag: 本步是否真的成交/改變持倉（0/1；由 env 計算後注入）
-        cost_state[26] = float(effects.get("trade_executed_flag", 0.0))
+        # --- Cost State (1): 佔位欄位（已清空所有計算邏輯）---
+        cost_state = np.array([0.0], dtype=self.obs_dtype)
         
         return {
             'cost_state': cost_state

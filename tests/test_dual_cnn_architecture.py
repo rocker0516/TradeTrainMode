@@ -218,7 +218,7 @@ def test_dual_cnn_feature_extractor():
         "price_seq_1d_target": spaces.Box(low=-np.inf, high=np.inf, shape=(30, 18), dtype=np.float32),
         "price_seq_1d_others": spaces.Box(low=-np.inf, high=np.inf, shape=(30, 10), dtype=np.float32),
         "account_state": spaces.Box(low=-np.inf, high=np.inf, shape=(27,), dtype=np.float32),
-        "cost_state": spaces.Box(low=-np.inf, high=np.inf, shape=(27,), dtype=np.float32),
+        "cost_state": spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32),
     })
     
     extractor = DualCnnFeatureExtractor(
@@ -240,7 +240,7 @@ def test_dual_cnn_feature_extractor():
         "price_seq_1d_target": torch.randn(batch_size, 30, 18),
         "price_seq_1d_others": torch.randn(batch_size, 30, 10),
         "account_state": torch.randn(batch_size, 27),
-        "cost_state": torch.randn(batch_size, 27),
+        "cost_state": torch.randn(batch_size, 1),
     }
     
     # 前向传播
