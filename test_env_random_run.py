@@ -8,21 +8,30 @@ from Env.trading_env import TradingEnvironment
 
 
 
-def run_random_test(num_episodes=300, max_steps=3000):
+def run_random_test(num_episodes=300, max_steps=3000, render=False, show=False):
     """
     執行隨機動作測試
     Args:
         num_episodes: 總回合數
         max_steps: 每回合最大步數
+        render: 是否在每 episode 結束時產出 render 圖檔（存至 logs/renders）
+        show: 是否跳出視窗顯示圖（需 render=True；有 GUI 時才有效）
     """
-    # 初始化環境
-    # window_size 設為 288 (一天)
-    env = TradingEnvironment(
+    kwargs = dict(
         env_id=0,
         window_size=288,
-        min_episode_steps=max_steps, 
-        max_step_pos_change_pct=0.1
+        min_episode_steps=max_steps,
+        max_step_pos_change_pct=0.1,
     )
+    if render:
+        kwargs.update(
+            render_enabled=True,
+            render_on_done=True,
+            render_show=bool(show),
+            render_save=True,
+            render_dir="logs/renders",
+        )
+    env = TradingEnvironment(**kwargs)
     
     print(f"\nStarting Random Action Test: {num_episodes} episodes, {max_steps} steps/ep")
     start_time = time.time()
@@ -42,9 +51,8 @@ def run_random_test(num_episodes=300, max_steps=3000):
         while not (done or truncated) and steps < max_steps:
             # 隨機動作 (-1.0 ~ 1.0)
             action = env.action_space.sample()
-            
-            obs, reward, done, truncated, info = env.step(action)
-            
+            obs, reward, terminated, truncated, info = env.step(action)
+            done = bool(terminated or truncated)
             ep_reward += reward
             steps += 1
             
@@ -65,4 +73,7 @@ def run_random_test(num_episodes=300, max_steps=3000):
     env.close()
 
 if __name__ == "__main__":
-    run_random_test()
+    import sys
+    render = "--render" in sys.argv or "-r" in sys.argv
+    show = "--show" in sys.argv or "-s" in sys.argv
+    run_random_test(render=render, show=show)

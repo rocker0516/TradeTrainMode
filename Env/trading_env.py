@@ -103,6 +103,7 @@ class TradingEnvironment(gym.Env):
         self.render_on_done = bool(kwargs.get("render_on_done", False))
         self.render_dpi = int(kwargs.get("render_dpi", 140))
         self.render_figsize = tuple(kwargs.get("render_figsize", (14.0, 9.0)))
+        self.render_export_events = bool(kwargs.get("render_export_events", False))
 
         # 載入數據（允許測試/外部注入 df，避免強耦合到檔案系統）
         df_5m_in = kwargs.get("df_5m", None)
@@ -201,6 +202,7 @@ class TradingEnvironment(gym.Env):
                         show=self.render_show,
                         dpi=self.render_dpi,
                         figsize=self.render_figsize,
+                        export_events=getattr(self, "render_export_events", False),
                     )
                 )
             except Exception:
