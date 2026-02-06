@@ -1312,13 +1312,6 @@ class TradingEnvironment(gym.Env):
         # 新增：雙路徑成本（供雙 λ 使用）；舊訓練端若不認得也不會壞
         if "cost_risk" in cost_out:
             info["cost_risk"] = float(cost_out["cost_risk"])
-        if "cost_fric" in cost_out:
-            info["cost_fric"] = float(cost_out["cost_fric"])
-        if "cost_sl_buf" in cost_out:
-            info["cost_sl_buf"] = float(cost_out["cost_sl_buf"])
-        if "cost_sl_event" in cost_out:
-            info["cost_sl_event"] = float(cost_out["cost_sl_event"])
-        info["cost_breakdown"] = dict(cost_out["cost_breakdown"])
 
         # cache last info for render()
         self._last_info = dict(info)
