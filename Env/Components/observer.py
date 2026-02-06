@@ -84,11 +84,8 @@ class TradingObserver:
         }
 
     def _build_context_space(self) -> dict:
-        """定義環境狀態與成本風險相關的觀察空間"""
-        return {
-            # cost_state (1): 佔位欄位（已清空，保留 shape 以維持兼容性）
-            'cost_state': spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=self.obs_dtype)
-        }
+        """定義環境狀態與成本風險相關的觀察空間（目前無欄位；成本訊號改由 train 端以 wrapper 注入）"""
+        return {}
 
     def compute_risk_signals(
         self,
@@ -376,11 +373,5 @@ class TradingObserver:
         current_price: float,
         atr_ratio: float,
     ) -> dict:
-        """生成環境與成本狀態觀察值（已清空，只返回佔位欄位）"""
-        
-        # --- Cost State (1): 佔位欄位（已清空所有計算邏輯）---
-        cost_state = np.array([0.0], dtype=self.obs_dtype)
-        
-        return {
-            'cost_state': cost_state
-        }
+        """生成環境與成本狀態觀察值（目前無欄位；成本訊號改由 train 端以 wrapper 注入）"""
+        return {}

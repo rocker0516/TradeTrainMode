@@ -334,13 +334,12 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
         assert reward > 0.0
 
     # --- next observation (action effects cache) ---
-    # cost_state 已改為 shape (1,) 佔位，不再編碼 expected_fee / risk_signals；僅檢查存在
     if sc.expect.get("next_obs_expected_fee_positive"):
-        assert "cost_state" in obs and obs["cost_state"].size >= 1
+        assert "account_state" in obs and obs["account_state"].size >= 1
 
     # --- risk signals in obs when flat ---
     if sc.expect.get("risk_liq_zero"):
-        assert "cost_state" in obs and obs["cost_state"].size >= 1
+        assert "account_state" in obs and obs["account_state"].size >= 1
 
     # --- mark-to-market uses next close ---
     if sc.expect.get("equity_matches_next_close"):
