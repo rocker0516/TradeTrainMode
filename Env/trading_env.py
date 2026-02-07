@@ -1247,29 +1247,12 @@ class TradingEnvironment(gym.Env):
         )
         step_fee_ratio = float(step_fee / self.initial_balance) if self.initial_balance > 0 else 0.0
         
-        # REFACTORED: 僅傳遞必要參數 (liq_triggered, equity, min_balance, step_fee)
+        # 計算成本（僅保留 cost_risk 和 cost_fric）
         cost_out = self.cost_calculator.compute(
             liq_triggered=bool(liq_triggered),
             equity=float(new_equity),
             min_balance=float(self.min_balance),
             step_fee=float(step_fee),
-            # cost_fric 專用：只計入加碼/加曝險的手續費（排除減倉/平倉）
-            step_fee_add_only=float(step_fee_add_only),
-            # kwargs 傳遞以保留擴充性，但目前 cost.py 主要只用上述四個
-            step_fee_ratio=step_fee_ratio,
-            turnover_ratio=float(turnover_ratio),
-            traded=bool(traded),
-            current_dd=float(current_dd),
-            risk_signals=risk_post,
-            stop_loss_triggered=bool(stop_loss_triggered),
-            stop_loss_event_cost=float(getattr(Config, "STOP_LOSS_EVENT_COST", 0.0)),
-            # Stop-Buffer Cost inputs
-            has_position=bool(abs(float(new_size)) > 1e-8),
-            current_price=float(prices.current_price),
-            stop_loss_price=float(getattr(self.executor.position, "stop_loss_price", 0.0) or 0.0),
-            atr=float(prices.atr_est),
-            stop_buffer_d_min=float(getattr(Config, "STOP_BUFFER_D_MIN", 0.3)),
-            stop_buffer_d_scale=float(getattr(Config, "STOP_BUFFER_D_SCALE", 0.3)),
         )
 
         # ---- Record render events (entry/reduce/close/flip/SL/LIQ) ----
@@ -1309,9 +1292,11 @@ class TradingEnvironment(gym.Env):
 
         # 將 cost 與分項加入 info（不破壞既有 key）
         info["cost"] = float(cost_out["cost"])
-        # 新增：雙路徑成本（供雙 λ 使用）；舊訓練端若不認得也不會壞
+        # 雙通道成本（供多 λ 使用）
         if "cost_risk" in cost_out:
             info["cost_risk"] = float(cost_out["cost_risk"])
+        if "cost_fric" in cost_out:
+            info["cost_fric"] = float(cost_out["cost_fric"])
 
         # cache last info for render()
         self._last_info = dict(info)
