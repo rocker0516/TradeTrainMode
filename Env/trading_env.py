@@ -839,18 +839,34 @@ class TradingEnvironment(gym.Env):
             atr_est=atr_est,
         )
 
-    def _apply_stop_loss_cooldown(self, action: np.ndarray) -> np.ndarray:
+    def _apply_stop_loss_cooldown(self, action: np.ndarray, current_price: float, last_equity: float) -> np.ndarray:
         """
-        若處於停損冷卻期，強制本 step 動作為 0。
+        若處於停損冷卻期，保持當前倉位（目標倉位與當前倉位一致）。
 
         Args:
             action: 原始 action
+            current_price: 當前價格（用於計算當前倉位百分比）
+            last_equity: 當前權益（用於計算當前倉位百分比）
 
         Returns:
-            action（可能被覆寫為 0）
+            action（可能被覆寫為當前倉位對應的百分比）
         """
         if self.stop_loss_cooldown > 0:
             self.stop_loss_cooldown -= 1
+            # 獲取當前倉位大小
+            current_size = float(self.executor.position.size)
+            
+            # 將當前倉位大小轉換為百分比
+            # position_pct = (size * price) / (equity * leverage)
+            if last_equity > 0 and current_price > 0:
+                max_capacity = last_equity * self.leverage
+                if max_capacity > 0:
+                    current_pos_pct = (current_size * current_price) / max_capacity
+                    # 確保在有效範圍內
+                    current_pos_pct = np.clip(current_pos_pct, -1.0, 1.0)
+                    return np.array([current_pos_pct], dtype=action.dtype)
+            
+            # 如果無法計算（例如權益為 0），則保持 action = 0（平倉）
             return np.zeros_like(action)
         return action
 
@@ -872,7 +888,7 @@ class TradingEnvironment(gym.Env):
         Returns:
             (final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, action_overridden_flag)
         """
-        action_used = self._apply_stop_loss_cooldown(action)
+        action_used = self._apply_stop_loss_cooldown(action, prices.current_price, last_equity)
         # action 是否被 env 覆寫（目前主要是 cooldown）
         try:
             action_overridden_flag = bool(abs(float(action_used[0]) - float(action[0])) > 1e-8)
