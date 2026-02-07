@@ -65,6 +65,19 @@ class TrainConfig:
     - 注意：目前 cost_fric 固定為 0.0，此參數供未來擴充使用
     """
     
+    # Lagrangian 控制器參數
+    LAGRANGIAN_KP: float = 0.1
+    """Lagrangian P-Control 增益係數"""
+    
+    LAGRANGIAN_LAMBDA_INIT: float = 0.0
+    """Lagrangian Lambda 初始值"""
+    
+    LAGRANGIAN_LAMBDA_MIN: float = 0.0
+    """Lagrangian Lambda 最小值"""
+    
+    LAGRANGIAN_LAMBDA_MAX: float = 5.0
+    """Lagrangian Lambda 最大值"""
+    
     UPDATE_LAMBDA_EVERY_STEPS: int = 1_000
     """
     Lambda 更新頻率（每 N 個 global steps 更新一次）
@@ -262,6 +275,16 @@ class TrainConfig:
     - 0.01 代表 1%（每步平均成本佔權益比例）
     - 只在通過此約束時才允許更新 best model
     """
+    
+    # ==================== Eval Gate 配置 ====================
+    EVAL_GATE_ENABLED: bool = False
+    """是否啟用評估門控（避免早期評估）"""
+    
+    EVAL_GATE_WINDOW_SIZE: int = 100
+    """評估門控視窗大小（最近 N 個訓練回合）"""
+    
+    EVAL_GATE_MIN_MAX_STEPS_REACHED_COUNT: int = 70
+    """評估門控最小達標回合數（視窗內需有 N 個回合達到 max_steps）"""
 
     # ==================== 指標口徑（固定）====================
     # 以下指標的計算方式固定，僅供參考：
