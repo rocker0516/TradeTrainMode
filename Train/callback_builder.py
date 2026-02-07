@@ -45,7 +45,7 @@ class CallbackBuilder(ICallbackBuilder):
         
         Args:
             controller: Lagrangian 控制器
-            training_env: 训练环境（用于同步 lambda）
+            training_env: 保留參數以相容介面，未使用（LagrangianCallback 從 BaseCallback.training_env 取得，即 model.get_env()）
             eval_env: 评估环境（可选）
             
         Returns:
@@ -53,8 +53,8 @@ class CallbackBuilder(ICallbackBuilder):
         """
         callbacks: List[BaseCallback] = []
         
-        # 1. Lagrangian Callback
-        lag_callback = self._build_lagrangian_callback(controller, training_env)
+        # 1. Lagrangian Callback（training_env 由 SB3 在 callback 綁定 model 後經 BaseCallback.training_env 取得）
+        lag_callback = self._build_lagrangian_callback(controller)
         callbacks.append(lag_callback)
         
         # 2. Checkpoint Callback
@@ -71,30 +71,23 @@ class CallbackBuilder(ICallbackBuilder):
     def _build_lagrangian_callback(
         self,
         controller: ILagrangianController,
-        training_env: Optional[VecEnv],
     ) -> LagrangianCallback:
         """构建 Lagrangian 回调。
         
         Args:
             controller: Lagrangian 控制器
-            training_env: 训练环境（用于同步 lambda）
             
         Returns:
-            LagrangianCallback 实例
+            LagrangianCallback 实例。
+            訓練環境由 SB3 BaseCallback 的唯讀 property training_env（model.get_env()）提供，不可在此賦值。
         """
-        callback = LagrangianCallback(
+        return LagrangianCallback(
             controller=controller,
             update_freq=int(self.config.update_lambda_every_steps),
             log_freq=int(self.config.log_every_episodes),
             window_size=int(self.config.stats_window_episodes),
             reward_scale=float(self.config.reward_scale),
         )
-        
-        # 设置训练环境（用于 lambda 同步）
-        if training_env is not None:
-            callback.training_env = training_env
-        
-        return callback
     
     def _build_checkpoint_callback(self) -> CheckpointCallback:
         """构建检查点回调。

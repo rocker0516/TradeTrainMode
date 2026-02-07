@@ -134,13 +134,15 @@ class EnvironmentBuilder:
         Returns:
             VecMonitor 包装的并行环境
         """
-        # 注意：SubprocVecEnv 需要可序列化的工厂函数
-        # 由于 controller 是共享的 multiprocessing.Value，可以直接传递
+        # 注意：SubprocVecEnv 需要「可呼叫的工廠函式」列表，每個元素呼叫時才建立環境實例
+        # 若傳入 [make_env_fn(0), make_env_fn(1), ...] 且 make_env_fn 回傳 env，則傳的是實例而非 callable，會觸發 'X object is not callable'
         def make_env_fn(rank: int):
-            """环境工厂函数（用于 SubprocVecEnv）。"""
-            return self.build_training_env(rank, seed=rank)
-        
-        # 创建并行环境
+            """回傳環境工廠 callable（用於 SubprocVecEnv），呼叫時才 build_training_env。"""
+            def _init() -> gym.Env:
+                return self.build_training_env(rank, seed=rank)
+            return _init
+
+        # 傳入 [callable, callable, ...]，每個 callable() 在子進程中建立一個新環境
         vec_env = SubprocVecEnv([make_env_fn(i) for i in range(n_envs)])
         
         # 添加监控

@@ -35,7 +35,7 @@ class TrainConfig:
     TOTAL_TIMESTEPS: int = 100_000_000
     """總訓練步數"""
     
-    N_ENVS: int = 64
+    N_ENVS: int = 8*5
     """並行環境數量"""
     
     DEVICE: str = "auto"
@@ -84,7 +84,7 @@ class TrainConfig:
     - 建議值：1000（在 n_envs=64 時，約每 15.6 個訓練回合更新一次）
     """
     
-    LOG_EVERY_EPISODES: int = 50
+    LOG_EVERY_EPISODES: int = 100
     """每 N 個 episode 刷新一次統計輸出（建議：20-50）"""
     
     STATS_WINDOW_EPISODES: int = 100
@@ -94,7 +94,7 @@ class TrainConfig:
     """獎勵尺度：1.0 代表獎勵不放大，>1.0 會放大獎勵信號"""
 
     # ==================== SB3 SAC 超參數 ====================
-    LEARNING_RATE: float = 5e-5
+    LEARNING_RATE: float = 2e-5
     """學習率"""
     
     BUFFER_SIZE: int = 1_600_000
@@ -186,7 +186,7 @@ class TrainConfig:
     """
 
     # ==================== 環境參數 ====================
-    WINDOW_SIZE_5M: int = 288
+    WINDOW_SIZE_5M: int = 288 // 8 # 36
     """5 分鐘 K 線視窗大小（288 = 1 天）"""
     
     WINDOW_SIZE_1D: int = 14
