@@ -35,7 +35,7 @@ class TrainConfig:
     TOTAL_TIMESTEPS: int = 100_000_000
     """總訓練步數"""
     
-    N_ENVS: int = 8*6
+    N_ENVS: int = 8*8
     """
     並行環境數量。
     效能：SubprocVecEnv 下主進程會先 load_data() 一次並傳入各 worker，避免 N 次磁碟 I/O。
@@ -67,6 +67,32 @@ class TrainConfig:
     - 0.00005 代表允許每步平均手續費佔權益 0.005%
     - 注意：目前 cost_fric 固定為 0.0，此參數供未來擴充使用
     """
+
+    TRADE_FREQ_COST_LIMIT: float = 0.05
+    """
+    交易頻率成本限制（交易比例通道）
+    - 單位：最近 N 步內「交易步數 / N」的上限（比例，0~1）
+    - 0.1 代表允許最多 10% 的步數發生持倉變化（交易）
+    """
+
+    TRADE_FREQ_WINDOW_STEPS: int = 288
+    """
+    交易頻率約束的窗口寬度（步數）
+    - 交易比例 = 窗口內交易次數 / min(窗口寬度, 已收集步數)
+    """
+
+    FLAT_COST_LIMIT: float = 0.2
+    """
+    空倉成本限制（鼓勵持倉、允許避險）
+    - 單位：最近 N 步內「空倉步數 / N」的上限（比例，0~1）
+    - 0.5 代表允許最多 50% 的步數空倉；超過則 λ 上升、懲罰變大
+    """
+
+    FLAT_WINDOW_STEPS: int = 288
+    """空倉比例約束的窗口寬度（步數）"""
+
+    FLAT_THRESHOLD: float = 0.02
+    """視為空倉的持倉比例門檻：|final_pos_pct| < 此值則計為空倉（步級 cost_flat=1）"""
     
     # Lagrangian 控制器參數
     LAGRANGIAN_KP: float = 0.1
@@ -103,7 +129,7 @@ class TrainConfig:
     BUFFER_SIZE: int = 1_600_000
     """Replay Buffer 大小"""
     
-    BATCH_SIZE: int = 256
+    BATCH_SIZE: int = 128
     """訓練批次大小"""
     
     ENT_COEF: str = "auto"
@@ -193,7 +219,7 @@ class TrainConfig:
     """
 
     # ==================== 環境參數 ====================
-    WINDOW_SIZE_5M: int = 288 // 8 # 36
+    WINDOW_SIZE_5M: int = 288 // 4 # 36
     """5 分鐘 K 線視窗大小（288 = 1 天）"""
     
     WINDOW_SIZE_1D: int = 14
@@ -234,7 +260,7 @@ class TrainConfig:
     - 確保在 VecEnv 下語意正確
     """
     
-    EVAL_N_EVAL_EPISODES: int = 25
+    EVAL_N_EVAL_EPISODES: int = 5
     """每次評估運行的 episode 數量"""
     
     EVAL_DETERMINISTIC: bool = True

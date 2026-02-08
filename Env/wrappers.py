@@ -32,7 +32,10 @@ class ActionRepeatWrapper(gym.Wrapper):
         # 若 repeat>1 但只保留「最後一步」的 cost_*，會導致 avg_cost 低估甚至顯示為 0，造成你以為「違規卻不更新」。
         total_cost_channels = defaultdict(float)   # cost_risk / cost_fric
         total_cost_breakdown = defaultdict(float)  # death_cost / fric_cost
-        
+        any_trade_in_repeat = False  # 本 macro-step 內是否有任一步發生交易（供 cost_trade_freq）
+        sum_flat = 0.0
+        n_steps = 0  # 實際執行的 substep 數（供 cost_flat 取平均）
+
         for i in range(self.repeat):
             obs, reward, d, t, info = self.env.step(action)
             
@@ -53,6 +56,16 @@ class ActionRepeatWrapper(gym.Wrapper):
                         total_cost_channels[k] += float(info.get(k, 0.0))
                     except (TypeError, ValueError):
                         pass
+            # 交易頻率：任一步有交易則本 macro-step 計為 1
+            if info.get("cost_trade_freq", 0.0) > 0:
+                any_trade_in_repeat = True
+            # 空倉：取 repeat 內平均（比例），使窗口平均 = 空倉步數比例
+            if "cost_flat" in info:
+                try:
+                    sum_flat += float(info.get("cost_flat", 0.0))
+                except (TypeError, ValueError):
+                    pass
+                n_steps += 1
             # 嘗試累積 cost_breakdown（如果存在）
             breakdown = info.get("cost_breakdown")
             if isinstance(breakdown, dict):
@@ -79,6 +92,8 @@ class ActionRepeatWrapper(gym.Wrapper):
         # 同步回填 multi-channel costs（供 Lagrangian / 觀測 / 日誌使用）
         for k, v in total_cost_channels.items():
             info[k] = float(v)
+        info["cost_trade_freq"] = 1.0 if any_trade_in_repeat else 0.0
+        info["cost_flat"] = float(sum_flat / n_steps) if n_steps > 0 else 0.0
         # 同步回填 breakdown（避免 cost 與 breakdown 量級不一致）
         if total_cost_breakdown:
             info["cost_breakdown"] = dict(total_cost_breakdown)

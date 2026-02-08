@@ -17,11 +17,15 @@ class LagrangianConfig:
     """Lagrangian 配置（类型安全）。"""
     risk_cost_limit: float
     fric_cost_limit: float
+    trade_freq_cost_limit: float = TrainConfig.TRADE_FREQ_COST_LIMIT
+    trade_freq_window_steps: int = TrainConfig.TRADE_FREQ_WINDOW_STEPS
+    flat_cost_limit: float = TrainConfig.FLAT_COST_LIMIT
+    flat_window_steps: int = TrainConfig.FLAT_WINDOW_STEPS
     kp: float = TrainConfig.LAGRANGIAN_KP
     lambda_init: float = TrainConfig.LAGRANGIAN_LAMBDA_INIT
     lambda_min: float = TrainConfig.LAGRANGIAN_LAMBDA_MIN
     lambda_max: float = TrainConfig.LAGRANGIAN_LAMBDA_MAX
-    
+
     def to_channel_configs(self) -> Dict[str, LagrangianChannelConfig]:
         """转换为通道配置字典。"""
         return {
@@ -38,6 +42,22 @@ class LagrangianConfig:
                 lambda_init=self.lambda_init,
                 lambda_min=self.lambda_min,
                 lambda_max=self.lambda_max,
+            ),
+            "trade_freq": LagrangianChannelConfig(
+                cost_limit=self.trade_freq_cost_limit,
+                kp=self.kp,
+                lambda_init=self.lambda_init,
+                lambda_min=self.lambda_min,
+                lambda_max=self.lambda_max,
+                window_steps=self.trade_freq_window_steps,
+            ),
+            "flat": LagrangianChannelConfig(
+                cost_limit=self.flat_cost_limit,
+                kp=self.kp,
+                lambda_init=self.lambda_init,
+                lambda_min=self.lambda_min,
+                lambda_max=self.lambda_max,
+                window_steps=self.flat_window_steps,
             ),
         }
 
@@ -56,7 +76,8 @@ class EnvironmentConfig:
     data_split_enabled: bool = TrainConfig.DATA_SPLIT_ENABLED
     data_mode: str = "train"
     holdout_months: int = TrainConfig.HOLDOUT_MONTHS
-    
+    flat_threshold: float = TrainConfig.FLAT_THRESHOLD
+
     def to_dict(self) -> Dict[str, any]:
         """转换为字典（用于环境初始化）。"""
         return {
@@ -71,6 +92,7 @@ class EnvironmentConfig:
             "data_split_enabled": self.data_split_enabled,
             "data_mode": self.data_mode,
             "holdout_months": self.holdout_months,
+            "flat_threshold": self.flat_threshold,
         }
     
     def to_eval_dict(self) -> Dict[str, any]:
@@ -182,6 +204,10 @@ class TrainingConfig:
     lagrangian_config: LagrangianConfig = field(default_factory=lambda: LagrangianConfig(
         risk_cost_limit=TrainConfig.RISK_COST_LIMIT,
         fric_cost_limit=TrainConfig.FRIC_COST_LIMIT,
+        trade_freq_cost_limit=TrainConfig.TRADE_FREQ_COST_LIMIT,
+        trade_freq_window_steps=TrainConfig.TRADE_FREQ_WINDOW_STEPS,
+        flat_cost_limit=TrainConfig.FLAT_COST_LIMIT,
+        flat_window_steps=TrainConfig.FLAT_WINDOW_STEPS,
     ))
     env_config: Optional[EnvironmentConfig] = None
     model_config: ModelConfig = field(default_factory=ModelConfig)
@@ -255,6 +281,10 @@ class TrainingConfigBuilder:
         lagrangian_config = LagrangianConfig(
             risk_cost_limit=float(args.risk_cost_limit),
             fric_cost_limit=float(args.fric_cost_limit),
+            trade_freq_cost_limit=float(getattr(args, "trade_freq_cost_limit", TrainConfig.TRADE_FREQ_COST_LIMIT)),
+            trade_freq_window_steps=int(getattr(args, "trade_freq_window_steps", TrainConfig.TRADE_FREQ_WINDOW_STEPS)),
+            flat_cost_limit=float(getattr(args, "flat_cost_limit", TrainConfig.FLAT_COST_LIMIT)),
+            flat_window_steps=int(getattr(args, "flat_window_steps", TrainConfig.FLAT_WINDOW_STEPS)),
             kp=TrainConfig.LAGRANGIAN_KP,
             lambda_init=TrainConfig.LAGRANGIAN_LAMBDA_INIT,
             lambda_min=TrainConfig.LAGRANGIAN_LAMBDA_MIN,

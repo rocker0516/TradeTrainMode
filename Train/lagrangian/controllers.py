@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import multiprocessing
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 
 @dataclass(frozen=True)
@@ -14,6 +14,8 @@ class LagrangianChannelConfig:
     lambda_init: float = 0.0
     lambda_min: float = 0.0
     lambda_max: float = 5.0
+    # 若設為非 None，該通道的 cost buffer 使用此長度（步數），否則用 update_freq * n_envs
+    window_steps: Optional[int] = None
 
 
 class SharedLagrangianController:

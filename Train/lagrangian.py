@@ -260,6 +260,8 @@ class LagrangianChannelConfig:
     lambda_init: float = 0.0
     lambda_min: float = 0.0
     lambda_max: float = 5.0
+    # 若設為非 None，該通道的 cost buffer 使用此長度（步數），否則用 update_freq * n_envs
+    window_steps: Optional[int] = None
 
 
 class MultiSharedLagrangianController:
@@ -482,14 +484,16 @@ class LagrangianCallback(BaseCallback):
         self._logger_override = None
         
         # Lambda Update Buffer
-        # 先用 update_freq 當 base；實際 maxlen 會在 _on_step() 依 n_envs 動態擴充為 update_freq*n_envs
+        # 先用 update_freq 當 base；實際 maxlen 會在 _on_step() 依 n_envs 動態擴充
+        # 若 channel 有 window_steps（如 trade_freq 的「最近 N 步」），則該 channel 固定用該長度
         self.cost_buffer: Deque[float] = deque(maxlen=int(update_freq))
         self.cost_buffers: Dict[str, Deque[float]] = {}
         if isinstance(self.controller, MultiSharedLagrangianController):
-            self.cost_buffers = {
-                k: deque(maxlen=int(update_freq))
-                for k in self.controller.channel_configs.keys()
-            }
+            self.cost_buffers = {}
+            for k, cfg in self.controller.channel_configs.items():
+                w = getattr(cfg, "window_steps", None)
+                maxlen = int(w) if w is not None else int(update_freq)
+                self.cost_buffers[k] = deque(maxlen=max(1, maxlen))
         
         # Stats Buffer (存最近 N 回合的 info)
         self.ep_infos: Deque[Dict[str, Any]] = deque(maxlen=window_size)
@@ -537,13 +541,15 @@ class LagrangianCallback(BaseCallback):
         except (TypeError, ValueError):
             n_envs = 1
         if self._cost_buffer_n_envs != n_envs:
-            target_maxlen = int(self.update_freq) * int(n_envs)
-            target_maxlen = max(1, target_maxlen)
             if isinstance(self.controller, MultiSharedLagrangianController):
-                for k in self.controller.channel_configs.keys():
+                for k, cfg in self.controller.channel_configs.items():
+                    w = getattr(cfg, "window_steps", None)
+                    target_maxlen = int(w) if w is not None else (int(self.update_freq) * int(n_envs))
+                    target_maxlen = max(1, target_maxlen)
                     old = self.cost_buffers.get(k)
                     self.cost_buffers[k] = deque(old or [], maxlen=target_maxlen)
             else:
+                target_maxlen = max(1, int(self.update_freq) * int(n_envs))
                 self.cost_buffer = deque(self.cost_buffer, maxlen=target_maxlen)
             self._cost_buffer_n_envs = int(n_envs)
         

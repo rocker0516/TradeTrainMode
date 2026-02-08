@@ -208,7 +208,9 @@ class SACLagrangianTrainer:
             logger.info(
                 f"Cost Limits (per step): "
                 f"risk={self.config.lagrangian_config.risk_cost_limit}, "
-                f"fric={self.config.lagrangian_config.fric_cost_limit}"
+                f"fric={self.config.lagrangian_config.fric_cost_limit}, "
+                f"trade_freq={self.config.lagrangian_config.trade_freq_cost_limit} (window={self.config.lagrangian_config.trade_freq_window_steps} steps), "
+                f"flat={self.config.lagrangian_config.flat_cost_limit} (window={self.config.lagrangian_config.flat_window_steps} steps)"
             )
             
             # 1. 載入市場資料一次，供所有子進程共用（避免 N 個 env 重複 load_data）

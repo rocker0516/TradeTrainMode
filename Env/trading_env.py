@@ -182,6 +182,8 @@ class TradingEnvironment(gym.Env):
             data_len=len(self.df_5m),
             fee_rolling_window=int(kwargs.get("fee_rolling_window", Config.FEE_ROLLING_WINDOW))
         )
+        # 空倉成本門檻：|final_pos_pct| < 此值視為空倉（供 cost_flat；可經 env_config 傳入）
+        self.flat_threshold = float(kwargs.get("flat_threshold", 0.02))
 
         # ---- Render runtime caches ----
         # 每步事件（供 episode 結束時 render 畫 entry/reduce/close/flip/SL/LIQ）
@@ -1314,6 +1316,12 @@ class TradingEnvironment(gym.Env):
             info["cost_risk"] = float(cost_out["cost_risk"])
         if "cost_fric" in cost_out:
             info["cost_fric"] = float(cost_out["cost_fric"])
+        # 交易頻率成本：本步有持倉變化則 1.0，否則 0.0（供「最近 N 步交易比例」約束使用）
+        position_changed = abs(float(new_size) - float(prev_size)) > 1e-9
+        info["cost_trade_freq"] = 1.0 if position_changed else 0.0
+        # 空倉成本：鼓勵持倉、允許避險；|final_pos_pct| < 門檻則 1.0，否則 0.0
+        is_flat = abs(float(final_pos_pct)) < float(getattr(self, "flat_threshold", 0.02))
+        info["cost_flat"] = 1.0 if is_flat else 0.0
 
         # cache last info for render()
         self._last_info = dict(info)
