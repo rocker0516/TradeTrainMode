@@ -644,7 +644,10 @@ class TradingEnvironment(gym.Env):
             'holding_steps': float(self.current_step - self.position_entry_step) if self.position_entry_step is not None else 0.0,
             'last_step_fee': self.tracker.last_step_fee,
             'rolling_fee_sum': self.tracker.rolling_fee_sum,
-            'cooldown_remaining': float(self.stop_loss_cooldown)
+            'cooldown_remaining': float(self.stop_loss_cooldown),
+            'min_balance': float(self.min_balance),
+            'episode_steps': int(self.episode_steps),
+            'episode_max_steps': int(getattr(self, 'episode_max_steps', 1)),
         }
         
         return self.observer.get_observation(

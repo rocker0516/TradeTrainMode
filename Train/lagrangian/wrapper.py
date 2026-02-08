@@ -18,11 +18,13 @@ class LagrangianRewardWrapper(gym.Wrapper):
         self, 
         env: gym.Env, 
         controller: Any,
-        reward_scale: float = 1.0
+        reward_scale: float = 1.0,
+        cost_penalty_normalize: float = 2000.0,
     ) -> None:
         super().__init__(env)
         self.controller = controller
         self.reward_scale = float(reward_scale)
+        self.cost_penalty_normalize = max(1.0, float(cost_penalty_normalize))
 
         # --- Cross-process lambda sync (for SubprocVecEnv / Windows spawn) ---
         # 在 SubprocVecEnv（spawn）情境下，controller 的共享值不一定會在各子進程保持同步。
@@ -93,7 +95,8 @@ class LagrangianRewardWrapper(gym.Wrapper):
                 k: float(info.get(f"cost_{k}", 0.0))
                 for k in self.controller.channel_configs.keys()
             }
-            penalty = float(sum(lams[k] * channel_costs[k] for k in channel_costs.keys()))
+            penalty_raw = float(sum(lams[k] * channel_costs[k] for k in channel_costs.keys()))
+            penalty = penalty_raw / self.cost_penalty_normalize
             modified_reward = (raw_reward * self.reward_scale) - penalty
             self.ep_ret_total += float(modified_reward)
             self.ep_cost_penalty_total += float(penalty)
@@ -117,9 +120,11 @@ class LagrangianRewardWrapper(gym.Wrapper):
         else:
             # --- single-lambda path ---
             lam = float(self._synced_lambda) if self._synced_lambda is not None else float(getattr(self.controller, "current_lambda", 0.0))
-            modified_reward = (raw_reward * self.reward_scale) - (lam * cost)
+            penalty_raw = lam * float(cost)
+            penalty = penalty_raw / self.cost_penalty_normalize
+            modified_reward = (raw_reward * self.reward_scale) - penalty
             self.ep_ret_total += float(modified_reward)
-            self.ep_cost_penalty_total += float(lam) * float(cost)
+            self.ep_cost_penalty_total += float(penalty)
             for k, v in breakdown.items():
                 self.ep_cost_penalty_breakdown[k] += float(lam) * float(v)
             info["lag_lambda"] = lam

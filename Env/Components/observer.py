@@ -78,14 +78,24 @@ class TradingObserver:
         }
 
     def _build_account_space(self) -> dict:
-        """定義帳戶狀態相關的觀察空間"""
+        """定義帳戶狀態相關的觀察空間（含 buffer_to_min、stop_loss_rate、pnl_per_close、episode_progress、steps_since_trade）"""
         return {
-            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(16,), dtype=self.obs_dtype)
+            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(21,), dtype=self.obs_dtype)
         }
 
     def _build_context_space(self) -> dict:
-        """定義環境狀態與成本風險相關的觀察空間（目前無欄位；成本訊號改由 train 端以 wrapper 注入）"""
-        return {}
+        """
+        定義環境狀態與「上一動執行結果」相關的觀察空間。
+        供 agent 觀察：action 是否被覆寫、raw/used/target/final、是否成交、預測強平距離與可用餘額。
+        """
+        return {
+            'context_state': spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(8,),
+                dtype=self.obs_dtype,
+            )
+        }
 
     def compute_risk_signals(
         self,
@@ -236,10 +246,10 @@ class TradingObserver:
         current_price: float,
         atr_ratio: float,
     ) -> dict:
-        """生成帳戶狀態觀察值（16個欄位，優化後）"""
+        """生成帳戶狀態觀察值（20 欄位：原 16 + buffer_to_min、stop_loss_rate、pnl_per_close、episode_progress）"""
         
         # 緩存常用計算值（優化效率）
-        equity = executor.equity(current_price)
+        equity = float(executor.equity(current_price))
         atr_est = max(1e-8, atr_ratio * max(current_price, 1e-8))
         
         initial_balance = account_metrics['initial_balance']
@@ -248,6 +258,10 @@ class TradingObserver:
         holding_steps = account_metrics['holding_steps']
         cooldown_remaining = account_metrics.get('cooldown_remaining', 0.0)
         rolling_fee_sum = account_metrics.get('rolling_fee_sum', 0.0)
+        min_balance = float(account_metrics.get('min_balance', initial_balance * 0.5))
+        episode_steps = int(account_metrics.get('episode_steps', 0))
+        episode_max_steps = max(1, int(account_metrics.get('episode_max_steps', 1)))
+        steps_since_trade = float(account_metrics.get('steps_since_trade', 0.0))
 
         size = executor.position.size
         
@@ -337,24 +351,53 @@ class TradingObserver:
         
         # 16. holding_time_log [0, ∞)
         holding_time_log = np.log1p(max(0.0, holding_steps))
+
+        # 17. buffer_to_min_balance_ratio [0, 1]：離 balance_insufficient 門檻的緩衝（0=碰到死亡線）
+        buffer_to_min = (equity - min_balance) / initial_balance if initial_balance > 0 else 0.0
+        buffer_to_min_balance_ratio = np.clip(buffer_to_min, 0.0, 1.0)
+
+        # 18. stop_loss_rate [0, 1]：本回合進場後被止損的比例
+        entry_count = int(getattr(executor, 'long_entry_count', 0)) + int(getattr(executor, 'short_entry_count', 0))
+        stop_loss_rate = float(episode_stop_loss_count) / max(1, entry_count)
+        stop_loss_rate = np.clip(stop_loss_rate, 0.0, 1.0)
+
+        # 19. realized_pnl_per_close_norm [-0.5, 0.5]：平均每筆平倉盈虧（相對 initial）
+        close_count = int(getattr(executor, 'long_close_count', 0)) + int(getattr(executor, 'short_close_count', 0))
+        pnl_per_close = (realized_pnl / initial_balance) / max(1, close_count) if initial_balance > 0 else 0.0
+        realized_pnl_per_close_norm = np.clip(pnl_per_close, -0.5, 0.5)
+
+        # 20. episode_progress [0, 1]：回合進度
+        episode_progress = float(episode_steps) / float(episode_max_steps)
+        episode_progress = np.clip(episode_progress, 0.0, 1.0)
+
+        # 21. steps_since_trade_norm [0, 1]：距上次成交步數正規化（供 trade_freq / flat cost 學習）
+        steps_since_trade_norm = np.clip(
+            np.log1p(steps_since_trade) / np.log1p(max(1.0, float(episode_max_steps))),
+            0.0, 1.0,
+        )
         
         account_state = np.array([
             position_side,              # 1
             position_size_norm,         # 2
             equity_ratio,               # 3
             realized_pnl_ratio,         # 4
-            unrealized_pnl_atr,          # 5
+            unrealized_pnl_atr,         # 5
             drawdown,                   # 6
             liq_distance_atr,           # 7
-            stop_loss_distance_atr,      # 8
+            stop_loss_distance_atr,     # 8
             margin_usage_ratio,         # 9
             cooldown_remaining_norm,    # 10
             fee_rate,                   # 11
             rolling_fee_ratio,          # 12
             fee_budget_remaining,       # 13
             trade_count_log,            # 14
-            stop_loss_count_log,         # 15
+            stop_loss_count_log,        # 15
             holding_time_log,           # 16
+            buffer_to_min_balance_ratio,  # 17
+            stop_loss_rate,             # 18
+            realized_pnl_per_close_norm, # 19
+            episode_progress,          # 20
+            steps_since_trade_norm,    # 21
         ], dtype=self.obs_dtype)
         
         return {'account_state': account_state}
@@ -371,5 +414,34 @@ class TradingObserver:
         current_price: float,
         atr_ratio: float,
     ) -> dict:
-        """生成環境與成本狀態觀察值（目前無欄位；成本訊號改由 train 端以 wrapper 注入）"""
-        return {}
+        """
+        生成「上一動執行結果」觀察值，供 agent 得知 action 是否被強制調整、實際執行倉位與預測風險。
+        維度順序：[0]action_overridden, [1]last_action_raw, [2]last_action_used,
+                 [3]last_target_pos_pct, [4]last_final_pos_pct, [5]trade_executed_flag,
+                 [6]predicted_liq_distance_after, [7]available_balance_after_norm
+        """
+        initial_balance = float(account_metrics.get('initial_balance', 1.0))
+        if initial_balance <= 0:
+            initial_balance = 1.0
+        effects = last_action_effects or {}
+        action_overridden = float(effects.get('action_overridden_flag', 0.0))
+        last_action_raw = float(effects.get('last_action_raw', 0.0))
+        last_action_used = float(effects.get('last_action_used', 0.0))
+        last_target = float(effects.get('last_target_pos_pct', 0.0))
+        last_final = float(effects.get('last_final_pos_pct', 0.0))
+        trade_executed = float(effects.get('trade_executed_flag', 0.0))
+        liq_dist = float(effects.get('predicted_liq_distance_after_action', 0.0))
+        available_after = float(effects.get('predicted_available_balance_after_action', 0.0))
+        available_norm = np.clip(available_after / initial_balance, 0.0, 2.0)
+        context_state = np.array([
+            action_overridden,
+            np.clip(last_action_raw, -1.0, 1.0),
+            np.clip(last_action_used, -1.0, 1.0),
+            np.clip(last_target, -1.0, 1.0),
+            np.clip(last_final, -1.0, 1.0),
+            trade_executed,
+            np.clip(liq_dist, 0.0, 5.0),
+            available_norm,
+        ], dtype=self.obs_dtype)
+        context_state = np.nan_to_num(context_state, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        return {'context_state': context_state}

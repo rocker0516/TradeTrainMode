@@ -782,9 +782,9 @@ class LagrangianCallback(BaseCallback):
         # 用更直觀的標籤區分「原始市場表現」與「RL 訓練訊號」
         print(f"[{'MAIN REWARD':^20}]")
         print("  --- RL Training Signal (What Agent Sees) ---")
-        print(f"  Total Reward (R_total)      : {avg_total_reward:8.4f}  [= R_scaled - (λ * Cost)]")
+        print(f"  Total Reward (R_total)      : {avg_total_reward:8.4f}  [= R_scaled - penalty_norm]")
         print(f"  Scaled Reward (R_scaled)    : {avg_ret_orig_scaled:8.4f}  [= LogRet * {self.reward_scale}]")
-        print(f"  Cost Penalty (-λ * C)       : {-avg_cost_penalty_total:8.4f}")
+        print(f"  Cost Penalty (-λ*C, 已正規化): {-avg_cost_penalty_total:8.4f}")
         
         print("  --- Original Market Performance ---")
         print(f"  Log Return Sum (LogRet)     : {avg_ret_orig:8.4f}")

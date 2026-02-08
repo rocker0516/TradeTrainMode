@@ -59,6 +59,19 @@ class LagrangianCallback(BaseCallback):
         self.total_episodes: int = 0
         self.last_log_episode: int = 0
 
+        # 每步迴圈優化：快取 cost 的 info key，避免每步重複 .keys() 與字串拼接
+        self._is_multi: bool = isinstance(self.controller, MultiSharedLagrangianController)
+        if self._is_multi:
+            _chans = tuple(self.controller.channel_configs.keys())
+            self._cost_info_keys: Tuple[str, ...] = tuple(f"cost_{k}" for k in _chans)
+            self._channel_names: Tuple[str, ...] = _chans
+        else:
+            self._cost_info_keys = ()
+            self._channel_names = ()
+
+        # 每 N 次 λ 更新才同步到子進程一次，減少 IPC（預設 2 = 每 2*update_freq 步 sync 一次）
+        self._sync_lambda_every_n_updates: int = 2
+
     @property
     def logger(self):  # type: ignore[override]
         """
@@ -110,19 +123,15 @@ class LagrangianCallback(BaseCallback):
                 self.cost_buffer = deque(self.cost_buffer, maxlen=target_maxlen)
             self._cost_buffer_n_envs = int(n_envs)
         
+        # 每步迴圈：使用快取的 key，避免重複 .keys() 與 isinstance
         for info in infos:
-            # 1. 收集 Cost (Step level, for Lambda update)
-            if isinstance(self.controller, MultiSharedLagrangianController):
-                for k in self.controller.channel_configs.keys():
-                    key = f"cost_{k}"
+            if self._is_multi:
+                for i, key in enumerate(self._cost_info_keys):
                     if key in info:
-                        self.cost_buffers[k].append(float(info[key]))
+                        self.cost_buffers[self._channel_names[i]].append(float(info[key]))
             else:
                 if "cost" in info:
                     self.cost_buffer.append(float(info["cost"]))
-            
-            # 2. 收集 Episode 結束時的統計
-            # VecMonitor 在回合結束時會加入 "episode" key
             if "episode" in info:
                 self.total_episodes += 1
                 self.ep_infos.append(info)
@@ -146,15 +155,14 @@ class LagrangianCallback(BaseCallback):
                         avg_c - float(self.controller.channel_configs[k].cost_limit),
                     )
 
-                # --- Sync lambdas to sub-process envs (Route B) ---
-                # SubprocVecEnv（spawn）下，子進程可能讀不到主進程更新後的 shared λ；
-                # 這裡用 VecEnv.env_method 明確同步到每個 LagrangianRewardWrapper。
-                try:
-                    if getattr(self, "training_env", None) is not None:
-                        self.training_env.env_method("set_lagrangian_lambdas", dict(new_lams))
-                except Exception:
-                    # 同步失敗不應中斷訓練（例如 unit test 沒有 vec env）
-                    pass
+                # --- Sync lambdas to sub-process envs（每 _sync_lambda_every_n_updates 次更新才 sync，減少 IPC）---
+                _update_index = self.n_calls // self.update_freq
+                if _update_index % self._sync_lambda_every_n_updates == 0:
+                    try:
+                        if getattr(self, "training_env", None) is not None:
+                            self.training_env.env_method("set_lagrangian_lambdas", dict(new_lams))
+                    except Exception:
+                        pass
             else:
                 if len(self.cost_buffer) > 0:
                     avg_cost = np.mean(self.cost_buffer)
@@ -167,12 +175,14 @@ class LagrangianCallback(BaseCallback):
                     self.logger.record("lagrangian/avg_cost", avg_cost)
                     self.logger.record("lagrangian/cost_violation", avg_cost - self.controller.cost_limit)
 
-                    # --- Sync single lambda to sub-process envs (Route B) ---
-                    try:
-                        if getattr(self, "training_env", None) is not None:
-                            self.training_env.env_method("set_lagrangian_lambda", float(new_lambda))
-                    except Exception:
-                        pass
+                    # --- Sync to sub-process envs（每 _sync_lambda_every_n_updates 次更新才 sync）---
+                    _update_index = self.n_calls // self.update_freq
+                    if _update_index % self._sync_lambda_every_n_updates == 0:
+                        try:
+                            if getattr(self, "training_env", None) is not None:
+                                self.training_env.env_method("set_lagrangian_lambda", float(new_lambda))
+                        except Exception:
+                            pass
 
         # 4. 定期顯示統計 (每 log_freq 回合)
         # 檢查是否累積了足夠的新回合
@@ -339,9 +349,9 @@ class LagrangianCallback(BaseCallback):
         # 用更直觀的標籤區分「原始市場表現」與「RL 訓練訊號」
         print(f"[{'MAIN REWARD':^20}]")
         print("  --- RL Training Signal (What Agent Sees) ---")
-        print(f"  Total Reward (R_total)      : {avg_total_reward:8.4f}  [= R_scaled - (λ * Cost)]")
+        print(f"  Total Reward (R_total)      : {avg_total_reward:8.4f}  [= R_scaled - penalty_norm]")
         print(f"  Scaled Reward (R_scaled)    : {avg_ret_orig_scaled:8.4f}  [= LogRet * {self.reward_scale}]")
-        print(f"  Cost Penalty (-λ * C)       : {-avg_cost_penalty_total:8.4f}")
+        print(f"  Cost Penalty (-λ*C, 已正規化): {-avg_cost_penalty_total:8.4f}")
         
         print("  --- Original Market Performance ---")
         print(f"  Log Return Sum (LogRet)     : {avg_ret_orig:8.4f}")

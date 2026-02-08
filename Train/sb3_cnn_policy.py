@@ -234,14 +234,25 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
         feat_1d_others = int(seq_1d_others_shape[1])
 
         # 向量分支輸入維度
-        # account_state 必須存在，cost_state 為可選（Env 端不提供，Train 端處理）
+        # account_state 必須存在；context_state、cost_state 為可選
         if "account_state" not in observation_space.spaces:
             raise ValueError("observation_space 必須包含 'account_state'")
         account_shp = observation_space.spaces["account_state"].shape
         if account_shp is None or len(account_shp) != 1:
             raise ValueError("account_state 必須是 1D 向量 spaces.Box")
         vdim = int(account_shp[0])
-        
+
+        # context_state：上一動執行結果（action 是否被覆寫、target/final、預測強平/餘額等）
+        self.has_context_state = "context_state" in observation_space.spaces
+        if self.has_context_state:
+            ctx_shp = observation_space.spaces["context_state"].shape
+            if ctx_shp is None or len(ctx_shp) != 1:
+                raise ValueError("context_state 必須是 1D 向量 spaces.Box")
+            self.context_state_dim = int(ctx_shp[0])
+            vdim += self.context_state_dim
+        else:
+            self.context_state_dim = 0
+
         # cost_state 為可選（如果不存在，使用零向量）
         self.has_cost_state = "cost_state" in observation_space.spaces
         if self.has_cost_state:
@@ -315,16 +326,21 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
             e5_fused = self.cross_attn(e5_fused, e1_fused)  # (B, 192)
 
         # ---- 向量分支 ----
-        # account_state 必須存在，cost_state 為可選
+        # account_state 必須存在；context_state、cost_state 為可選
         vec_list = [obs["account_state"]]
+        if self.has_context_state:
+            vec_list.append(obs["context_state"])
+        else:
+            batch_size = obs["account_state"].shape[0]
+            device = obs["account_state"].device
+            vec_list.append(torch.zeros(batch_size, self.context_state_dim, device=device, dtype=obs["account_state"].dtype))
         if self.has_cost_state:
             vec_list.append(obs["cost_state"])
         else:
-            # 如果 cost_state 不存在，使用零向量填充（保持 MLP 輸入維度一致）
             batch_size = obs["account_state"].shape[0]
             device = obs["account_state"].device
             vec_list.append(torch.zeros(batch_size, self.cost_state_dim, device=device, dtype=obs["account_state"].dtype))
-        
+
         v = torch.cat(vec_list, dim=1)
         ev = self.mlp_vec(v)
 

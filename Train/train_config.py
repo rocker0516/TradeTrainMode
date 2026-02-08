@@ -41,7 +41,7 @@ class TrainConfig:
     效能：SubprocVecEnv 下主進程會先 load_data() 一次並傳入各 worker，避免 N 次磁碟 I/O。
     """
     
-    DEVICE: str = "auto"
+    DEVICE: str = "cuda"
     """計算設備：'cuda' / 'cpu' / 'auto'"""
 
     # ==================== Lagrangian / 約束 ====================
@@ -122,6 +122,14 @@ class TrainConfig:
     REWARD_SCALE: float = 1.0
     """獎勵尺度：1.0 代表獎勵不放大，>1.0 會放大獎勵信號"""
 
+    COST_PENALTY_NORMALIZE_FACTOR: float = 2000.0
+    """
+    成本懲罰正規化係數：每步 penalty = (λ*Cost) / max(1, 此值)。
+    使整回合懲罰總和與主線 R_scaled（log return 和約 O(1)）同尺度，
+    避免懲罰完全壓過主線信號（否則 R_total ≈ -數千、主線 -0.7 無效）。
+    典型 episode 約 2500 step，λ 總和約 3，cost 平均約 0.5 → 原始懲罰約 3750；除 2000 後約 1.9。
+    """
+
     # ==================== SB3 SAC 超參數 ====================
     LEARNING_RATE: float = 2e-5
     """學習率"""
@@ -129,21 +137,22 @@ class TrainConfig:
     BUFFER_SIZE: int = 1_600_000
     """Replay Buffer 大小"""
     
-    BATCH_SIZE: int = 128
+    BATCH_SIZE: int = 256
     """訓練批次大小"""
     
     ENT_COEF: str = "auto"
     """熵係數：'auto' 表示自動調整，或指定數值（如 0.01）"""
     
-    TRAIN_FREQ: int = 1
+    TRAIN_FREQ: int = 2
     """
     訓練頻率：每 N 個 env step 做一次梯度更新。
-    - 1：每 step 都更新（預設）
-    - 2～4：若 it/s 受 GPU 瓶頸，可提高以減少每步的梯度計算、提升吞吐
+    - 2（預設）：降低 backward/優化器瓶頸、提升 it/s，同時維持合理更新量
+    - 1：每 step 都更新（最大學習密度，it/s 較低）
+    - 4：進一步提升 it/s（GPU 瓶頸時）
     """
     
-    GRADIENT_STEPS: int = 1
-    """梯度步數：1 代表每次更新參數時，只用一個 batch 的資料進行梯度下降"""
+    GRADIENT_STEPS: int = 2
+    """梯度步數：每次更新時做的梯度步數；建議與 TRAIN_FREQ 同值以維持每 step 有效更新量"""
 
     # ==================== Policy / 網路結構 ====================
     # 新的雙 CNN 架構參數（DualCnnFeatureExtractor）
@@ -246,7 +255,7 @@ class TrainConfig:
     """檢查點目錄前綴"""
 
     # ==================== Periodic Evaluation / Validation ====================
-    EVAL_ENABLED: bool = True
+    EVAL_ENABLED: bool = False
     """
     是否啟用週期性評估
     - 訓練期間定期跑 eval episodes，輸出指標（止損/強平/交易頻率/進場/平均持倉/最終資金/收益率）
@@ -279,7 +288,7 @@ class TrainConfig:
     """Eval 輸出前綴"""
 
     # ==================== Best Model 保存 ====================
-    EVAL_SAVE_BEST_MODEL: bool = True
+    EVAL_SAVE_BEST_MODEL: bool = False
     """是否保存最佳模型"""
     
     EVAL_BEST_MODEL_SUBDIR: str = "best_model"

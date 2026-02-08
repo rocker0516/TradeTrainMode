@@ -227,6 +227,7 @@ class TrainingConfig:
     log_every_episodes: int = TrainConfig.LOG_EVERY_EPISODES
     stats_window_episodes: int = TrainConfig.STATS_WINDOW_EPISODES
     reward_scale: float = TrainConfig.REWARD_SCALE
+    cost_penalty_normalize: float = TrainConfig.COST_PENALTY_NORMALIZE_FACTOR
 
 
 class TrainingConfigBuilder:
@@ -264,10 +265,11 @@ class TrainingConfigBuilder:
             holdout_months=TrainConfig.HOLDOUT_MONTHS,
         )
         
-        # 构建模型配置（train_freq 可由 CLI 覆寫以優化 it/s）
+        # 构建模型配置（train_freq / gradient_steps 可由 CLI 覆寫以優化 it/s）
         model_config = ModelConfig(
             device=args.device,
             train_freq=getattr(args, "train_freq", TrainConfig.TRAIN_FREQ),
+            gradient_steps=getattr(args, "gradient_steps", TrainConfig.GRADIENT_STEPS),
         )
         
         # 构建评估配置
@@ -311,5 +313,6 @@ class TrainingConfigBuilder:
             log_every_episodes=args.log_every_episodes,
             stats_window_episodes=TrainConfig.STATS_WINDOW_EPISODES,
             reward_scale=TrainConfig.REWARD_SCALE,
+            cost_penalty_normalize=float(getattr(TrainConfig, "COST_PENALTY_NORMALIZE_FACTOR", 2000.0)),
         )
 

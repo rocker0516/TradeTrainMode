@@ -33,6 +33,7 @@ class EnvironmentBuilder:
         max_position_pct: float = 0.7,
         action_repeat: int = 1,
         reward_scale: float = 1.0,
+        cost_penalty_normalize: float = 2000.0,
     ):
         """初始化环境构建器。
         
@@ -42,12 +43,14 @@ class EnvironmentBuilder:
             max_position_pct: 最大持仓百分比
             action_repeat: 动作重复次数
             reward_scale: 奖励缩放因子
+            cost_penalty_normalize: 成本懲罰除以此係數，使與主線 reward 同尺度
         """
         self.config = config
         self.controller = controller
         self.max_position_pct = max_position_pct
         self.action_repeat = action_repeat
         self.reward_scale = reward_scale
+        self.cost_penalty_normalize = max(1.0, float(cost_penalty_normalize))
     
     def build_base_env(
         self,
@@ -109,6 +112,7 @@ class EnvironmentBuilder:
                 env,
                 self.controller,
                 reward_scale=self.reward_scale,
+                cost_penalty_normalize=self.cost_penalty_normalize,
             )
         
         return env
