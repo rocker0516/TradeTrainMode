@@ -172,16 +172,21 @@ class TradingObserver:
             'near_stop': bool(near_stop),
         }
 
-    def get_observation(self, 
-                        step_idx: int, 
-                        executor: TradeExecutor, 
+    def get_observation(self,
+                        step_idx: int,
+                        executor: TradeExecutor,
                         market_data: MarketData,
                         account_metrics: dict,
                         risk_signals: dict,
-                        last_action_effects: dict
+                        last_action_effects: dict,
+                        *,
+                        precomputed_metrics: dict | None = None,
                         ) -> dict:
-        # 重要：避免同一步重複呼叫 get_market_metrics（以前 account/context 各呼叫一次，context 甚至呼叫兩次）
-        metrics = market_data.get_market_metrics(step_idx)
+        """生成單步觀察。若提供 precomputed_metrics 則不再呼叫 get_market_metrics（it/s 優化）。"""
+        if precomputed_metrics is not None:
+            metrics = precomputed_metrics
+        else:
+            metrics = market_data.get_market_metrics(step_idx)
         current_price = float(metrics["close"])
         atr_ratio = float(metrics.get("atr_ratio", 0.0))
 
@@ -199,20 +204,13 @@ class TradingObserver:
             current_price=current_price,
             atr_ratio=atr_ratio,
         )
-        
-        out = {**market_obs, **account_obs, **context_obs}
-        # 確保所有 key dtype 與 observation_space 一致（預設 float16 以省 replay buffer RAM）
-        if self.obs_dtype != np.float32:
-            for k, v in list(out.items()):
-                if isinstance(v, np.ndarray) and v.dtype != self.obs_dtype:
-                    out[k] = v.astype(self.obs_dtype, copy=False)
 
-        # 防呆：任何觀測出現 NaN/Inf 都可能讓 policy 輸出 NaN 而直接炸訓練（你 terminal 的錯誤即屬此類）。
-        # 這裡做「最後一道」清洗，不改變 shape，只確保數值是 finite。
+        out = {**market_obs, **account_obs, **context_obs}
+        # 單一迴圈：dtype 轉換 + nan_to_num，減少對同一陣列的重複遍歷（it/s 優化）
         for k, v in list(out.items()):
             if isinstance(v, np.ndarray):
-                # inplace 轉換：inf/-inf/nan -> 0
-                # 注意：此步驟應避免產生額外 copy（copy=False）。
+                if v.dtype != self.obs_dtype:
+                    v = v.astype(self.obs_dtype, copy=False)
                 out[k] = np.nan_to_num(v, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         return out
 

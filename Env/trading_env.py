@@ -651,7 +651,8 @@ class TradingEnvironment(gym.Env):
             market_data=self.market_data,
             account_metrics=account_metrics,
             risk_signals=risk_signals,
-            last_action_effects=self._last_action_effects
+            last_action_effects=self._last_action_effects,
+            precomputed_metrics=metrics,
         )
 
     def _determine_termination(

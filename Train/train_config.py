@@ -35,8 +35,11 @@ class TrainConfig:
     TOTAL_TIMESTEPS: int = 100_000_000
     """總訓練步數"""
     
-    N_ENVS: int = 8*5
-    """並行環境數量"""
+    N_ENVS: int = 8*6
+    """
+    並行環境數量。
+    效能：SubprocVecEnv 下主進程會先 load_data() 一次並傳入各 worker，避免 N 次磁碟 I/O。
+    """
     
     DEVICE: str = "auto"
     """計算設備：'cuda' / 'cpu' / 'auto'"""
@@ -50,7 +53,7 @@ class TrainConfig:
     - 注意：目前使用多通道模式（RISK_COST_LIMIT / FRIC_COST_LIMIT），此參數僅供相容性
     """
     
-    RISK_COST_LIMIT: float = 0.001
+    RISK_COST_LIMIT: float = 0.000
     """
     風險成本限制（死亡風險通道）
     - 單位：每步平均死亡風險（正規化為 Cost/Equity）
@@ -107,7 +110,11 @@ class TrainConfig:
     """熵係數：'auto' 表示自動調整，或指定數值（如 0.01）"""
     
     TRAIN_FREQ: int = 1
-    """訓練頻率：1 代表每次更新參數時，只用一個 batch 的資料"""
+    """
+    訓練頻率：每 N 個 env step 做一次梯度更新。
+    - 1：每 step 都更新（預設）
+    - 2～4：若 it/s 受 GPU 瓶頸，可提高以減少每步的梯度計算、提升吞吐
+    """
     
     GRADIENT_STEPS: int = 1
     """梯度步數：1 代表每次更新參數時，只用一個 batch 的資料進行梯度下降"""

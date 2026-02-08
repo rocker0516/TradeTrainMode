@@ -53,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=TrainConfig.DEVICE, help="計算設備：'cuda' / 'cpu' / 'auto'")
     parser.add_argument("--log_every_episodes", type=int, default=TrainConfig.LOG_EVERY_EPISODES, help="每 N 回合輸出交易統計")
     parser.add_argument("--update_lambda_every_steps", type=int, default=TrainConfig.UPDATE_LAMBDA_EVERY_STEPS, help="每 N steps 更新一次 lambda")
+    parser.add_argument("--train_freq", type=int, default=TrainConfig.TRAIN_FREQ, help="每 N 個 env step 做一次梯度更新；>1 可提升 it/s（GPU 瓶頸時）")
     # 進度條：預設開啟（避免你忘記加參數而覺得「沒有進度」）
     parser.add_argument("--no_progress_bar", action="store_true", help="關閉 SB3 進度條（預設會顯示）")
     parser.add_argument("--verbose", type=int, default=TrainConfig.SB3_VERBOSE_DEFAULT, help="SB3 verbose 等級（預設：開進度條時=0，否則=1）")

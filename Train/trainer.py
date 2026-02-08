@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
-from typing import Optional
+from typing import Optional, Any
 
 from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import VecEnv
@@ -17,6 +17,7 @@ from Train.model_builder import ModelBuilder
 from Train.callback_builder import CallbackBuilder
 from Train.lagrangian import MultiSharedLagrangianController
 from Train.interfaces import ILagrangianController
+from Env.load_file import load_data
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,16 @@ class SACLagrangianTrainer:
         channel_configs = self.config.lagrangian_config.to_channel_configs()
         return MultiSharedLagrangianController(channel_configs)
     
-    def _create_training_env(self) -> VecEnv:
+    def _create_training_env(
+        self,
+        df_5m: Optional[Any] = None,
+        df_1d: Optional[Any] = None,
+    ) -> VecEnv:
         """创建训练环境。
+        
+        Args:
+            df_5m: 預載 5m 資料（可選）；提供時子進程不重複 load_data，縮短啟動時間
+            df_1d: 預載 1d 資料（可選）
         
         Returns:
             VecEnv 训练环境
@@ -86,6 +95,8 @@ class SACLagrangianTrainer:
             env = self.env_builder.create_training_vec_env(
                 n_envs=self.config.n_envs,
                 log_prefix=log_prefix,
+                df_5m=df_5m,
+                df_1d=df_1d,
             )
             logger.info(f"Training environment created ({self.config.n_envs} parallel envs)")
             return env
@@ -200,19 +211,21 @@ class SACLagrangianTrainer:
                 f"fric={self.config.lagrangian_config.fric_cost_limit}"
             )
             
-            # 1. 创建训练环境
-            self.training_env = self._create_training_env()
+            # 1. 載入市場資料一次，供所有子進程共用（避免 N 個 env 重複 load_data）
+            df_5m, df_1d = load_data()
+            # 2. 创建训练环境
+            self.training_env = self._create_training_env(df_5m=df_5m, df_1d=df_1d)
             
-            # 2. 创建评估环境（如果启用）
+            # 3. 创建评估环境（如果启用）
             self.eval_env = self._create_eval_env()
             
-            # 3. 创建模型
+            # 4. 创建模型
             self.model = self._create_model(self.training_env)
             
-            # 4. 创建回调
+            # 5. 创建回调
             callbacks = self._create_callbacks()
             
-            # 5. 执行训练
+            # 6. 执行训练
             logger.info(f"Starting training for {self.config.total_timesteps} timesteps...")
             self.model.learn(
                 total_timesteps=self.config.total_timesteps,
@@ -220,7 +233,7 @@ class SACLagrangianTrainer:
                 progress_bar=bool(self.config.show_progress_bar),
             )
             
-            # 6. 保存模型
+            # 7. 保存模型
             self._save_model()
             
             logger.info("Training finished successfully")

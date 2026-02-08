@@ -238,8 +238,11 @@ class TrainingConfigBuilder:
             holdout_months=TrainConfig.HOLDOUT_MONTHS,
         )
         
-        # 构建模型配置
-        model_config = ModelConfig(device=args.device)
+        # 构建模型配置（train_freq 可由 CLI 覆寫以優化 it/s）
+        model_config = ModelConfig(
+            device=args.device,
+            train_freq=getattr(args, "train_freq", TrainConfig.TRAIN_FREQ),
+        )
         
         # 构建评估配置
         eval_config = EvalConfig(
