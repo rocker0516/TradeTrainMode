@@ -80,6 +80,16 @@ class ModelBuilder(IModelBuilder):
                 verbose=0,  # 将在训练时设置
                 tensorboard_log=str(self.config.tensorboard_log_dir),
             )
+
+            if getattr(self.config, "compile_policy", False):
+                try:
+                    import torch
+                    model.policy.features_extractor = torch.compile(
+                        model.policy.features_extractor, mode="reduce-overhead"
+                    )
+                    logger.info("Policy features_extractor compiled with torch.compile (mode=reduce-overhead)")
+                except Exception as e:
+                    logger.warning("torch.compile(features_extractor) failed, continuing without: %s", e)
             
             logger.info(f"SAC model created successfully (device={self.config.device})")
             return model

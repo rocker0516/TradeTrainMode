@@ -12,6 +12,8 @@ class EvalConstraints:
 
     max_dd_limit: float
     mean_cost_limit: float
+    min_mean_return: float = 0.20
+    """最低平均收益率門檻（例如 0.20 = +20%），未達標視為 eval 失敗"""
 
 
 @dataclass(frozen=True)

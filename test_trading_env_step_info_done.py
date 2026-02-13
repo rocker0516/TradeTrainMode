@@ -120,6 +120,7 @@ def test_build_step_info_contains_required_keys_and_done_fields() -> None:
         episode_turnover_notional=123.0,
         episode_holding_steps=10,
         episode_trade_count=3,
+        episode_flat_steps=5,
         terminated=False,
         truncated=True,
         termination_reason="max_steps_reached",
@@ -135,6 +136,7 @@ def test_build_step_info_contains_required_keys_and_done_fields() -> None:
     assert info["episode_turnover_notional"] == 123.0
     assert info["episode_holding_steps"] == 10
     assert info["episode_trade_count"] == 3
+    assert info["episode_flat_steps"] == 5
     assert "fees_to_equity_ratio" in info
     assert info["terminated"] is False
     assert info["truncated"] is True

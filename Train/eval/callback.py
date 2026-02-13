@@ -78,6 +78,10 @@ class ConstraintEvalCallback(BaseCallback):
         if results.mean_cost > float(self.eval_config.constraints.mean_cost_limit):
             return True
 
+        min_ret = float(self.eval_config.constraints.min_mean_return)
+        if results.mean_return is None or results.mean_return < min_ret:
+            return True
+
         # constraints_then_balance：在通過約束後，以 mean_final_balance 選 best
         if results.mean_final_balance > self._best_mean_final_balance:
             self._best_mean_final_balance = float(results.mean_final_balance)
@@ -176,16 +180,15 @@ class ConstraintEvalCallback(BaseCallback):
 
             # episode end: optional render (VecEnv-safe)
             #
-            # 重要：SB3 VecEnv（DummyVecEnv/SubprocVecEnv）會在 done 那一步「自動 reset」，
-            # 因此在 episode 結束後再呼叫 env_method("render") 幾乎必定失敗（env.done 已被 reset 清掉）。
-            # 正確作法：在 env 端啟用 render_on_done，於終止那一步就把 render_path 塞回 info。
+            # 重要：env 端須啟用 render_on_done（由 EVAL_RENDER_EACH_EPISODE 控制），
+            # 於終止那一步把 render_path 塞回 info；callback 僅讀取並可選列印。
             if bool(getattr(self.eval_config, "render_each_episode", False)):
                 out_path = None
                 try:
                     out_path = last_info.get("render_path", None) if isinstance(last_info, dict) else None
                 except Exception:
                     out_path = None
-                if out_path and bool(getattr(self.eval_config, "print_each_episode", False)):
+                if out_path:
                     prefix = str(getattr(self.eval_config, "print_prefix", "[EVAL]"))
                     print(f"{prefix} render_saved: {out_path}", flush=True)
 

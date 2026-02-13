@@ -231,6 +231,7 @@ class LagrangianCallback(BaseCallback):
         cost_breakdowns = defaultdict(list)
         cost_penalty_totals = []
         cost_penalty_breakdowns = defaultdict(list)
+        cost_penalty_by_channel: Dict[str, list] = defaultdict(list)
         
         for info in self.ep_infos:
             metrics = info.get("episode_metrics", {})
@@ -245,6 +246,8 @@ class LagrangianCallback(BaseCallback):
                     cost_penalty_totals.append(metrics.get("cost_penalty_total", 0.0))
                 for k, v in metrics.get("cost_penalty_breakdown", {}).items():
                     cost_penalty_breakdowns[k].append(v)
+                for k, v in metrics.get("cost_penalty_by_channel", {}).items():
+                    cost_penalty_by_channel[k].append(v)
 
         # VecMonitor 的 episode 統計（wrapped env 的 reward 回報；也就是訓練端「主線 reward」episode return）
         # SB3/VecMonitor: info["episode"] = {"r": ep_return, "l": ep_len, "t": elapsed_sec}
@@ -289,6 +292,7 @@ class LagrangianCallback(BaseCallback):
         exit_coverage_rate_pct = float(trade_stats["exit_coverage_rate_pct"])
         stop_loss_per_entry_pct = float(trade_stats.get("stop_loss_per_entry_pct", 0.0))
         avg_holding_steps = float(trade_stats.get("avg_holding_steps", 0.0))
+        avg_flat_steps = float(trade_stats.get("avg_flat_steps", 0.0))
         avg_trade_count = float(trade_stats.get("avg_trade_count", 0.0))
 
         end_stats = compute_end_result_stats(list(self.ep_infos))
@@ -297,6 +301,7 @@ class LagrangianCallback(BaseCallback):
         terminated_rate = float(end_stats["terminated_rate"])
         truncated_rate = float(end_stats["truncated_rate"])
         avg_episode_len = float(end_stats["avg_episode_len"])
+        avg_episode_steps_inner = float(end_stats.get("avg_episode_steps_inner", 0.0)) or avg_episode_len
         avg_final_balance = float(end_stats["avg_final_balance"])
         
         # Win Rate
@@ -375,13 +380,11 @@ class LagrangianCallback(BaseCallback):
                 if k in self.cost_buffers and len(self.cost_buffers[k]) > 0:
                     avg_c = float(np.mean(self.cost_buffers[k]))
                 vio = avg_c - limit
-                # 說明：這裡的 avg 是「最近 update_freq steps 的 per-step 平均」。
-                # death_cost 通常只在回合終止那一步 =1，因此即使 death rate 很高，短視窗內也可能出現 avg=0。
-                death_rate_ep = float(avg_breakdown.get("death_cost", 0.0)) * 100.0
+                # 各成本線的懲罰值（=-λ*C 已正規化，與 Cost Penalty 同尺度）
+                avg_penalty_k = float(np.mean(cost_penalty_by_channel[k])) if cost_penalty_by_channel[k] else 0.0
                 print(
-                    f"  - {k:<8} λ={_fmt_lambda(lams.get(k, 0.0))}  limit={_fmt_cost_scalar(limit)}  avg={_fmt_cost_scalar(avg_c)}  "
-                   # f"death_rate_ep={death_rate_ep:6.2f}%  "
-                    f"[{'OK' if vio <= 0 else 'VIOLATION'}]"
+                    f"  - {k:<8} λ={_fmt_lambda(lams.get(k, 0.0))}  limit={_fmt_cost_scalar(limit)}  "
+                    f"avg={_fmt_cost_scalar(avg_c)}  penalty={-avg_penalty_k:8.4f}  [{'OK' if vio <= 0 else 'VIOLATION'}]"
                 )
             # 仍顯示 aggregated cost（方便對照舊圖表）
             print(f"  Avg Cost (Per Step)         : {_fmt_cost_scalar(avg_cost_per_step)}  [aggregate]")
@@ -439,7 +442,13 @@ class LagrangianCallback(BaseCallback):
         print(f"  Avg Stop Loss Count         : {avg_stop_loss:8.4f} ({stop_loss_rate_pct:5.1f}%)")
         # 讓你判斷「止損線是否過緊」的輔助指標（越高通常越緊）
         print(f"  Stop Loss / Entry Rate      : {stop_loss_per_entry_pct:8.2f} %")
-        print(f"  Avg Holding Steps           : {avg_holding_steps:8.2f}")
+        holding_ratio_pct = (100.0 * avg_holding_steps / avg_episode_steps_inner) if avg_episode_steps_inner > 0 else 0.0
+        print(f"  Avg Holding Steps           : {avg_holding_steps:8.2f}  ({holding_ratio_pct:5.1f}% of steps)")
+        flat_ratio_pct = (100.0 * avg_flat_steps / avg_episode_steps_inner) if avg_episode_steps_inner > 0 else 0.0
+        flat_limit_pct: float | None = None
+        if self._is_multi and "flat" in self.controller.channel_configs:
+            flat_limit_pct = 100.0 * float(self.controller.channel_configs["flat"].cost_limit)
+        print(f"  Avg Flat Steps (空倉)       : {avg_flat_steps:8.2f}  ({flat_ratio_pct:5.1f}% of steps)" + (f"  懲罰條件: > {flat_limit_pct:.1f}%" if flat_limit_pct is not None else ""))
         print(f"  Avg Trade Steps (traded)    : {avg_trade_count:8.2f}")
         print(f"  Exit Coverage (AE+SL)/Close  : {exit_coverage_rate_pct:8.2f} %")
         print("-" * 60)
@@ -494,6 +503,9 @@ class LagrangianCallback(BaseCallback):
         self.logger.record("custom/active_exit_rate_pct", active_exit_rate_pct)
         self.logger.record("custom/stop_loss_per_entry_pct", stop_loss_per_entry_pct)
         self.logger.record("custom/avg_holding_steps", avg_holding_steps)
+        self.logger.record("custom/holding_ratio_pct", holding_ratio_pct)
+        self.logger.record("custom/avg_flat_steps", avg_flat_steps)
+        self.logger.record("custom/flat_ratio_pct", flat_ratio_pct)
         self.logger.record("custom/avg_trade_count", avg_trade_count)
         self.logger.record("custom/avg_long_closes", avg_long_closes)
         self.logger.record("custom/avg_short_closes", avg_short_closes)

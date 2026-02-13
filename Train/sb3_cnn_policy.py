@@ -308,8 +308,11 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
 
     def forward(self, observations: Dict[str, torch.Tensor]) -> torch.Tensor:
         # SB3 可能把 env 的 float16 observation 原樣送進來（以省 replay buffer RAM）。
-        # 為了讓卷積/MLP 訓練更穩定，這裡統一轉回 float32 做計算。
-        obs = {k: v.float() for k, v in observations.items()}
+        # 僅在非 float32 時轉換，避免冗餘的 dict 與 tensor 複製（train 時若已是 float32 可省）。
+        if all(v.dtype == torch.float32 for v in observations.values()):
+            obs = observations
+        else:
+            obs = {k: v.float() for k, v in observations.items()}
 
         # ---- 5m 分支（分离）----
         e5_target = self.cnn_5m_target(obs["price_seq_target"])

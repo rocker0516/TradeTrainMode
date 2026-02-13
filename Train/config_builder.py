@@ -5,11 +5,22 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 from Train.train_config import TrainConfig
 from Train.lagrangian import LagrangianChannelConfig
+
+logger = logging.getLogger(__name__)
+
+
+def _get_cost_penalty_per_channel() -> Optional[Dict[str, float]]:
+    """從 TrainConfig 取得每通道正規化係數；空則回傳 None。"""
+    per = getattr(TrainConfig, "COST_PENALTY_NORMALIZE_PER_CHANNEL", None)
+    if not per:
+        return None
+    return dict(per)
 
 
 @dataclass
@@ -77,9 +88,11 @@ class EnvironmentConfig:
     data_mode: str = "train"
     holdout_months: int = TrainConfig.HOLDOUT_MONTHS
     flat_threshold: float = TrainConfig.FLAT_THRESHOLD
+    trade_freq_window_steps: int = TrainConfig.TRADE_FREQ_WINDOW_STEPS
+    trade_freq_cost_limit: float = TrainConfig.TRADE_FREQ_COST_LIMIT
 
     def to_dict(self) -> Dict[str, any]:
-        """转换为字典（用于环境初始化）。"""
+        """转换为字典（用于环境初始化）。訓練環境關閉 render，僅 eval 在 to_eval_dict 中開啟。"""
         return {
             "target_symbol": self.target_symbol,
             "window_size": self.window_size,
@@ -93,6 +106,10 @@ class EnvironmentConfig:
             "data_mode": self.data_mode,
             "holdout_months": self.holdout_months,
             "flat_threshold": self.flat_threshold,
+            "trade_freq_window_steps": self.trade_freq_window_steps,
+            "trade_freq_cost_limit": self.trade_freq_cost_limit,
+            "render_enabled": False,
+            "render_on_done": False,
         }
     
     def to_eval_dict(self) -> Dict[str, any]:
@@ -134,7 +151,8 @@ class ModelConfig:
     pi_arch: tuple[int, ...] = TrainConfig.PI_ARCH
     qf_arch: tuple[int, ...] = TrainConfig.QF_ARCH
     use_cross_attention: bool = True
-    
+    compile_policy: bool = TrainConfig.COMPILE_POLICY
+
     def to_dict(self) -> Dict[str, any]:
         """转换为字典（用于模型初始化）。"""
         return {
@@ -175,11 +193,12 @@ class EvalConfig:
     reject_if_death_event: bool = TrainConfig.EVAL_REJECT_IF_DEATH_EVENT
     max_dd_limit: float = TrainConfig.EVAL_MAX_DD_LIMIT
     mean_cost_limit: float = TrainConfig.EVAL_MEAN_COST_LIMIT
+    min_mean_return: float = TrainConfig.EVAL_MIN_MEAN_RETURN
     save_best_model: bool = TrainConfig.EVAL_SAVE_BEST_MODEL
     print_each_episode: bool = TrainConfig.EVAL_PRINT_EACH_EPISODE
     print_prefix: str = TrainConfig.EVAL_PRINT_PREFIX
-    render_each_episode: bool = True
-    
+    render_each_episode: bool = TrainConfig.EVAL_RENDER_EACH_EPISODE
+
     # Gate 配置
     gate_enabled: bool = TrainConfig.EVAL_GATE_ENABLED
     gate_window_size: int = TrainConfig.EVAL_GATE_WINDOW_SIZE
@@ -199,7 +218,8 @@ class TrainingConfig:
     device: str = TrainConfig.DEVICE
     show_progress_bar: bool = TrainConfig.SHOW_PROGRESS_BAR_DEFAULT
     sb3_verbose: Optional[int] = TrainConfig.SB3_VERBOSE_DEFAULT
-    
+    sb3_log_interval: int = TrainConfig.SB3_LOG_INTERVAL
+
     # 子配置
     lagrangian_config: LagrangianConfig = field(default_factory=lambda: LagrangianConfig(
         risk_cost_limit=TrainConfig.RISK_COST_LIMIT,
@@ -228,6 +248,10 @@ class TrainingConfig:
     stats_window_episodes: int = TrainConfig.STATS_WINDOW_EPISODES
     reward_scale: float = TrainConfig.REWARD_SCALE
     cost_penalty_normalize: float = TrainConfig.COST_PENALTY_NORMALIZE_FACTOR
+    cost_penalty_normalize_per_channel: Optional[Dict[str, float]] = None
+
+    # 繼續訓練：若設為非空，則從此路徑載入模型而非新建（目錄或 .zip 路徑）
+    load_model_path: Optional[str] = None
 
 
 class TrainingConfigBuilder:
@@ -263,13 +287,16 @@ class TrainingConfigBuilder:
             data_split_enabled=TrainConfig.DATA_SPLIT_ENABLED,
             data_mode="train",
             holdout_months=TrainConfig.HOLDOUT_MONTHS,
+            trade_freq_window_steps=int(getattr(args, "trade_freq_window_steps", TrainConfig.TRADE_FREQ_WINDOW_STEPS)),
+            trade_freq_cost_limit=float(getattr(args, "trade_freq_cost_limit", TrainConfig.TRADE_FREQ_COST_LIMIT)),
         )
         
-        # 构建模型配置（train_freq / gradient_steps 可由 CLI 覆寫以優化 it/s）
+        # 构建模型配置（train_freq / gradient_steps / compile_policy 可由 CLI 覆寫）
         model_config = ModelConfig(
             device=args.device,
             train_freq=getattr(args, "train_freq", TrainConfig.TRAIN_FREQ),
             gradient_steps=getattr(args, "gradient_steps", TrainConfig.GRADIENT_STEPS),
+            compile_policy=getattr(args, "compile_policy", TrainConfig.COMPILE_POLICY),
         )
         
         # 构建评估配置
@@ -278,6 +305,15 @@ class TrainingConfigBuilder:
             gate_window_size=TrainConfig.EVAL_GATE_WINDOW_SIZE,
             gate_min_max_steps_reached_count=TrainConfig.EVAL_GATE_MIN_MAX_STEPS_REACHED_COUNT,
         )
+        
+        # 避免 EVAL 大量 print 與進度條重繪搶終端，導致 Windows 上 "Fail to allocate bitmap" 崩潰
+        if eval_config.enabled and eval_config.print_each_episode and show_progress_bar:
+            show_progress_bar = False
+            sb3_verbose = args.verbose if args.verbose is not None else 1
+            logger.info(
+                "Eval 已啟用且 print_each_episode=True，已自動關閉進度條以避免終端衝突崩潰。"
+                " 若需進度條請設 EVAL_PRINT_EACH_EPISODE=False 或於 train_config 關閉。"
+            )
         
         # 构建 Lagrangian 配置
         lagrangian_config = LagrangianConfig(
@@ -300,6 +336,7 @@ class TrainingConfigBuilder:
             device=args.device,
             show_progress_bar=show_progress_bar,
             sb3_verbose=sb3_verbose,
+            sb3_log_interval=TrainConfig.SB3_LOG_INTERVAL,
             lagrangian_config=lagrangian_config,
             env_config=env_config,
             model_config=model_config,
@@ -314,5 +351,7 @@ class TrainingConfigBuilder:
             stats_window_episodes=TrainConfig.STATS_WINDOW_EPISODES,
             reward_scale=TrainConfig.REWARD_SCALE,
             cost_penalty_normalize=float(getattr(TrainConfig, "COST_PENALTY_NORMALIZE_FACTOR", 2000.0)),
+            cost_penalty_normalize_per_channel=_get_cost_penalty_per_channel(),
+            load_model_path=getattr(args, "load_model", None),
         )
 

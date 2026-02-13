@@ -78,9 +78,9 @@ class TradingObserver:
         }
 
     def _build_account_space(self) -> dict:
-        """定義帳戶狀態相關的觀察空間（含 buffer_to_min、stop_loss_rate、pnl_per_close、episode_progress、steps_since_trade）"""
+        """定義帳戶狀態相關的觀察空間（含 buffer_to_min、stop_loss_rate、pnl_per_close、episode_progress、steps_since_trade、trade_freq、entry_price_ratio、stop_loss_price_ratio）"""
         return {
-            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(21,), dtype=self.obs_dtype)
+            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(25,), dtype=self.obs_dtype)
         }
 
     def _build_context_space(self) -> dict:
@@ -221,7 +221,9 @@ class TradingObserver:
             if isinstance(v, np.ndarray):
                 if v.dtype != self.obs_dtype:
                     v = v.astype(self.obs_dtype, copy=False)
-                out[k] = np.nan_to_num(v, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+                v = np.nan_to_num(v, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+                # 保證 contiguous，讓 CPU→GPU 傳輸時單次連續拷貝（減少 GPU 瓶頸卡在傳輸）
+                out[k] = np.ascontiguousarray(v) if not v.flags.c_contiguous else v
         return out
 
     def _get_market_obs(self, step_idx: int, market_data: MarketData) -> dict:
@@ -246,7 +248,7 @@ class TradingObserver:
         current_price: float,
         atr_ratio: float,
     ) -> dict:
-        """生成帳戶狀態觀察值（20 欄位：原 16 + buffer_to_min、stop_loss_rate、pnl_per_close、episode_progress）"""
+        """生成帳戶狀態觀察值（25 欄位：含 trade_freq、entry_price_ratio、stop_loss_price_ratio）"""
         
         # 緩存常用計算值（優化效率）
         equity = float(executor.equity(current_price))
@@ -375,7 +377,31 @@ class TradingObserver:
             np.log1p(steps_since_trade) / np.log1p(max(1.0, float(episode_max_steps))),
             0.0, 1.0,
         )
-        
+
+        # 22. trade_freq_remaining_ratio [0, 1]：交易頻率硬限制剩餘額度（視窗內還可交易步數/上限）
+        trade_freq_remaining_ratio = float(account_metrics.get('trade_freq_remaining_ratio', 1.0))
+        trade_freq_remaining_ratio = np.clip(trade_freq_remaining_ratio, 0.0, 1.0)
+
+        # 23. trade_freq_blocked_last [0, 1]：上一步是否因額度滿被擋（1=被擋）
+        trade_freq_blocked_last = float(account_metrics.get('trade_freq_blocked_last', 0.0))
+        trade_freq_blocked_last = np.clip(trade_freq_blocked_last, 0.0, 1.0)
+
+        # 24. entry_price_ratio [0.5, 1.5]：進場價 / 當前價，無倉位時 1.0（與當前價同）
+        entry_price = float(executor.position.entry_price)
+        if current_price > 0 and abs(size) > 1e-12 and entry_price > 0:
+            entry_price_ratio = entry_price / current_price
+        else:
+            entry_price_ratio = 1.0
+        entry_price_ratio = np.clip(entry_price_ratio, 0.5, 1.5)
+
+        # 25. stop_loss_price_ratio [0.5, 1.5]：止損價 / 當前價，無止損時 1.0
+        stop_loss_price = float(executor.position.stop_loss_price)
+        if current_price > 0 and stop_loss_price > 0:
+            stop_loss_price_ratio = stop_loss_price / current_price
+        else:
+            stop_loss_price_ratio = 1.0
+        stop_loss_price_ratio = np.clip(stop_loss_price_ratio, 0.5, 1.5)
+
         account_state = np.array([
             position_side,              # 1
             position_size_norm,         # 2
@@ -398,6 +424,10 @@ class TradingObserver:
             realized_pnl_per_close_norm, # 19
             episode_progress,          # 20
             steps_since_trade_norm,    # 21
+            trade_freq_remaining_ratio, # 22
+            trade_freq_blocked_last,   # 23
+            entry_price_ratio,         # 24
+            stop_loss_price_ratio,     # 25
         ], dtype=self.obs_dtype)
         
         return {'account_state': account_state}

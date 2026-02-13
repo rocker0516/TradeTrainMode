@@ -134,6 +134,7 @@ class CallbackBuilder(ICallbackBuilder):
             constraints=EvalConstraints(
                 max_dd_limit=float(eval_cfg.max_dd_limit),
                 mean_cost_limit=float(eval_cfg.mean_cost_limit),
+                min_mean_return=float(eval_cfg.min_mean_return),
             ),
             train_start_gate=TrainEvalStartGateConfig(
                 enabled=bool(eval_cfg.gate_enabled),

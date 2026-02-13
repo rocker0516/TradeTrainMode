@@ -238,6 +238,8 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
         assert float(info["episode_turnover_notional"]) >= 0.0
         assert "episode_holding_steps" in info
         assert int(info["episode_holding_steps"]) >= 0
+        assert "episode_flat_steps" in info
+        assert int(info["episode_flat_steps"]) >= 0
         assert "episode_trade_count" in info
         assert int(info["episode_trade_count"]) >= 0
         assert "fees_to_equity_ratio" in info
@@ -324,10 +326,12 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
 
     # --- death cost consistency (terminated episodes) ---
     # 重要：若回合是因為 liq_triggered / balance_insufficient 終止，
-    # 則 death_cost 與 cost_risk 應該在該 step 直接為 1.0，避免「有死亡但 risk cost=0」。
+    # 則 death_cost 與 cost_risk 應在 [1.0, 2.0]（剩餘步數越多懲罰越大）。
     if info.get("termination_reason") in ("liq_triggered", "balance_insufficient"):
-        assert float(info.get("cost_risk", 0.0)) == 1.0
-        assert float(info.get("cost_breakdown", {}).get("death_cost", 0.0)) == 1.0
+        cost_risk = float(info.get("cost_risk", 0.0))
+        death_cost = float(info.get("cost_breakdown", {}).get("death_cost", 0.0))
+        assert 1.0 <= cost_risk <= 2.0, f"cost_risk should be in [1.0, 2.0], got {cost_risk}"
+        assert 1.0 <= death_cost <= 2.0, f"death_cost should be in [1.0, 2.0], got {death_cost}"
 
     # --- reward ---
     if sc.expect.get("reward_positive"):

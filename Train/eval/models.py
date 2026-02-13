@@ -115,7 +115,8 @@ class EpisodeEval:
         # 1. 不死
         # 2. MaxDD <= limit
         # 3. MeanCost <= limit
-        # 4. Ret >= 0
+        # 4. Ret >= min_mean_return（預設 0.20 = +20%）
+        min_mean_return = getattr(constraints, "min_mean_return", 0.0)
         passed = True
         if is_death_event:
             passed = False
@@ -123,7 +124,7 @@ class EpisodeEval:
             passed = False
         if (mean_cost is not None) and (mean_cost > constraints.mean_cost_limit):
             passed = False
-        if (ret is not None) and (ret < 0):
+        if (ret is not None) and (ret < min_mean_return):
             passed = False
 
         return EpisodeEval(

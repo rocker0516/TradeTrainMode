@@ -26,6 +26,7 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
         - avg_short_closes
         - avg_stop_loss
         - avg_holding_steps
+        - avg_flat_steps: 平均空倉步數（與 cost_flat 同口徑：|final_pos_pct| < flat_threshold）
         - avg_trade_count
         - avg_active_exits
         - stop_loss_rate_pct
@@ -47,6 +48,7 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
             "avg_short_closes": 0.0,
             "avg_stop_loss": 0.0,
             "avg_holding_steps": 0.0,
+            "avg_flat_steps": 0.0,
             "avg_trade_count": 0.0,
             "avg_active_exits": 0.0,
             "stop_loss_rate_pct": 0.0,
@@ -65,6 +67,7 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
     stop_losses = [int(x.get("episode_stop_loss_count", 0)) for x in ep_infos]
     active_exits = [int(x.get("episode_active_exit_count", 0)) for x in ep_infos]
     holding_steps = [int(x.get("episode_holding_steps", 0)) for x in ep_infos]
+    flat_steps = [int(x.get("episode_flat_steps", 0)) for x in ep_infos]
     trade_counts = [int(x.get("episode_trade_count", 0)) for x in ep_infos]
 
     # --- max drawdown variants ---
@@ -115,6 +118,7 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
         "avg_short_closes": float(np.mean(short_closes)) if short_closes else 0.0,
         "avg_stop_loss": float(np.mean(stop_losses)) if stop_losses else 0.0,
         "avg_holding_steps": float(np.mean(holding_steps)) if holding_steps else 0.0,
+        "avg_flat_steps": float(np.mean(flat_steps)) if flat_steps else 0.0,
         "avg_trade_count": float(np.mean(trade_counts)) if trade_counts else 0.0,
         "avg_active_exits": float(np.mean(active_exits)) if active_exits else 0.0,
         "stop_loss_rate_pct": float(stop_loss_rate_pct),
@@ -131,7 +135,8 @@ def compute_end_result_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
     統計內容：
     - terminated / truncated 次數與比例
     - termination_reason 各類型次數與比例
-    - Avg Episode Length（VecMonitor: info["episode"]["l"]）
+    - Avg Episode Length（VecMonitor: info["episode"]["l】，macro/agent 步數）
+    - avg_episode_steps_inner: 環境內層步數（TradingEnv 的 episode_steps），與 holding_steps/flat_steps 同口徑，供比例計算
     - Avg Final Balance（TradingEnv: info["final_balance"]）
 
     Args:
@@ -151,6 +156,7 @@ def compute_end_result_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
             "reason_counts": {},
             "reason_rates": {},
             "avg_episode_len": 0.0,
+            "avg_episode_steps_inner": 0.0,
             "avg_final_balance": 0.0,
         }
 
@@ -170,8 +176,10 @@ def compute_end_result_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
     reason_counts = dict(Counter(reasons))
     reason_rates = {k: (v / n) * 100.0 for k, v in reason_counts.items()}
 
-    # VecMonitor episode length
+    # VecMonitor episode length（macro/agent 步數）
     ep_lens: List[int] = []
+    # 環境內層步數（與 episode_holding_steps / episode_flat_steps 同口徑，供比例分母）
+    ep_steps_inner: List[int] = []
     for x in ep_infos:
         ep = x.get("episode", {})
         if isinstance(ep, dict):
@@ -181,6 +189,13 @@ def compute_end_result_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
                 ep_lens.append(0)
         else:
             ep_lens.append(0)
+        try:
+            inner = int(x.get("episode_steps", 0))
+            if inner <= 0 and isinstance(ep, dict):
+                inner = int(ep.get("l", 0))  # fallback to macro 步數
+            ep_steps_inner.append(max(0, inner))
+        except (TypeError, ValueError):
+            ep_steps_inner.append(ep_lens[-1] if ep_lens else 0)
 
     final_balances: List[float] = []
     for x in ep_infos:
@@ -198,6 +213,7 @@ def compute_end_result_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
         "reason_counts": reason_counts,
         "reason_rates": reason_rates,
         "avg_episode_len": float(np.mean(ep_lens)) if ep_lens else 0.0,
+        "avg_episode_steps_inner": float(np.mean(ep_steps_inner)) if ep_steps_inner else 0.0,
         "avg_final_balance": float(np.mean(final_balances)) if final_balances else 0.0,
     }
 

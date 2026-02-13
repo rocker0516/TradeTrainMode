@@ -1,6 +1,7 @@
 import gymnasium as gym
 import numpy as np
 import random
+from collections import deque
 from dataclasses import dataclass
 from gymnasium import spaces
 from typing import Optional, Dict, Tuple, Any, Iterable
@@ -185,6 +186,16 @@ class TradingEnvironment(gym.Env):
         # 空倉成本門檻：|final_pos_pct| < 此值視為空倉（供 cost_flat；可經 env_config 傳入）
         self.flat_threshold = float(kwargs.get("flat_threshold", 0.02))
 
+        # 交易頻率硬限制：與 TRADE_FREQ_WINDOW_STEPS / TRADE_FREQ_COST_LIMIT 一致，滑動視窗內最多 (limit * window) 步可交易
+        self._trade_freq_window_steps = kwargs.get("trade_freq_window_steps")
+        self._trade_freq_cost_limit = kwargs.get("trade_freq_cost_limit")
+        if self._trade_freq_window_steps is not None:
+            self._trade_freq_window_steps = int(self._trade_freq_window_steps)
+        if self._trade_freq_cost_limit is not None:
+            self._trade_freq_cost_limit = float(self._trade_freq_cost_limit)
+        # 若未傳入或 window <= 0 則不啟用硬限制；deque 在 reset() 時初始化
+        self._trade_freq_deque: Optional[deque] = None
+
         # ---- Render runtime caches ----
         # 每步事件（供 episode 結束時 render 畫 entry/reduce/close/flip/SL/LIQ）
         self._episode_events: list[dict[str, Any]] = []
@@ -230,6 +241,8 @@ class TradingEnvironment(gym.Env):
         self.episode_turnover_notional = 0.0
         self.episode_holding_steps = 0
         self.episode_trade_count = 0
+        # 空倉步數（與 cost_flat 同口徑：|final_pos_pct| < flat_threshold）
+        self.episode_flat_steps = 0
         # Episode-level event metrics (for Trade Stats)
         # 主動出場：由 agent 動作將持倉平到 0（排除 stop loss / liquidation 強制出場）
         self.episode_active_exit_count = 0
@@ -444,6 +457,7 @@ class TradingEnvironment(gym.Env):
         self.episode_turnover_notional = 0.0
         self.episode_holding_steps = 0
         self.episode_trade_count = 0
+        self.episode_flat_steps = 0
         self.episode_active_exit_count = 0
         
         self.last_trade_step = -999999
@@ -469,15 +483,28 @@ class TradingEnvironment(gym.Env):
             "last_target_pos_pct": 0.0,
             "last_final_pos_pct": 0.0,
             "trade_executed_flag": 0.0,
+            "trade_freq_blocked": 0.0,
         }
 
-        # 4. Initial Observation
+        # 交易頻率硬限制：滑動視窗 deque（每步 1=有交易 / 0=無）
+        if getattr(self, "_trade_freq_window_steps", None) and getattr(self, "_trade_freq_cost_limit", None) is not None:
+            if self._trade_freq_window_steps > 0 and self._trade_freq_cost_limit >= 0.0:
+                self._trade_freq_deque = deque(maxlen=int(self._trade_freq_window_steps))
+            else:
+                self._trade_freq_deque = None
+        else:
+            self._trade_freq_deque = None
+
+        # 4. Initial Observation（it/s 優化：算一次 metrics/risk 並傳入，避免 _get_observation 內重算）
         metrics = self.market_data.get_market_metrics(self.current_step)
         current_price = metrics['close']
         self.tracker.update_account_series(self.current_step, self.executor, current_price)
-        
+        atr_est = float(metrics.get("atr_ratio", 0.0)) * float(current_price)
+        risk_signals = self.observer.compute_risk_signals(
+            self.executor, current_price, atr_est, self.current_step, len(self.market_data.df_5m)
+        )
         # Gymnasium reset() 允許回傳 info；我們把 episode 起始資訊放進去，方便評估端取用
-        return self._get_observation(), {
+        return self._get_observation(precomputed_metrics=metrics, precomputed_risk_signals=risk_signals), {
             "episode_start_step": int(self.episode_start_step),
             "episode_start_timestamp": self.episode_start_timestamp,
         }
@@ -624,16 +651,27 @@ class TradingEnvironment(gym.Env):
         except Exception:
             return None
 
-    def _get_observation(self):
-        # 準備 Observation 需要的各類 metrics
-        metrics = self.market_data.get_market_metrics(self.current_step)
+    def _get_observation(
+        self,
+        *,
+        precomputed_metrics: Optional[Dict[str, Any]] = None,
+        precomputed_risk_signals: Optional[Dict[str, Any]] = None,
+    ):
+        # 準備 Observation 需要的各類 metrics（it/s 優化：step() 回傳時可傳入已算好的值，避免重算）
+        if precomputed_metrics is not None:
+            metrics = precomputed_metrics
+        else:
+            metrics = self.market_data.get_market_metrics(self.current_step)
         current_price = metrics['close']
         atr_est = float(metrics.get("atr_ratio", 0.0)) * float(current_price)
-        
-        risk_signals = self.observer.compute_risk_signals(
-            self.executor, current_price, atr_est, self.current_step, len(self.market_data.df_5m)
-        )
-        
+
+        if precomputed_risk_signals is not None:
+            risk_signals = precomputed_risk_signals
+        else:
+            risk_signals = self.observer.compute_risk_signals(
+                self.executor, current_price, atr_est, self.current_step, len(self.market_data.df_5m)
+            )
+
         account_metrics = {
             'initial_balance': self.initial_balance,
             'max_equity_so_far': self.max_equity_so_far,
@@ -649,7 +687,15 @@ class TradingEnvironment(gym.Env):
             'episode_steps': int(self.episode_steps),
             'episode_max_steps': int(getattr(self, 'episode_max_steps', 1)),
         }
-        
+        # 交易頻率硬限制：剩餘額度（0~1）與上一步是否因額度被擋
+        if self._trade_freq_deque is not None:
+            max_allowed = max(1, int(float(self._trade_freq_cost_limit) * int(self._trade_freq_window_steps)))
+            remaining = max(0, max_allowed - sum(self._trade_freq_deque))
+            account_metrics['trade_freq_remaining_ratio'] = float(remaining) / float(max_allowed)
+        else:
+            account_metrics['trade_freq_remaining_ratio'] = 1.0
+        account_metrics['trade_freq_blocked_last'] = float(self._last_action_effects.get('trade_freq_blocked', 0.0))
+
         return self.observer.get_observation(
             step_idx=self.current_step,
             executor=self.executor,
@@ -704,6 +750,7 @@ class TradingEnvironment(gym.Env):
         episode_turnover_notional: float,
         episode_holding_steps: int,
         episode_trade_count: int,
+        episode_flat_steps: int,
         terminated: bool,
         truncated: bool,
         termination_reason: Optional[str],
@@ -722,6 +769,7 @@ class TradingEnvironment(gym.Env):
             episode_turnover_notional: 本回合累積換手名目（sum(abs(delta_size) * price)）
             episode_holding_steps: 本回合持倉步數（abs(position.size)>0 的 step 數）
             episode_trade_count: 本回合發生交易的 step 數（position_change > threshold）
+            episode_flat_steps: 本回合空倉步數（|final_pos_pct|<flat_threshold，與 cost_flat 同口徑）
             terminated: Gymnasium terminated（自然終止）
             truncated: Gymnasium truncated（時間/資料截斷）
             termination_reason: 終止原因（若結束回合）
@@ -752,6 +800,7 @@ class TradingEnvironment(gym.Env):
             info["episode_turnover_notional"] = float(max(0.0, episode_turnover_notional))
             info["episode_holding_steps"] = int(max(0, int(episode_holding_steps)))
             info["episode_trade_count"] = int(max(0, int(episode_trade_count)))
+            info["episode_flat_steps"] = int(max(0, int(episode_flat_steps)))
             info["fees_to_equity_ratio"] = (
                 float(getattr(self.executor, "total_fees", 0.0)) / float(max(1e-8, new_equity))
             )
@@ -892,7 +941,7 @@ class TradingEnvironment(gym.Env):
             prices: 本 step 價格資訊
 
         Returns:
-            (final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, action_overridden_flag)
+            (final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, action_overridden_flag, trade_freq_blocked)
         """
         action_used = self._apply_stop_loss_cooldown(action, prices.current_price, last_equity)
         # action 是否被 env 覆寫（目前主要是 cooldown）
@@ -908,6 +957,20 @@ class TradingEnvironment(gym.Env):
         final_pos_pct = self.action_processor.calculate_effective_action(
             target_pos_pct, self.executor, prices.current_price, self.daily_risk_base
         )
+
+        trade_freq_blocked = False
+        # 交易頻率硬限制：滑動視窗內已達 (limit * window) 次交易則本步強制不成交
+        if self._trade_freq_deque is not None:
+            max_allowed = max(1, int(float(self._trade_freq_cost_limit) * int(self._trade_freq_window_steps)))
+            trades_in_window = sum(self._trade_freq_deque)
+            if trades_in_window >= max_allowed:
+                current_size = float(self.executor.position.size)
+                max_nominal = max(last_equity * self.leverage, 1e-8)
+                current_pos_pct = float(current_size * prices.current_price) / max_nominal
+                current_pos_pct = np.clip(current_pos_pct, -1.0, 1.0)
+                final_pos_pct = current_pos_pct
+                action_overridden_flag = True
+                trade_freq_blocked = True
 
         expected_fee = self._estimate_expected_fee(
             final_pos_pct=final_pos_pct,
@@ -934,6 +997,7 @@ class TradingEnvironment(gym.Env):
             action_used,
             float(target_pos_pct),
             bool(action_overridden_flag),
+            bool(trade_freq_blocked),
         )
 
     def _estimate_expected_fee(
@@ -1136,7 +1200,7 @@ class TradingEnvironment(gym.Env):
         prev_size = float(self._last_position_size)
 
         # 2. Process action + execute
-        final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, action_overridden_flag = self._process_action_and_execute(
+        final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, action_overridden_flag, trade_freq_blocked = self._process_action_and_execute(
             action=action,
             last_equity=last_equity,
             prices=prices,
@@ -1156,6 +1220,7 @@ class TradingEnvironment(gym.Env):
         self._last_action_effects["last_target_pos_pct"] = float(target_pos_pct)
         self._last_action_effects["last_final_pos_pct"] = float(final_pos_pct)
         self._last_action_effects["action_overridden_flag"] = 1.0 if bool(action_overridden_flag) else 0.0
+        self._last_action_effects["trade_freq_blocked"] = 1.0 if bool(trade_freq_blocked) else 0.0
         new_size = float(self.executor.position.size)
         self._update_position_entry(new_size=new_size)
         step_fee, safe_equity = self._update_fee_tracking(current_price=prices.current_price)
@@ -1270,11 +1335,14 @@ class TradingEnvironment(gym.Env):
         step_fee_ratio = float(step_fee / self.initial_balance) if self.initial_balance > 0 else 0.0
         
         # 計算成本（僅保留 cost_risk 和 cost_fric）
+        # 死亡時傳入 episode 步數，使 cost_risk 隨剩餘步數加權（越早死懲罰越大）
         cost_out = self.cost_calculator.compute(
             liq_triggered=bool(liq_triggered),
             equity=float(new_equity),
             min_balance=float(self.min_balance),
             step_fee=float(step_fee),
+            episode_steps=int(self.episode_steps),
+            episode_max_steps=int(self.episode_max_steps),
         )
 
         # ---- Record render events (entry/reduce/close/flip/SL/LIQ) ----
@@ -1295,6 +1363,11 @@ class TradingEnvironment(gym.Env):
         self.episode_steps += 1
         self._last_position_size = float(new_size)
         
+        # 空倉判斷（與 cost_flat 同口徑）：|final_pos_pct| < 門檻則計入空倉步數
+        is_flat = abs(float(final_pos_pct)) < float(getattr(self, "flat_threshold", 0.02))
+        if is_flat:
+            self.episode_flat_steps += 1
+
         # 11. Tracker Log
         info = self._build_step_info(
             new_equity=float(new_equity),
@@ -1307,6 +1380,7 @@ class TradingEnvironment(gym.Env):
             episode_turnover_notional=float(self.episode_turnover_notional),
             episode_holding_steps=int(self.episode_holding_steps),
             episode_trade_count=int(self.episode_trade_count),
+            episode_flat_steps=int(self.episode_flat_steps),
             terminated=bool(terminated),
             truncated=bool(truncated),
             termination_reason=termination_reason,
@@ -1314,6 +1388,8 @@ class TradingEnvironment(gym.Env):
 
         # 將 cost 與分項加入 info（不破壞既有 key）
         info["cost"] = float(cost_out["cost"])
+        if "cost_breakdown" in cost_out:
+            info["cost_breakdown"] = dict(cost_out["cost_breakdown"])
         # 雙通道成本（供多 λ 使用）
         if "cost_risk" in cost_out:
             info["cost_risk"] = float(cost_out["cost_risk"])
@@ -1322,8 +1398,10 @@ class TradingEnvironment(gym.Env):
         # 交易頻率成本：本步有持倉變化則 1.0，否則 0.0（供「最近 N 步交易比例」約束使用）
         position_changed = abs(float(new_size) - float(prev_size)) > 1e-9
         info["cost_trade_freq"] = 1.0 if position_changed else 0.0
+        # 交易頻率硬限制：更新滑動視窗（供下一步是否允許交易判斷）
+        if self._trade_freq_deque is not None:
+            self._trade_freq_deque.append(1.0 if position_changed else 0.0)
         # 空倉成本：鼓勵持倉、允許避險；|final_pos_pct| < 門檻則 1.0，否則 0.0
-        is_flat = abs(float(final_pos_pct)) < float(getattr(self, "flat_threshold", 0.02))
         info["cost_flat"] = 1.0 if is_flat else 0.0
 
         # cache last info for render()

@@ -52,6 +52,7 @@ def _create_env_builder(config: Any) -> EnvironmentBuilder:
         action_repeat=config.action_repeat,
         reward_scale=config.reward_scale,
         cost_penalty_normalize=getattr(config, "cost_penalty_normalize", 2000.0),
+        cost_penalty_normalize_per_channel=getattr(config, "cost_penalty_normalize_per_channel", None),
     )
     return builder
 
@@ -126,12 +127,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=TrainConfig.DEVICE, help="計算設備：'cuda' / 'cpu' / 'auto'")
     parser.add_argument("--log_every_episodes", type=int, default=TrainConfig.LOG_EVERY_EPISODES, help="每 N 回合輸出交易統計")
     parser.add_argument("--update_lambda_every_steps", type=int, default=TrainConfig.UPDATE_LAMBDA_EVERY_STEPS, help="每 N steps 更新一次 lambda")
-    parser.add_argument("--train_freq", type=int, default=TrainConfig.TRAIN_FREQ, help="每 N 個 env step 做一次梯度更新；2~4 可顯著提升 it/s（GPU 瓶頸時）")
-    parser.add_argument("--gradient_steps", type=int, default=TrainConfig.GRADIENT_STEPS, help="每次更新時的梯度步數；建議 train_freq>1 時設為與 train_freq 相近以維持更新量")
+    parser.add_argument("--train_freq", type=int, default=TrainConfig.TRAIN_FREQ, help="每 N 個 env step 做一次梯度更新")
+    parser.add_argument("--gradient_steps", type=int, default=TrainConfig.GRADIENT_STEPS, help="每次更新時的梯度步數")
+    parser.add_argument("--compile_policy", action="store_true", help="對 features_extractor 做 torch.compile（PyTorch 2+，瓶頸在 GPU 時可試）")
     # 進度條：預設開啟（避免你忘記加參數而覺得「沒有進度」）
     parser.add_argument("--no_progress_bar", action="store_true", help="關閉 SB3 進度條（預設會顯示）")
     parser.add_argument("--verbose", type=int, default=TrainConfig.SB3_VERBOSE_DEFAULT, help="SB3 verbose 等級（預設：開進度條時=0，否則=1）")
     parser.add_argument("--profile_steps", type=int, default=0, help="若 >0：僅跑此步數並輸出 env/predict 時間佔比，找出 it/s 瓶頸後即結束")
+    parser.add_argument(
+        "--load_model",
+        type=str,
+        default=None,
+        help="從此路徑載入模型繼續訓練（目錄如 models/sac_lag_BTCUSDT/best_model，或 .zip 路徑）",
+    )
     return parser.parse_args()
 
 
@@ -157,6 +165,9 @@ def main() -> None:
         
         # 2. 構建訓練配置
         config = TrainingConfigBuilder.from_cli_args(args)
+        per_ch = getattr(config, "cost_penalty_normalize_per_channel", None)
+        if per_ch:
+            logger.info("Cost penalty per-channel norms (used by LagrangianRewardWrapper): %s", per_ch)
         profile_steps = getattr(args, "profile_steps", 0)
         if profile_steps > 0:
             run_profiling(config, profile_steps)

@@ -21,7 +21,7 @@ class CostCalculator:
     確保約束條件在不同資金規模下具有尺度不變性 (Scale Invariance)。
 
     公式：
-    1. Death Cost: 1.0 (若發生爆倉/破產，視為損失 100% 權益)
+    1. Death Cost: 死亡時 = 1.0 + (剩餘步數/總步數)，未死亡 = 0；越早死懲罰越大（最多 2.0）
     2. Fric Cost : StepFee / Equity (本步手續費佔權益的比例)
     """
 
@@ -45,25 +45,36 @@ class CostCalculator:
             equity: 當前權益 (E_t)
             min_balance: 最低資金門檻
             step_fee: 本步產生的手續費 (絕對金額；包含加倉/減倉/平倉)
-            step_fee_add_only: （可選，從 kwargs 傳入）僅計入「加碼/加曝險」的手續費，用於排除減倉/平倉的摩擦成本線
+            episode_steps: （可選）本回合已執行步數（不含本步）；與 episode_max_steps 同時提供時，死亡成本隨剩餘步數加權
+            episode_max_steps: （可選）本回合最大步數
+            step_fee_add_only: （可選）僅計入「加碼/加曝險」的手續費
 
         Returns:
             Dict:
-            - cost: 總正規化成本 (供單一 Lambda 使用)
-            - cost_risk: 死亡成本 (1.0 or 0.0)
+            - cost: 總正規化成本
+            - cost_risk: 死亡成本 (0 或 [1.0, 2.0]，剩餘步數越多越大)
             - cost_fric: 摩擦成本 (目前固定為 0.0)
             - cost_breakdown: 詳細分項
         """
         # 防除以零保護：使用 min_balance 或極小值做為分母下限
-        # 若 equity 已經低於 0，則保護值為 1e-4，避免負值或除零炸裂
         safe_equity = max(equity, 1e-4)
 
         # 1. 死亡/風險成本 (c_risk)
-        # 定義：發生死亡事件 = 100% 權益損失風險實現 -> Cost = 1.0
+        # 定義：死亡時 = 1.0 + (剩餘步數/總步數)，區間 [1.0, 2.0]；越早死（剩餘步數多）懲罰越大
         is_dead = liq_triggered or (equity <= min_balance)
-        c_death = 1.0 if is_dead else 0.0
+        if is_dead:
+            ep_steps = kwargs.get("episode_steps")
+            ep_max = kwargs.get("episode_max_steps")
+            if ep_max is not None and ep_max >= 1 and ep_steps is not None:
+                # 本步為第 (episode_steps+1) 步，剩餘步數 = max(0, max - steps - 1)
+                remaining = max(0, int(ep_max) - int(ep_steps) - 1)
+                ratio = float(remaining) / float(max(1, int(ep_max)))
+                c_death = 1.0 + ratio  # [1.0, 2.0]
+            else:
+                c_death = 1.0
+        else:
+            c_death = 0.0
 
-        # 風險通道：只代表死亡事件
         c_risk = float(c_death)
         
         # 2. 摩擦成本 (c_fric)

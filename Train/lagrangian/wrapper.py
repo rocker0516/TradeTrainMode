@@ -2,9 +2,20 @@ from __future__ import annotations
 
 import gymnasium as gym
 from collections import defaultdict
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from Train.lagrangian.controllers import MultiSharedLagrangianController
+
+
+def _norm_for_channel(
+    channel: str,
+    default_norm: float,
+    per_channel: Optional[Dict[str, float]] = None,
+) -> float:
+    """該通道的正規化係數；未指定則用 default_norm。"""
+    if per_channel and channel in per_channel:
+        return max(1.0, float(per_channel[channel]))
+    return max(1.0, float(default_norm))
 
 
 class LagrangianRewardWrapper(gym.Wrapper):
@@ -12,19 +23,22 @@ class LagrangianRewardWrapper(gym.Wrapper):
     環境包裝器：將原始 Reward 修正為 Lagrangian Reward。
     並負責統計「原始主線獎勵」與「累積成本」供 Callback 顯示。
     
-    R' = (Reward * scale) - (λ * Cost)
+    R' = (Reward * scale) - sum_k (λ_k * cost_k) / norm_k
+    每條成本線可設獨立 norm_k（COST_PENALTY_NORMALIZE_PER_CHANNEL），級距不同時避免單一係數失真。
     """
     def __init__(
-        self, 
-        env: gym.Env, 
+        self,
+        env: gym.Env,
         controller: Any,
         reward_scale: float = 1.0,
         cost_penalty_normalize: float = 2000.0,
+        cost_penalty_normalize_per_channel: Optional[Dict[str, float]] = None,
     ) -> None:
         super().__init__(env)
         self.controller = controller
         self.reward_scale = float(reward_scale)
         self.cost_penalty_normalize = max(1.0, float(cost_penalty_normalize))
+        self.cost_penalty_normalize_per_channel = dict(cost_penalty_normalize_per_channel) if cost_penalty_normalize_per_channel else None
 
         # --- Cross-process lambda sync (for SubprocVecEnv / Windows spawn) ---
         # 在 SubprocVecEnv（spawn）情境下，controller 的共享值不一定會在各子進程保持同步。
@@ -42,6 +56,8 @@ class LagrangianRewardWrapper(gym.Wrapper):
         # 注意：實際 modified_reward 公式是減掉它，所以輸出時通常會以負號呈現。
         self.ep_cost_penalty_total = 0.0
         self.ep_cost_penalty_breakdown = defaultdict(float)
+        # 每條成本線（channel）的懲罰累計（已正規化），供 STATS 顯示各線貢獻
+        self.ep_cost_penalty_by_channel: Dict[str, float] = {}
         
     def reset(self, **kwargs):
         self.ep_ret_orig = 0.0
@@ -51,6 +67,7 @@ class LagrangianRewardWrapper(gym.Wrapper):
         self.ep_cost_breakdown.clear()
         self.ep_cost_penalty_total = 0.0
         self.ep_cost_penalty_breakdown.clear()
+        self.ep_cost_penalty_by_channel = {}
         return self.env.reset(**kwargs)
 
     def set_lagrangian_lambdas(self, lambdas: Dict[str, float]) -> None:
@@ -95,8 +112,18 @@ class LagrangianRewardWrapper(gym.Wrapper):
                 k: float(info.get(f"cost_{k}", 0.0))
                 for k in self.controller.channel_configs.keys()
             }
-            penalty_raw = float(sum(lams[k] * channel_costs[k] for k in channel_costs.keys()))
-            penalty = penalty_raw / self.cost_penalty_normalize
+            # 每條成本線獨立正規化後再加總（級距不同時避免單一係數失真）
+            penalty = 0.0
+            for k in channel_costs.keys():
+                norm_k = _norm_for_channel(
+                    k,
+                    self.cost_penalty_normalize,
+                    self.cost_penalty_normalize_per_channel,
+                )
+                p_k = (lams[k] * channel_costs[k]) / norm_k
+                penalty += p_k
+                self.ep_cost_penalty_by_channel[k] = self.ep_cost_penalty_by_channel.get(k, 0.0) + float(p_k)
+            penalty = float(penalty)
             modified_reward = (raw_reward * self.reward_scale) - penalty
             self.ep_ret_total += float(modified_reward)
             self.ep_cost_penalty_total += float(penalty)
@@ -131,7 +158,7 @@ class LagrangianRewardWrapper(gym.Wrapper):
         
         # 4. 若回合結束，將累計統計注入 info 供 Callback 讀取
         if terminated or truncated:
-            info["episode_metrics"] = {
+            ep_metrics: Dict[str, Any] = {
                 "return_orig": self.ep_ret_orig,
                 "return_orig_scaled": self.ep_ret_orig_scaled,
                 "return_total": self.ep_ret_total,
@@ -141,6 +168,9 @@ class LagrangianRewardWrapper(gym.Wrapper):
                 "cost_penalty_total": self.ep_cost_penalty_total,
                 "cost_penalty_breakdown": dict(self.ep_cost_penalty_breakdown),
             }
+            if self.ep_cost_penalty_by_channel:
+                ep_metrics["cost_penalty_by_channel"] = dict(self.ep_cost_penalty_by_channel)
+            info["episode_metrics"] = ep_metrics
             # Reset 在 reset() 做，這裡不急著清空，避免 info 引用錯誤
         
         # Debug info

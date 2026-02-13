@@ -19,6 +19,8 @@ class EvalConstraints:
 
     max_dd_limit: float
     mean_cost_limit: float
+    min_mean_return: float = 0.20
+    """最低平均收益率門檻（例如 0.20 = +20%），未達標視為 eval 失敗"""
 
 
 @dataclass(frozen=True)
@@ -191,6 +193,10 @@ class ConstraintEvalCallback(BaseCallback):
             return True
 
         if results.mean_cost > float(self.eval_config.constraints.mean_cost_limit):
+            return True
+
+        min_ret = float(getattr(self.eval_config.constraints, "min_mean_return", 0.0))
+        if results.mean_return is None or results.mean_return < min_ret:
             return True
 
         # constraints_then_balance：在通過約束後，以 mean_final_balance 選 best

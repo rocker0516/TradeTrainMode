@@ -51,6 +51,15 @@ def _build_account_and_context_obs_named(obs: dict) -> Dict[str, Dict[str, float
         "trade_count_log",            # 14
         "stop_loss_count_log",         # 15
         "holding_time_log",           # 16
+        "buffer_to_min_balance_ratio", # 17
+        "stop_loss_rate",             # 18
+        "realized_pnl_per_close_norm", # 19
+        "episode_progress",           # 20
+        "steps_since_trade_norm",     # 21
+        "trade_freq_remaining_ratio", # 22
+        "trade_freq_blocked_last",    # 23
+        "entry_price_ratio",         # 24
+        "stop_loss_price_ratio",     # 25
     ]
     cost_state_names = [
         "placeholder",  # 佔位欄位（cost_state 已清空）

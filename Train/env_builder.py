@@ -34,16 +34,18 @@ class EnvironmentBuilder:
         action_repeat: int = 1,
         reward_scale: float = 1.0,
         cost_penalty_normalize: float = 2000.0,
+        cost_penalty_normalize_per_channel: Optional[Dict[str, float]] = None,
     ):
         """初始化环境构建器。
-        
+
         Args:
             config: 环境配置
             controller: Lagrangian 控制器（可选）
             max_position_pct: 最大持仓百分比
             action_repeat: 动作重复次数
             reward_scale: 奖励缩放因子
-            cost_penalty_normalize: 成本懲罰除以此係數，使與主線 reward 同尺度
+            cost_penalty_normalize: 成本懲罰預設除數（未在 per_channel 指定的通道用此值）
+            cost_penalty_normalize_per_channel: 每條成本線獨立除數（如 {"risk": 100, "flat": 1000}）
         """
         self.config = config
         self.controller = controller
@@ -51,6 +53,7 @@ class EnvironmentBuilder:
         self.action_repeat = action_repeat
         self.reward_scale = reward_scale
         self.cost_penalty_normalize = max(1.0, float(cost_penalty_normalize))
+        self.cost_penalty_normalize_per_channel = dict(cost_penalty_normalize_per_channel) if cost_penalty_normalize_per_channel else None
     
     def build_base_env(
         self,
@@ -113,6 +116,7 @@ class EnvironmentBuilder:
                 self.controller,
                 reward_scale=self.reward_scale,
                 cost_penalty_normalize=self.cost_penalty_normalize,
+                cost_penalty_normalize_per_channel=self.cost_penalty_normalize_per_channel,
             )
         
         return env
@@ -131,6 +135,10 @@ class EnvironmentBuilder:
         # 使用评估配置
         eval_kwargs = self.config.to_eval_dict()
         eval_kwargs["random_start"] = TrainConfig.EVAL_RANDOM_START
+        # 僅當 EVAL_RENDER_EACH_EPISODE 為 True 時才在 eval 環境啟用 render（開關生效）
+        render_each = bool(getattr(TrainConfig, "EVAL_RENDER_EACH_EPISODE", False))
+        eval_kwargs["render_enabled"] = render_each
+        eval_kwargs["render_on_done"] = render_each
         # 添加 render_dir
         import os
         eval_kwargs["render_dir"] = os.path.join("logs", "renders", f"eval_{symbol}")

@@ -32,6 +32,7 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
         - avg_short_closes
         - avg_stop_loss
         - avg_holding_steps
+        - avg_flat_steps: 平均空倉步數（與 cost_flat 同口徑）
         - avg_trade_count
         - avg_active_exits
         - stop_loss_rate_pct
@@ -53,6 +54,7 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
             "avg_short_closes": 0.0,
             "avg_stop_loss": 0.0,
             "avg_holding_steps": 0.0,
+            "avg_flat_steps": 0.0,
             "avg_trade_count": 0.0,
             "avg_active_exits": 0.0,
             "stop_loss_rate_pct": 0.0,
@@ -71,6 +73,7 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
     stop_losses = [int(x.get("episode_stop_loss_count", 0)) for x in ep_infos]
     active_exits = [int(x.get("episode_active_exit_count", 0)) for x in ep_infos]
     holding_steps = [int(x.get("episode_holding_steps", 0)) for x in ep_infos]
+    flat_steps = [int(x.get("episode_flat_steps", 0)) for x in ep_infos]
     trade_counts = [int(x.get("episode_trade_count", 0)) for x in ep_infos]
 
     # --- max drawdown variants ---
@@ -121,6 +124,7 @@ def compute_trade_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, float]:
         "avg_short_closes": float(np.mean(short_closes)) if short_closes else 0.0,
         "avg_stop_loss": float(np.mean(stop_losses)) if stop_losses else 0.0,
         "avg_holding_steps": float(np.mean(holding_steps)) if holding_steps else 0.0,
+        "avg_flat_steps": float(np.mean(flat_steps)) if flat_steps else 0.0,
         "avg_trade_count": float(np.mean(trade_counts)) if trade_counts else 0.0,
         "avg_active_exits": float(np.mean(active_exits)) if active_exits else 0.0,
         "stop_loss_rate_pct": float(stop_loss_rate_pct),
@@ -137,7 +141,8 @@ def compute_end_result_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
     統計內容：
     - terminated / truncated 次數與比例
     - termination_reason 各類型次數與比例
-    - Avg Episode Length（VecMonitor: info["episode"]["l"]）
+    - Avg Episode Length（VecMonitor: info["episode"]["l】，macro 步數）
+    - avg_episode_steps_inner: 環境內層步數（與 holding_steps/flat_steps 同口徑）
     - Avg Final Balance（TradingEnv: info["final_balance"]）
 
     Args:
@@ -157,6 +162,7 @@ def compute_end_result_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
             "reason_counts": {},
             "reason_rates": {},
             "avg_episode_len": 0.0,
+            "avg_episode_steps_inner": 0.0,
             "avg_final_balance": 0.0,
         }
 
@@ -176,8 +182,9 @@ def compute_end_result_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
     reason_counts = dict(Counter(reasons))
     reason_rates = {k: (v / n) * 100.0 for k, v in reason_counts.items()}
 
-    # VecMonitor episode length
+    # VecMonitor episode length（macro 步數）
     ep_lens: List[int] = []
+    ep_steps_inner: List[int] = []
     for x in ep_infos:
         ep = x.get("episode", {})
         if isinstance(ep, dict):
@@ -187,6 +194,13 @@ def compute_end_result_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
                 ep_lens.append(0)
         else:
             ep_lens.append(0)
+        try:
+            inner = int(x.get("episode_steps", 0))
+            if inner <= 0 and isinstance(ep, dict):
+                inner = int(ep.get("l", 0))
+            ep_steps_inner.append(max(0, inner))
+        except (TypeError, ValueError):
+            ep_steps_inner.append(ep_lens[-1] if ep_lens else 0)
 
     final_balances: List[float] = []
     for x in ep_infos:
@@ -204,6 +218,7 @@ def compute_end_result_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
         "reason_counts": reason_counts,
         "reason_rates": reason_rates,
         "avg_episode_len": float(np.mean(ep_lens)) if ep_lens else 0.0,
+        "avg_episode_steps_inner": float(np.mean(ep_steps_inner)) if ep_steps_inner else 0.0,
         "avg_final_balance": float(np.mean(final_balances)) if final_balances else 0.0,
     }
 
@@ -722,6 +737,7 @@ class LagrangianCallback(BaseCallback):
         exit_coverage_rate_pct = float(trade_stats["exit_coverage_rate_pct"])
         stop_loss_per_entry_pct = float(trade_stats.get("stop_loss_per_entry_pct", 0.0))
         avg_holding_steps = float(trade_stats.get("avg_holding_steps", 0.0))
+        avg_flat_steps = float(trade_stats.get("avg_flat_steps", 0.0))
         avg_trade_count = float(trade_stats.get("avg_trade_count", 0.0))
 
         end_stats = compute_end_result_stats(list(self.ep_infos))
@@ -730,6 +746,7 @@ class LagrangianCallback(BaseCallback):
         terminated_rate = float(end_stats["terminated_rate"])
         truncated_rate = float(end_stats["truncated_rate"])
         avg_episode_len = float(end_stats["avg_episode_len"])
+        avg_episode_steps_inner = float(end_stats.get("avg_episode_steps_inner", 0.0)) or avg_episode_len
         avg_final_balance = float(end_stats["avg_final_balance"])
         
         # Win Rate
@@ -872,7 +889,13 @@ class LagrangianCallback(BaseCallback):
         print(f"  Avg Stop Loss Count         : {avg_stop_loss:8.4f} ({stop_loss_rate_pct:5.1f}%)")
         # 讓你判斷「止損線是否過緊」的輔助指標（越高通常越緊）
         print(f"  Stop Loss / Entry Rate      : {stop_loss_per_entry_pct:8.2f} %")
-        print(f"  Avg Holding Steps           : {avg_holding_steps:8.2f}")
+        holding_ratio_pct = (100.0 * avg_holding_steps / avg_episode_steps_inner) if avg_episode_steps_inner > 0 else 0.0
+        print(f"  Avg Holding Steps           : {avg_holding_steps:8.2f}  ({holding_ratio_pct:5.1f}% of steps)")
+        flat_ratio_pct = (100.0 * avg_flat_steps / avg_episode_steps_inner) if avg_episode_steps_inner > 0 else 0.0
+        flat_limit_pct: float | None = None
+        if isinstance(self.controller, MultiSharedLagrangianController) and "flat" in self.controller.channel_configs:
+            flat_limit_pct = 100.0 * float(self.controller.channel_configs["flat"].cost_limit)
+        print(f"  Avg Flat Steps (空倉)       : {avg_flat_steps:8.2f}  ({flat_ratio_pct:5.1f}% of steps)" + (f"  懲罰條件: > {flat_limit_pct:.1f}%" if flat_limit_pct is not None else ""))
         print(f"  Avg Trade Steps (traded)    : {avg_trade_count:8.2f}")
         print(f"  Exit Coverage (AE+SL)/Close  : {exit_coverage_rate_pct:8.2f} %")
         print("-" * 60)
@@ -927,6 +950,9 @@ class LagrangianCallback(BaseCallback):
         self.logger.record("custom/active_exit_rate_pct", active_exit_rate_pct)
         self.logger.record("custom/stop_loss_per_entry_pct", stop_loss_per_entry_pct)
         self.logger.record("custom/avg_holding_steps", avg_holding_steps)
+        self.logger.record("custom/holding_ratio_pct", holding_ratio_pct)
+        self.logger.record("custom/avg_flat_steps", avg_flat_steps)
+        self.logger.record("custom/flat_ratio_pct", flat_ratio_pct)
         self.logger.record("custom/avg_trade_count", avg_trade_count)
         self.logger.record("custom/avg_long_closes", avg_long_closes)
         self.logger.record("custom/avg_short_closes", avg_short_closes)

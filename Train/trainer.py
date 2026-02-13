@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import os
 from typing import Optional, Any
 
 from stable_baselines3 import SAC
@@ -124,8 +125,19 @@ class SACLagrangianTrainer:
             logger.warning(f"Failed to create eval environment: {e}, continuing without eval")
             return None
     
+    def _resolve_load_model_path(self, path: str) -> str:
+        """解析載入路徑：若為目錄則指向目錄內的 best_model（對應 best_model.zip）。"""
+        path = os.path.abspath(path)
+        if os.path.isdir(path):
+            # 目錄如 models/sac_lag_BTCUSDT/best_model → 載入 best_model.zip
+            return os.path.join(path, "best_model")
+        # 若為檔案路徑，SB3 會自動加 .zip 尋找；若已含 .zip 則去掉讓 SB3 一致處理
+        if path.endswith(".zip"):
+            return path[:-4]
+        return path
+
     def _create_model(self, env: VecEnv) -> SAC:
-        """创建 SAC 模型。
+        """创建 SAC 模型（新建或從 load_model_path 載入）。
         
         Args:
             env: 训练环境
@@ -136,9 +148,25 @@ class SACLagrangianTrainer:
         Raises:
             RuntimeError: 模型创建失败
         """
+        load_path = getattr(self.config, "load_model_path", None)
+        if load_path and str(load_path).strip():
+            try:
+                resolved = self._resolve_load_model_path(str(load_path).strip())
+                model = SAC.load(
+                    resolved,
+                    env=env,
+                    device=self.config.model_config.device,
+                )
+                if self.config.sb3_verbose is not None:
+                    model.verbose = self.config.sb3_verbose
+                logger.info("SAC model loaded from %s (resolved: %s), continuing training", load_path, resolved)
+                return model
+            except Exception as e:
+                logger.error("Failed to load model from %s: %s", load_path, e, exc_info=True)
+                raise RuntimeError(f"Model load failed: {e}") from e
+
         try:
             model = self.model_builder.build(env)
-            # 设置 verbose
             if self.config.sb3_verbose is not None:
                 model.verbose = self.config.sb3_verbose
             logger.info("SAC model created successfully")
@@ -229,10 +257,12 @@ class SACLagrangianTrainer:
             
             # 6. 执行训练
             logger.info(f"Starting training for {self.config.total_timesteps} timesteps...")
+            log_interval = int(self.config.sb3_log_interval)
             self.model.learn(
                 total_timesteps=self.config.total_timesteps,
                 callback=callbacks,
                 progress_bar=bool(self.config.show_progress_bar),
+                log_interval=log_interval,
             )
             
             # 7. 保存模型
