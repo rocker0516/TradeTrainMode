@@ -12,13 +12,13 @@ def test_market_data_sequences_have_expected_shapes(make_synth_market) -> None:
     market = make_synth_market(n_5m=120, n_1d=50)
     md = MarketData(market.df_5m, market.df_1d, window_size=10, window_size_1d=7, target_symbol="BTCUSDT")
 
-    seq_5m = md.get_price_seq(10)
-    seq_1d = md.get_1d_seq(10, window_size_1d=7)
-    assert seq_5m.shape == (10, md.price_seq_features_dim)
-    assert seq_1d.shape == (7, md.features_1d_dim)
+    seq_5m_target, seq_5m_others = md.get_price_seq(10)
+    seq_1d_target, seq_1d_others = md.get_1d_seq(10, window_size_1d=7)
+    assert seq_5m_target.shape == (10, md.price_seq_target_features_dim)
+    assert seq_1d_target.shape == (7, md.price_seq_1d_target_features_dim)
     # MarketData 內部特徵矩陣用 float32（計算穩定）；env 輸出 obs 可能轉成 float16 以省 RAM
-    assert seq_5m.dtype == np.float32
-    assert seq_1d.dtype == np.float32
+    assert seq_5m_target.dtype == np.float32
+    assert seq_1d_target.dtype == np.float32
 
     m = md.get_market_metrics(10)
     assert set(m.keys()) >= {"close", "high", "low", "atr_ratio", "rv_ratio", "trend_score"}
@@ -85,6 +85,7 @@ def test_observer_observation_shapes(make_synth_market) -> None:
         "holding_steps": 0.0,
         "last_step_fee": 0.0,
         "rolling_fee_sum": 0.0,
+        "recent_flat_ratio": 0.5,
     }
     last_action_effects = {
         "expected_fee_if_trade": 0.0,
@@ -111,11 +112,11 @@ def test_observer_observation_shapes(make_synth_market) -> None:
         last_action_effects=last_action_effects,
     )
 
-    assert out["price_seq"].shape == (10, md.price_seq_features_dim)
-    assert out["price_seq_1d"].shape == (7, md.features_1d_dim)
-    assert out["account_state"].shape == (16,)
+    assert out["price_seq_target"].shape == (10, md.price_seq_target_features_dim)
+    assert out["price_seq_1d_target"].shape == (7, md.price_seq_1d_target_features_dim)
+    assert out["account_state"].shape == (28,)
     # dtype 必須與 observation_space 一致（預設 float16）
-    assert out["price_seq"].dtype == obs.observation_space["price_seq"].dtype
+    assert out["price_seq_target"].dtype == obs.observation_space["price_seq_target"].dtype
     assert out["account_state"].dtype == obs.observation_space["account_state"].dtype
 
 

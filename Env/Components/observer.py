@@ -78,9 +78,9 @@ class TradingObserver:
         }
 
     def _build_account_space(self) -> dict:
-        """定義帳戶狀態相關的觀察空間（含 buffer_to_min、stop_loss_rate、pnl_per_close、episode_progress、steps_since_trade、trade_freq、entry_price_ratio、stop_loss_price_ratio）"""
+        """定義帳戶狀態相關的觀察空間（含 recent_flat_ratio、trend_strength_last、chop_last 等，實盤可算、無需 cost_state）"""
         return {
-            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(25,), dtype=self.obs_dtype)
+            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(28,), dtype=self.obs_dtype)
         }
 
     def _build_context_space(self) -> dict:
@@ -248,7 +248,7 @@ class TradingObserver:
         current_price: float,
         atr_ratio: float,
     ) -> dict:
-        """生成帳戶狀態觀察值（25 欄位：含 trade_freq、entry_price_ratio、stop_loss_price_ratio）"""
+        """生成帳戶狀態觀察值（28 欄位：含 recent_flat_ratio、trend_strength_last、chop_last，實盤可算）"""
         
         # 緩存常用計算值（優化效率）
         equity = float(executor.equity(current_price))
@@ -402,6 +402,16 @@ class TradingObserver:
             stop_loss_price_ratio = 1.0
         stop_loss_price_ratio = np.clip(stop_loss_price_ratio, 0.5, 1.5)
 
+        # 26. recent_flat_ratio [0, 1]：最近 N 步空倉比例（與 cost_flat 同口徑；實盤可算）
+        recent_flat_ratio = float(account_metrics.get('recent_flat_ratio', 0.5))
+        recent_flat_ratio = np.clip(recent_flat_ratio, 0.0, 1.0)
+
+        # 27. trend_strength_last [-1, 1]：當前步趨勢強度（可交易性彙總，實盤可算）
+        # 28. chop_48 [-1, 1]：當前步震盪指標（可交易性彙總，實盤可算）
+        scalars = market_data.get_target_scalars_at_step(step_idx)
+        trend_strength_last = float(scalars.get('trend_strength_atr', 0.0))
+        chop_last = float(scalars.get('chop_48', 0.0))
+
         account_state = np.array([
             position_side,              # 1
             position_size_norm,         # 2
@@ -428,6 +438,9 @@ class TradingObserver:
             trade_freq_blocked_last,   # 23
             entry_price_ratio,         # 24
             stop_loss_price_ratio,     # 25
+            recent_flat_ratio,         # 26
+            trend_strength_last,      # 27
+            chop_last,                # 28
         ], dtype=self.obs_dtype)
         
         return {'account_state': account_state}

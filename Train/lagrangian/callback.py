@@ -259,10 +259,12 @@ class LagrangianCallback(BaseCallback):
         
         # 環境原生統計 (TradingEnv)
         profits = [float(x.get("profit", 0.0)) for x in self.ep_infos]
+        conviction_bonus_sums = [float(x.get("episode_conviction_bonus_sum", 0.0)) for x in self.ep_infos]
         trade_stats = compute_trade_stats(list(self.ep_infos))
-        
+
         # --- 2. 計算平均 ---
         avg_ret_orig = np.mean(ep_ret_origs) if ep_ret_origs else 0.0
+        avg_conviction_bonus_sum = np.mean(conviction_bonus_sums) if conviction_bonus_sums else 0.0
         avg_main_reward = np.mean(ep_main_rewards) if ep_main_rewards else 0.0
         avg_ret_orig_scaled = np.mean(ep_ret_orig_scaleds) if ep_ret_orig_scaleds else 0.0
         # 若 wrapper 有提供 return_total，優先用它（避免 VecMonitor 受其他 wrapper 影響）
@@ -351,17 +353,19 @@ class LagrangianCallback(BaseCallback):
         print("="*60)
         
         # Section 1: Main Reward (Training Objective)
-        # 用更直觀的標籤區分「原始市場表現」與「RL 訓練訊號」
+        # return_orig = 主線每步 reward 累加 = LogRet + ConvictionBonus；R_scaled = return_orig * scale；R_total 已含順向獎勵
+        avg_log_ret_only = avg_ret_orig - avg_conviction_bonus_sum
         print(f"[{'MAIN REWARD':^20}]")
         print("  --- RL Training Signal (What Agent Sees) ---")
-        print(f"  Total Reward (R_total)      : {avg_total_reward:8.4f}  [= R_scaled - penalty_norm]")
-        print(f"  Scaled Reward (R_scaled)    : {avg_ret_orig_scaled:8.4f}  [= LogRet * {self.reward_scale}]")
+        print(f"  Total Reward (R_total)      : {avg_total_reward:8.4f}  [= R_scaled - penalty，已含順向獎勵]")
+        print(f"  Scaled Reward (R_scaled)    : {avg_ret_orig_scaled:8.4f}  [= (LogRet+Bonus) * {self.reward_scale}]")
         print(f"  Cost Penalty (-λ*C, 已正規化): {-avg_cost_penalty_total:8.4f}")
         
-        print("  --- Original Market Performance ---")
-        print(f"  Log Return Sum (LogRet)     : {avg_ret_orig:8.4f}")
-        # 將 Log Return 換算成簡單的 ROI% 估算 (exp(sum_log_ret) - 1)，供參考
-        roi_est = (np.exp(avg_ret_orig) - 1.0) * 100.0
+        print("  --- Original Market Performance (主線每步 reward 累加 = LogRet + Bonus) ---")
+        print(f"  Original Return (LogRet+Bonus): {avg_ret_orig:8.4f}")
+        print(f"    ↳ Log Return (pure)       : {avg_log_ret_only:8.4f}")
+        print(f"    ↳ Conviction Bonus Sum   : {avg_conviction_bonus_sum:8.4f}")
+        roi_est = (np.exp(avg_log_ret_only) - 1.0) * 100.0
         print(f"  Est. ROI (from LogRet)      : {roi_est:8.2f} %")
         print(f"  Avg Profit (USDT)           : {avg_profit:8.2f}")
         print(f"  Win Rate                    : {win_rate:8.1f} %")
@@ -490,6 +494,7 @@ class LagrangianCallback(BaseCallback):
         self.logger.record("custom/avg_fee", avg_fee)
         # 相容保留：avg_dd 仍記錄「平均 episode_max_dd」
         self.logger.record("custom/avg_dd", float(trade_stats.get("avg_dd", 0.0)))
+        self.logger.record("custom/avg_conviction_bonus_sum", float(avg_conviction_bonus_sum))
         # 新增：視窗內最大 DD（你要求的口徑）
         self.logger.record("custom/max_dd", max_dd)
         self.logger.record("custom/max_dd_excl_liq", max_dd_excl_liq)

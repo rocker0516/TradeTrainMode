@@ -31,7 +31,7 @@ class Config:
     # 槓桿、餘額與倉位限制
     # -------------------------------------------------------------------------
     LEVERAGE: float = 10.0
-    MIN_BALANCE: float = INITIAL_BALANCE * 0.5  # 最小餘額比例（0.5 = 50%）
+    MIN_BALANCE: float = INITIAL_BALANCE * 0.6  # 最小餘額比例（0.5 = 50%）
     MIN_POSITION_CHANGE: float = 0.0  # 最小調倉幅度 deadband（0 = 不啟用）
     MAX_STEP_POS_CHANGE_PCT: float = 0.5  # 單步最大持倉比例變化（0.5 = 50%）
     MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（供 ActionClipWrapper 等使用）
@@ -41,6 +41,19 @@ class Config:
     NO_TRADE_EXIT_THRESHOLD: float = 0.0
 
     # -------------------------------------------------------------------------
+    # 主線獎勵：順向交易獎勵（Conviction Trend Bonus）
+    # -------------------------------------------------------------------------
+    # 順向獎勵權重；>0 啟用「強訊號 + 大倉 + 同向」時加分，建議從小值開始（如 0.1）
+    CONVICTION_TREND_BONUS_WEIGHT: float = 5
+    # trend_score 縮放倍數（(ma50-ma200)/ma200 為小數比，乘上此倍數後再 tanh 算 strength）
+    # 例如 scale=10：trend_score=0.05 → strength≈0.46，易通過 min_strength 0.25
+    CONVICTION_TREND_SCORE_SCALE: float = 10.0
+    # 趨勢強度門檻 [0,1]；strength = |tanh(scale * trend_score)|，達此值才加分
+    CONVICTION_TREND_MIN_STRENGTH: float = 0.4
+    # 最小曝險門檻 [0,1]，僅當 abs(position_pct) >= 此值才加分，避免小倉刷分
+    CONVICTION_MIN_ABS_POS: float = 0.5
+
+    # -------------------------------------------------------------------------
     # 手續費與 Fee Limit
     # -------------------------------------------------------------------------
     FEE_ROLLING_WINDOW: int = 288
@@ -48,7 +61,7 @@ class Config:
     # -------------------------------------------------------------------------
     # 止損與清算
     # -------------------------------------------------------------------------
-    STOP_LOSS_ATR: float = 1.5  # 止損距離的 ATR 倍數
+    STOP_LOSS_ATR: float = 2  # 止損距離的 ATR 倍數
     STOP_LOSS_LIQ_BUFFER_PCT: float = 0.2  # 止損相對強平價的安全緩衝（比例）
     STOP_LOSS_COOLDOWN_STEPS: int = 6  # 止損後冷卻步數（30/5）
     STOP_LOSS_EVENT_COST: float = 0.02  # 觸發止損時的額外事件成本（比例）

@@ -13,11 +13,13 @@ from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import VecEnv
 
 from Train.config_builder import TrainingConfig
-from Train.env_builder import EnvironmentBuilder
-from Train.model_builder import ModelBuilder
-from Train.callback_builder import CallbackBuilder
 from Train.lagrangian import MultiSharedLagrangianController
-from Train.interfaces import ILagrangianController
+from Train.interfaces import (
+    ILagrangianController,
+    IVecEnvBuilder,
+    IModelBuilder,
+    ICallbackBuilder,
+)
 from Env.load_file import load_data
 
 logger = logging.getLogger(__name__)
@@ -32,16 +34,16 @@ class SACLagrangianTrainer:
     def __init__(
         self,
         config: TrainingConfig,
-        env_builder: EnvironmentBuilder,
-        model_builder: ModelBuilder,
-        callback_builder: CallbackBuilder,
+        env_builder: IVecEnvBuilder,
+        model_builder: IModelBuilder,
+        callback_builder: ICallbackBuilder,
         controller: Optional[ILagrangianController] = None,
     ):
         """初始化训练器。
         
         Args:
             config: 训练配置
-            env_builder: 环境构建器
+            env_builder: 环境构建器（依賴介面，符合 DIP）
             model_builder: 模型构建器
             callback_builder: 回调构建器
             controller: Lagrangian 控制器（如果为 None，将从配置创建）
@@ -89,9 +91,7 @@ class SACLagrangianTrainer:
             RuntimeError: 环境创建失败
         """
         try:
-            # 设置环境构建器的 controller
-            self.env_builder.controller = self.controller
-            
+            self.env_builder.set_controller(self.controller)
             log_prefix = f"{self.config.vec_monitor_log_prefix}_{self.config.symbol}"
             env = self.env_builder.create_training_vec_env(
                 n_envs=self.config.n_envs,

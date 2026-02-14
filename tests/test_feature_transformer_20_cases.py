@@ -159,17 +159,17 @@ def test_feature_shapes_are_fixed_and_safe(case: Case) -> None:
     assert md.cols_1d == list(spec.price_seq_1d_cols)
 
     # 任意 step 的序列 shape 必須一致
-    seq_5m = md.get_price_seq(40)
-    seq_1d = md.get_1d_seq(40, window_size_1d=10)
-    assert seq_5m.shape == (32, md.price_seq_features_dim)
-    assert seq_1d.shape == (10, 15)
+    seq_5m_target, _ = md.get_price_seq(40)
+    seq_1d_target, _ = md.get_1d_seq(40, window_size_1d=10)
+    assert seq_5m_target.shape == (32, md.price_seq_target_features_dim)
+    assert seq_1d_target.shape == (10, 15)
     # MarketData 內部特徵矩陣使用 float32（計算穩定）；env 輸出 obs 可能轉成 float16 以省 RAM
-    assert seq_5m.dtype == np.float32
-    assert seq_1d.dtype == np.float32
+    assert seq_5m_target.dtype == np.float32
+    assert seq_1d_target.dtype == np.float32
 
     # 不允許 NaN/inf（SAC 會直接爆）
-    assert np.isfinite(seq_5m).all()
-    assert np.isfinite(seq_1d).all()
+    assert np.isfinite(seq_5m_target).all()
+    assert np.isfinite(seq_1d_target).all()
 
 
 def test_feature_symbols_expands_5m_dim_but_keeps_shape_fixed() -> None:
@@ -204,10 +204,10 @@ def test_feature_symbols_expands_5m_dim_but_keeps_shape_fixed() -> None:
     )
 
     assert md_multi.price_seq_features_dim > md_single.price_seq_features_dim
-    seq = md_multi.get_price_seq(100)
-    assert seq.shape == (64, md_multi.price_seq_features_dim)
-    assert seq.dtype == np.float32
-    assert np.isfinite(seq).all()
+    seq_target, _ = md_multi.get_price_seq(100)
+    assert seq_target.shape == (64, md_multi.price_seq_target_features_dim)
+    assert seq_target.dtype == np.float32
+    assert np.isfinite(seq_target).all()
 
 
 def test_1d_alignment_is_previous_closed_bar_B() -> None:

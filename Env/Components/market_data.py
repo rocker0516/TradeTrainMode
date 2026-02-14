@@ -190,6 +190,28 @@ class MarketData:
             'trend_score': float(self.trend_score_arr[idx])
         }
 
+    def get_target_scalars_at_step(self, step_idx: int) -> dict:
+        """
+        取得當前步的 5m target 特徵中的「可交易性」標量（供 obs 彙總，實盤可算）。
+        用於 agent 判斷當前是否適合交易、趨勢/震盪 regime。
+        Returns:
+            dict: 'trend_strength_atr', 'chop_48'（已 clip 至 [-1, 1]）
+        """
+        idx = max(0, min(step_idx, len(self.features_5m_target_arr) - 1))
+        cols = getattr(self, "cols_5m_target", [])
+        if not cols:
+            return {"trend_strength_atr": 0.0, "chop_48": 0.0}
+        row = self.features_5m_target_arr[idx]
+        trend_val = 0.0
+        chop_val = 0.0
+        if "trend_strength_atr" in cols:
+            i = cols.index("trend_strength_atr")
+            trend_val = float(np.clip(row[i], -1.0, 1.0))
+        if "chop_48" in cols:
+            i = cols.index("chop_48")
+            chop_val = float(np.clip(row[i], -1.0, 1.0))
+        return {"trend_strength_atr": trend_val, "chop_48": chop_val}
+
     def get_price_seq(self, step_idx: int) -> Tuple[np.ndarray, np.ndarray]:
         """取得分离的 5m 序列輸入 [window_size, F_target], [window_size, F_others]"""
         start = step_idx - self.window_size

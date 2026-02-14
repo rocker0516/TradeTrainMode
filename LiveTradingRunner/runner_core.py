@@ -60,6 +60,9 @@ def _build_account_and_context_obs_named(obs: dict) -> Dict[str, Dict[str, float
         "trade_freq_blocked_last",    # 23
         "entry_price_ratio",         # 24
         "stop_loss_price_ratio",     # 25
+        "recent_flat_ratio",         # 26（與 cost_flat 同口徑，實盤可算）
+        "trend_strength_last",       # 27（可交易性彙總）
+        "chop_last",                 # 28（可交易性彙總）
     ]
     cost_state_names = [
         "placeholder",  # 佔位欄位（cost_state 已清空）

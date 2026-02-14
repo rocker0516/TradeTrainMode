@@ -88,6 +88,7 @@ class EnvironmentConfig:
     data_mode: str = "train"
     holdout_months: int = TrainConfig.HOLDOUT_MONTHS
     flat_threshold: float = TrainConfig.FLAT_THRESHOLD
+    flat_window_steps: int = TrainConfig.FLAT_WINDOW_STEPS
     trade_freq_window_steps: int = TrainConfig.TRADE_FREQ_WINDOW_STEPS
     trade_freq_cost_limit: float = TrainConfig.TRADE_FREQ_COST_LIMIT
 
@@ -106,6 +107,7 @@ class EnvironmentConfig:
             "data_mode": self.data_mode,
             "holdout_months": self.holdout_months,
             "flat_threshold": self.flat_threshold,
+            "flat_window_steps": self.flat_window_steps,
             "trade_freq_window_steps": self.trade_freq_window_steps,
             "trade_freq_cost_limit": self.trade_freq_cost_limit,
             "render_enabled": False,

@@ -4,8 +4,12 @@
 """
 from __future__ import annotations
 
-from typing import Protocol, Dict, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Protocol
+
 import gymnasium as gym
+
+if TYPE_CHECKING:
+    from stable_baselines3.common.vec_env import VecEnv
 
 
 class ILagrangianController(Protocol):
@@ -58,31 +62,37 @@ class ILagrangianController(Protocol):
 class IEnvironmentFactory(Protocol):
     """环境工厂接口。
     
-    负责创建训练和评估环境实例。
+    负责创建训练和评估环境实例（单 env，供 VecEnv 内部使用）。
     """
     
     def create_training_env(self, rank: int, seed: int) -> gym.Env:
-        """创建训练环境实例。
-        
-        Args:
-            rank: 环境排名（用于区分并行环境）
-            seed: 随机种子
-            
-        Returns:
-            配置好的 Gym 环境实例
-        """
+        """创建训练环境实例。"""
         ...
     
     def create_eval_env(self, rank: int, seed: int) -> gym.Env:
-        """创建评估环境实例。
-        
-        Args:
-            rank: 环境排名
-            seed: 随机种子
-            
-        Returns:
-            配置好的评估环境实例
-        """
+        """创建评估环境实例。"""
+        ...
+
+
+class IVecEnvBuilder(Protocol):
+    """VecEnv 构建器接口（训练器依赖此接口，不依赖具体 EnvironmentBuilder）。"""
+
+    def set_controller(self, controller: ILagrangianController) -> None:
+        """设置 Lagrangian 控制器（创建训练 VecEnv 前调用）。"""
+        ...
+
+    def create_training_vec_env(
+        self,
+        n_envs: int,
+        log_prefix: str,
+        df_5m: Optional[object] = None,
+        df_1d: Optional[object] = None,
+    ) -> "VecEnv":
+        """创建并行训练 VecEnv。"""
+        ...
+
+    def create_eval_vec_env(self, symbol: str = "BTCUSDT") -> "VecEnv":
+        """创建评估用 VecEnv。"""
         ...
 
 
@@ -92,11 +102,11 @@ class IModelBuilder(Protocol):
     负责创建和配置 SAC 模型。
     """
     
-    def build(self, env: gym.Env) -> "SAC":  # type: ignore[name-defined]
+    def build(self, env: "VecEnv") -> "SAC":  # type: ignore[name-defined]
         """构建 SAC 模型。
         
         Args:
-            env: 训练环境
+            env: 训练 VecEnv
             
         Returns:
             配置好的 SAC 模型实例
@@ -113,11 +123,15 @@ class ICallbackBuilder(Protocol):
     def build_training_callbacks(
         self,
         controller: ILagrangianController,
-    ) -> list:
+        training_env: Optional["VecEnv"] = None,
+        eval_env: Optional["VecEnv"] = None,
+    ) -> List[object]:
         """构建训练回调列表。
         
         Args:
             controller: Lagrangian 控制器
+            training_env: 训练 VecEnv（可选，部分 callback 需要）
+            eval_env: 评估 VecEnv（可选，启用 eval 时传入）
             
         Returns:
             回调列表

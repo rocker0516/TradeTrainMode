@@ -164,13 +164,14 @@ class TradingEnvironment(gym.Env):
             stop_loss_liq_buffer_pct=getattr(Config, "STOP_LOSS_LIQ_BUFFER_PCT", 0.0),
         )
         
-        # Reward Calculator
+        # Reward Calculator（順向獎勵參數可由 Config 或 kwargs 覆寫）
         self.reward_calculator = create_default_calculator(
             c_liq=0.0,
             base_log_ret_weight=1.0,
-            conviction_trend_bonus_weight=0.0,
-            conviction_trend_min_strength=0.8,
-            conviction_min_abs_pos=0.15,
+            conviction_trend_bonus_weight=float(kwargs.get("conviction_trend_bonus_weight", Config.CONVICTION_TREND_BONUS_WEIGHT)),
+            conviction_trend_min_strength=float(kwargs.get("conviction_trend_min_strength", Config.CONVICTION_TREND_MIN_STRENGTH)),
+            conviction_min_abs_pos=float(kwargs.get("conviction_min_abs_pos", Config.CONVICTION_MIN_ABS_POS)),
+            conviction_trend_score_scale=float(kwargs.get("conviction_trend_score_scale", getattr(Config, "CONVICTION_TREND_SCORE_SCALE", 10.0))),
         )
         
         # Tracker
@@ -185,6 +186,10 @@ class TradingEnvironment(gym.Env):
         )
         # 空倉成本門檻：|final_pos_pct| < 此值視為空倉（供 cost_flat；可經 env_config 傳入）
         self.flat_threshold = float(kwargs.get("flat_threshold", 0.02))
+        # 空倉比例滑窗步數（與 cost_flat 同口徑，供 recent_flat_ratio 觀察；實盤可算）
+        self._flat_window_steps = int(kwargs.get("flat_window_steps", 864))  # 預設 288*3
+        self._flat_deque: Optional[deque] = None
+        self._recent_flat_ratio = 0.5
 
         # 交易頻率硬限制：與 TRADE_FREQ_WINDOW_STEPS / TRADE_FREQ_COST_LIMIT 一致，滑動視窗內最多 (limit * window) 步可交易
         self._trade_freq_window_steps = kwargs.get("trade_freq_window_steps")
@@ -246,7 +251,9 @@ class TradingEnvironment(gym.Env):
         # Episode-level event metrics (for Trade Stats)
         # 主動出場：由 agent 動作將持倉平到 0（排除 stop loss / liquidation 強制出場）
         self.episode_active_exit_count = 0
-        
+        # 順向交易獎勵本回合累計（主線 STATS 用）
+        self.episode_conviction_bonus_sum = 0.0
+
         # Action-conditioned effects cache (for next obs)
         self._last_action_effects = {}
         
@@ -459,7 +466,8 @@ class TradingEnvironment(gym.Env):
         self.episode_trade_count = 0
         self.episode_flat_steps = 0
         self.episode_active_exit_count = 0
-        
+        self.episode_conviction_bonus_sum = 0.0
+
         self.last_trade_step = -999999
         self.position_entry_step = None
         self._last_position_size = 0.0
@@ -494,6 +502,11 @@ class TradingEnvironment(gym.Env):
                 self._trade_freq_deque = None
         else:
             self._trade_freq_deque = None
+
+        # 空倉比例滑窗（供 recent_flat_ratio；與 cost_flat 同口徑，實盤可算）
+        flat_win = max(1, int(getattr(self, "_flat_window_steps", 864)))
+        self._flat_deque = deque(maxlen=flat_win)
+        self._recent_flat_ratio = 0.5
 
         # 4. Initial Observation（it/s 優化：算一次 metrics/risk 並傳入，避免 _get_observation 內重算）
         metrics = self.market_data.get_market_metrics(self.current_step)
@@ -695,6 +708,8 @@ class TradingEnvironment(gym.Env):
         else:
             account_metrics['trade_freq_remaining_ratio'] = 1.0
         account_metrics['trade_freq_blocked_last'] = float(self._last_action_effects.get('trade_freq_blocked', 0.0))
+        # 最近 N 步空倉比例（與 cost_flat 同口徑；實盤可算，無需 cost_state）
+        account_metrics['recent_flat_ratio'] = float(getattr(self, '_recent_flat_ratio', 0.5))
 
         return self.observer.get_observation(
             step_idx=self.current_step,
@@ -751,9 +766,10 @@ class TradingEnvironment(gym.Env):
         episode_holding_steps: int,
         episode_trade_count: int,
         episode_flat_steps: int,
-        terminated: bool,
-        truncated: bool,
-        termination_reason: Optional[str],
+        episode_conviction_bonus_sum: float = 0.0,
+        terminated: bool = False,
+        truncated: bool = False,
+        termination_reason: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         組合 step() 要回傳的 info dict（抽離 step 內的大段組裝邏輯）。
@@ -770,6 +786,7 @@ class TradingEnvironment(gym.Env):
             episode_holding_steps: 本回合持倉步數（abs(position.size)>0 的 step 數）
             episode_trade_count: 本回合發生交易的 step 數（position_change > threshold）
             episode_flat_steps: 本回合空倉步數（|final_pos_pct|<flat_threshold，與 cost_flat 同口徑）
+            episode_conviction_bonus_sum: 本回合順向交易獎勵累計（主線 STATS 用）
             terminated: Gymnasium terminated（自然終止）
             truncated: Gymnasium truncated（時間/資料截斷）
             termination_reason: 終止原因（若結束回合）
@@ -801,6 +818,7 @@ class TradingEnvironment(gym.Env):
             info["episode_holding_steps"] = int(max(0, int(episode_holding_steps)))
             info["episode_trade_count"] = int(max(0, int(episode_trade_count)))
             info["episode_flat_steps"] = int(max(0, int(episode_flat_steps)))
+            info["episode_conviction_bonus_sum"] = float(episode_conviction_bonus_sum)
             info["fees_to_equity_ratio"] = (
                 float(getattr(self.executor, "total_fees", 0.0)) / float(max(1e-8, new_equity))
             )
@@ -1325,7 +1343,8 @@ class TradingEnvironment(gym.Env):
             abs_position_pct=abs(pos_pct_reward),
             trend_score=metrics['trend_score']
         )
-        
+        self.episode_conviction_bonus_sum += getattr(self.reward_calculator, "last_conviction_bonus", 0.0)
+
         # 9. Cost / Constraint（成本線）
         # 我們使用「當下價格」計算風險訊號（含 stop_loss_missing / 距離爆倉 / margin_ratio 等），
         # 並把總 cost 與分項寫入 info，方便訓練端做 Lagrangian 更新與 debug。
@@ -1381,6 +1400,7 @@ class TradingEnvironment(gym.Env):
             episode_holding_steps=int(self.episode_holding_steps),
             episode_trade_count=int(self.episode_trade_count),
             episode_flat_steps=int(self.episode_flat_steps),
+            episode_conviction_bonus_sum=float(self.episode_conviction_bonus_sum),
             terminated=bool(terminated),
             truncated=bool(truncated),
             termination_reason=termination_reason,
@@ -1403,6 +1423,11 @@ class TradingEnvironment(gym.Env):
             self._trade_freq_deque.append(1.0 if position_changed else 0.0)
         # 空倉成本：鼓勵持倉、允許避險；|final_pos_pct| < 門檻則 1.0，否則 0.0
         info["cost_flat"] = 1.0 if is_flat else 0.0
+        # 更新空倉滑窗與 recent_flat_ratio（供下一步 obs，實盤可算）
+        if getattr(self, "_flat_deque", None) is not None:
+            self._flat_deque.append(1.0 if is_flat else 0.0)
+            n = len(self._flat_deque)
+            self._recent_flat_ratio = sum(self._flat_deque) / n if n > 0 else 0.5
 
         # cache last info for render()
         self._last_info = dict(info)

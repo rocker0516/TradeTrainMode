@@ -242,6 +242,9 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
         assert int(info["episode_flat_steps"]) >= 0
         assert "episode_trade_count" in info
         assert int(info["episode_trade_count"]) >= 0
+        assert "episode_conviction_bonus_sum" in info
+        assert isinstance(info["episode_conviction_bonus_sum"], (int, float))
+        assert float(info["episode_conviction_bonus_sum"]) >= -1e-6
         assert "fees_to_equity_ratio" in info
         assert float(info["fees_to_equity_ratio"]) >= 0.0
 

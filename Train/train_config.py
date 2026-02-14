@@ -75,7 +75,7 @@ class TrainConfig:
     - 注意：目前 cost_fric 固定為 0.0，此參數供未來擴充使用
     """
 
-    TRADE_FREQ_COST_LIMIT: float = 0.2
+    TRADE_FREQ_COST_LIMIT: float = 0.4
     """
     交易頻率成本限制（交易比例通道）
     - 單位：最近 N 步內「交易步數 / N」的上限（比例，0~1）
@@ -88,7 +88,7 @@ class TrainConfig:
     - 交易比例 = 窗口內交易次數 / min(窗口寬度, 已收集步數)
     """
 
-    FLAT_COST_LIMIT: float = 0.6
+    FLAT_COST_LIMIT: float = 0.4
     """
     空倉成本限制（鼓勵持倉、允許避險）
     - 單位：最近 N 步內「空倉步數 / N」的上限（比例，0~1）
@@ -142,11 +142,11 @@ class TrainConfig:
         "risk": 1.0,       # 死亡成本 0/1，除小一點讓懲罰有感
         "fric": 1.0,         # 手續費比例
         "trade_freq":1000.0,   # 交易步 0/1
-        "flat": 2000.0,         # 空倉比例 0~1
+        "flat": 1000.0,         # 空倉比例 0~1
     }
 
     # ==================== SB3 SAC 超參數 ====================
-    LEARNING_RATE: float = 3e-4
+    LEARNING_RATE: float = 5e-4
     """學習率"""
     
     BUFFER_SIZE: int = 1_500_000
@@ -252,7 +252,7 @@ class TrainConfig:
     WINDOW_SIZE_5M: int = 288 // 8  # 36（約 3 小時）；288 = 1 天
     """5 分鐘 K 線視窗大小（根數）。288 = 1 天。"""
     
-    WINDOW_SIZE_1D: int = 21
+    WINDOW_SIZE_1D: int = 7
     """1 日 K 線視窗大小（天數）。"""
 
     # ==================== 資料切分（Train/Eval 分離）====================
@@ -283,7 +283,7 @@ class TrainConfig:
     - 依規則挑選並保存 best model
     """
     
-    EVAL_EVERY_TIMESTEPS: int = 1_000_000
+    EVAL_EVERY_TIMESTEPS: int = 10_000_000
     """
     評估頻率（每 N 個 timesteps）
     - 以「訓練總 timesteps」為基準（使用 SB3 的 model.num_timesteps）

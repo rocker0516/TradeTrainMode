@@ -158,6 +158,7 @@ class LiveObsBuilder:
             "holding_steps": 0.0,
             "last_step_fee": 0.0,
             "rolling_fee_sum": 0.0,
+            "recent_flat_ratio": 0.5,  # 實盤可依滑窗自行計算後傳入
         }
 
         obs = observer.get_observation(

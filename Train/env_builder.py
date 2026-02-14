@@ -16,16 +16,16 @@ from Env.trading_env import TradingEnvironment
 from Env.wrappers import ActionRepeatWrapper, ActionClipWrapper
 from Train.lagrangian import LagrangianRewardWrapper, MultiSharedLagrangianController
 from Train.config_builder import EnvironmentConfig
-from Train.interfaces import ILagrangianController
+from Train.interfaces import ILagrangianController, IVecEnvBuilder
 from Train.train_config import TrainConfig
 
 
 class EnvironmentBuilder:
-    """环境构建器（单一职责：环境创建）。
+    """环境构建器（单一职责：环境创建），實現 IVecEnvBuilder。
     
     支持通过配置灵活构建环境，避免硬编码 wrapper 顺序。
     """
-    
+
     def __init__(
         self,
         config: EnvironmentConfig,
@@ -54,13 +54,18 @@ class EnvironmentBuilder:
         self.reward_scale = reward_scale
         self.cost_penalty_normalize = max(1.0, float(cost_penalty_normalize))
         self.cost_penalty_normalize_per_channel = dict(cost_penalty_normalize_per_channel) if cost_penalty_normalize_per_channel else None
-    
+
+    def set_controller(self, controller: ILagrangianController) -> None:
+        """設置 Lagrangian 控制器（符合 IVecEnvBuilder，建立訓練 VecEnv 前由 Trainer 調用）。"""
+        self.controller = controller
+
     def build_base_env(
         self,
         rank: int,
         random_start: bool = True,
         df_5m: Optional[pd.DataFrame] = None,
         df_1d: Optional[pd.DataFrame] = None,
+        ensure_filled_obs: Optional[bool] = None,
     ) -> gym.Env:
         """构建基础环境（不含 wrapper）。
         
@@ -69,12 +74,15 @@ class EnvironmentBuilder:
             random_start: 是否随机起点
             df_5m: 預載 5m 資料（可選，避免子進程重複 load_data）
             df_1d: 預載 1d 資料（可選）
+            ensure_filled_obs: 若為 True，起點至少為 max(window_size, window_size_1d*288)，保證第一步 obs 填滿
             
         Returns:
             基础 TradingEnvironment 实例
         """
         env_kwargs = self.config.to_dict()
         env_kwargs["random_start"] = random_start
+        if ensure_filled_obs is not None:
+            env_kwargs["ensure_filled_obs"] = ensure_filled_obs
         if df_5m is not None and df_1d is not None:
             env_kwargs["df_5m"] = df_5m
             env_kwargs["df_1d"] = df_1d
@@ -98,9 +106,9 @@ class EnvironmentBuilder:
         Returns:
             配置好的训练环境
         """
-        # 1. 基础环境
+        # 1. 基础环境（訓練時也保證第一步 obs 填滿：起點 >= max(window_size, window_size_1d*288)）
         env = self.build_base_env(
-            rank, random_start=True, df_5m=df_5m, df_1d=df_1d
+            rank, random_start=True, df_5m=df_5m, df_1d=df_1d, ensure_filled_obs=True
         )
         
         # 2. Action Clip Wrapper
