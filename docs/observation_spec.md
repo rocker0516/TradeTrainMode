@@ -131,9 +131,9 @@
 
 ---
 
-## 三、帳戶觀察 (account_state) — 23 維
+## 三、帳戶觀察 (account_state) — 22 維
 
-**Shape**: `(23,)`  
+**Shape**: `(22,)`  
 **用途**: 讓 agent 知道當前持倉、權益、風險距離、手續費等，以控制槓桿、止損與交易頻率。已移除常數、與序列重複、易誘發不良行為或回合依賴的欄位。
 
 | 索引 | 名稱 | 範圍/計算 | 用途與影響 |
@@ -154,17 +154,16 @@
 | 13 | **stop_loss_count_log** | [0, ∞) | log1p(本回合止損次數)。影響：止損頻率與風控品質。 |
 | 14 | **holding_time_log** | [0, ∞) | log1p(持倉步數)。影響：持倉時間與成本/報酬取捨。 |
 | 15 | **buffer_to_min_balance_ratio** | [0, 1] | (equity - min_balance)/initial_balance，0=觸及底線。影響：避免 balance_insufficient 終止。 |
-| 16 | **stop_loss_rate** | [0, 1] | 本回合止損次數/進場次數。影響：進場品質與過早止損。 |
-| 17 | **steps_since_trade_norm** | [0, 1] | log1p(距上次成交步數)/log1p(episode_max_steps)。影響：交易頻率與 flat cost 學習。 |
-| 18 | **trade_freq_remaining_ratio** | [0, 1] | 交易頻率硬限制剩餘額度。影響：與 cost_trade_freq 對齊。 |
-| 19 | **trade_freq_blocked_last** | 0/1 | 上一步是否因額度滿被擋。影響：區分「未下單」與「被擋」。 |
-| 20 | **entry_price_ratio** | [0.5, 1.5] | 進場價/當前價，無倉=1。影響：持倉成本與盈虧。 |
-| 21 | **stop_loss_price_ratio** | [0.5, 1.5] | 止損價/當前價，無止損=1。影響：止損距離感。 |
-| 22 | **recent_flat_ratio** | [0, 1] | 最近 N 步空倉比例（與 cost_flat 同口徑）。影響：flat cost 學習。 |
+| 16 | **steps_since_trade_norm** | [0, 1] | log1p(距上次成交步數)/log1p(episode_max_steps)。影響：交易頻率與 flat cost 學習。 |
+| 17 | **trade_freq_remaining_ratio** | [0, 1] | 交易頻率硬限制剩餘額度。影響：與 cost_trade_freq 對齊。 |
+| 18 | **trade_freq_blocked_last** | 0/1 | 上一步是否因額度滿被擋。影響：區分「未下單」與「被擋」。 |
+| 19 | **entry_price_ratio** | [0.5, 1.5] | 進場價/當前價，無倉=1。影響：持倉成本與盈虧。 |
+| 20 | **stop_loss_price_ratio** | [0.5, 1.5] | 止損價/當前價，無止損=1。影響：止損距離感。 |
+| 21 | **recent_flat_ratio** | [0, 1] | 最近 N 步空倉比例（與 cost_flat 同口徑）。影響：flat cost 學習。 |
 
-**已移除欄位**: fee_budget_remaining（常數 1.0）、realized_pnl_per_close_norm（易誘發只平贏單）、episode_progress（回合依賴）、trend_strength_last / chop_last（與 price_seq_target 最後一筆重複）。
+**已移除欄位**: stop_loss_rate（與 trade_count_log/stop_loss_count_log 冗餘、回合內高方差）、fee_budget_remaining（常數 1.0）、realized_pnl_per_close_norm（易誘發只平贏單）、episode_progress（回合依賴）、trend_strength_last / chop_last（與 price_seq_target 最後一筆重複）。
 
-**影響總結**: 此 23 維直接綁定獎勵/成本設計（強平、止損、手續費、drawdown、flat），agent 需依此在「進攻」與「風控」之間取得平衡。
+**影響總結**: 此 22 維直接綁定獎勵/成本設計（強平、止損、手續費、drawdown、flat），agent 需依此在「進攻」與「風控」之間取得平衡。平均統計中的「止損率」(stop_loss_rate_pct) 仍由 Callback 從 episode info 計算並顯示，與本觀察向量無關。
 
 ---
 

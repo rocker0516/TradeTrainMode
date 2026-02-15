@@ -78,9 +78,9 @@ class TradingObserver:
         }
 
     def _build_account_space(self) -> dict:
-        """定義帳戶狀態相關的觀察空間（23 維：已移除冗餘/常數/易誘發不良行為的欄位）"""
+        """定義帳戶狀態相關的觀察空間（22 維：已移除 stop_loss_rate 等冗餘/常數/易誘發不良行為的欄位）"""
         return {
-            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(23,), dtype=self.obs_dtype)
+            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(22,), dtype=self.obs_dtype)
         }
 
     def _build_context_space(self) -> dict:
@@ -248,7 +248,7 @@ class TradingObserver:
         current_price: float,
         atr_ratio: float,
     ) -> dict:
-        """生成帳戶狀態觀察值（23 欄位：已移除 fee_budget_remaining、realized_pnl_per_close_norm、episode_progress、trend_strength_last、chop_last）"""
+        """生成帳戶狀態觀察值（22 欄位：已移除 stop_loss_rate、fee_budget_remaining、realized_pnl_per_close_norm、episode_progress、trend_strength_last、chop_last）"""
         
         # 緩存常用計算值（優化效率）
         equity = float(executor.equity(current_price))
@@ -355,26 +355,21 @@ class TradingObserver:
         buffer_to_min = (equity - min_balance) / initial_balance if initial_balance > 0 else 0.0
         buffer_to_min_balance_ratio = np.clip(buffer_to_min, 0.0, 1.0)
 
-        # 17. stop_loss_rate [0, 1]：本回合進場後被止損的比例
-        entry_count = int(getattr(executor, 'long_entry_count', 0)) + int(getattr(executor, 'short_entry_count', 0))
-        stop_loss_rate = float(episode_stop_loss_count) / max(1, entry_count)
-        stop_loss_rate = np.clip(stop_loss_rate, 0.0, 1.0)
-
-        # 18. steps_since_trade_norm [0, 1]：距上次成交步數正規化（供 trade_freq / flat cost 學習）
+        # 17. steps_since_trade_norm [0, 1]：距上次成交步數正規化（供 trade_freq / flat cost 學習）
         steps_since_trade_norm = np.clip(
             np.log1p(steps_since_trade) / np.log1p(max(1.0, float(episode_max_steps))),
             0.0, 1.0,
         )
 
-        # 19. trade_freq_remaining_ratio [0, 1]：交易頻率硬限制剩餘額度（視窗內還可交易步數/上限）
+        # 18. trade_freq_remaining_ratio [0, 1]：交易頻率硬限制剩餘額度（視窗內還可交易步數/上限）
         trade_freq_remaining_ratio = float(account_metrics.get('trade_freq_remaining_ratio', 1.0))
         trade_freq_remaining_ratio = np.clip(trade_freq_remaining_ratio, 0.0, 1.0)
 
-        # 20. trade_freq_blocked_last [0, 1]：上一步是否因額度滿被擋（1=被擋）
+        # 19. trade_freq_blocked_last [0, 1]：上一步是否因額度滿被擋（1=被擋）
         trade_freq_blocked_last = float(account_metrics.get('trade_freq_blocked_last', 0.0))
         trade_freq_blocked_last = np.clip(trade_freq_blocked_last, 0.0, 1.0)
 
-        # 21. entry_price_ratio [0.5, 1.5]：進場價 / 當前價，無倉位時 1.0（與當前價同）
+        # 20. entry_price_ratio [0.5, 1.5]：進場價 / 當前價，無倉位時 1.0（與當前價同）
         entry_price = float(executor.position.entry_price)
         if current_price > 0 and abs(size) > 1e-12 and entry_price > 0:
             entry_price_ratio = entry_price / current_price
@@ -382,7 +377,7 @@ class TradingObserver:
             entry_price_ratio = 1.0
         entry_price_ratio = np.clip(entry_price_ratio, 0.5, 1.5)
 
-        # 22. stop_loss_price_ratio [0.5, 1.5]：止損價 / 當前價，無止損時 1.0
+        # 21. stop_loss_price_ratio [0.5, 1.5]：止損價 / 當前價，無止損時 1.0
         stop_loss_price = float(executor.position.stop_loss_price)
         if current_price > 0 and stop_loss_price > 0:
             stop_loss_price_ratio = stop_loss_price / current_price
@@ -390,7 +385,7 @@ class TradingObserver:
             stop_loss_price_ratio = 1.0
         stop_loss_price_ratio = np.clip(stop_loss_price_ratio, 0.5, 1.5)
 
-        # 23. recent_flat_ratio [0, 1]：最近 N 步空倉比例（與 cost_flat 同口徑；實盤可算）
+        # 22. recent_flat_ratio [0, 1]：最近 N 步空倉比例（與 cost_flat 同口徑；實盤可算）
         recent_flat_ratio = float(account_metrics.get('recent_flat_ratio', 0.5))
         recent_flat_ratio = np.clip(recent_flat_ratio, 0.0, 1.0)
 
@@ -411,7 +406,6 @@ class TradingObserver:
             stop_loss_count_log,        # 13
             holding_time_log,           # 14
             buffer_to_min_balance_ratio,  # 15
-            stop_loss_rate,             # 16
             steps_since_trade_norm,     # 17
             trade_freq_remaining_ratio, # 18
             trade_freq_blocked_last,    # 19

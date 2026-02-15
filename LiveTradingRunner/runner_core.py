@@ -51,7 +51,6 @@ def _build_account_and_context_obs_named(obs: dict) -> Dict[str, Dict[str, float
         "stop_loss_count_log",        # 13
         "holding_time_log",           # 14
         "buffer_to_min_balance_ratio", # 15
-        "stop_loss_rate",             # 16
         "steps_since_trade_norm",     # 17
         "trade_freq_remaining_ratio", # 18
         "trade_freq_blocked_last",    # 19
