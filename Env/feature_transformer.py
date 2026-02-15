@@ -88,10 +88,9 @@ class FeatureTransformer:
     - 所有特徵皆為 float32，且保證不含 NaN/inf。
     """
 
-    # ---- 5m Target 特征：精简到 28-30 通道（移除长时尺度干扰，添加关键价位和订单簿）----
+    # ---- 5m Target 特征：精簡通道（移除 ret_1_z 單 bar 高噪音，其餘保留）----
     OPTIMIZED_TARGET_5M_COLS: Final[Tuple[str, ...]] = (
-        # === 基础回报与价格（5） ===
-        "ret_1_z",
+        # === 基础回报与价格（4，移除 ret_1_z 避免單根 K 噪音拖累訓練）===
         "ret_15m_z",
         "range_z",
         "body_z",

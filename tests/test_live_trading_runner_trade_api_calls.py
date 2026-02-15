@@ -39,7 +39,7 @@ def _make_minimal_obs() -> dict:
     return {
         "price_seq": np.zeros((288, 10), dtype=np.float32),
         "price_seq_1d": np.zeros((14, 5), dtype=np.float32),
-        "account_state": np.zeros((28,), dtype=np.float32),
+        "account_state": np.zeros((23,), dtype=np.float32),
     }
 
 

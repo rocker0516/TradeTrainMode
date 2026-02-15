@@ -146,7 +146,7 @@ class TrainConfig:
     }
 
     # ==================== SB3 SAC 超參數 ====================
-    LEARNING_RATE: float = 5e-4
+    LEARNING_RATE: float = 1e-4
     """學習率"""
     
     BUFFER_SIZE: int = 1_500_000
@@ -166,28 +166,28 @@ class TrainConfig:
     - 4 或 8：瓶頸在 GPU 時可提升 it/s，但更新變疏、對訓練未必有益，僅在需要衝高吞吐時使用
     """
     
-    GRADIENT_STEPS: int = 1
+    GRADIENT_STEPS: int = 2
     """梯度步數：每次更新時做的梯度步數；建議與 TRAIN_FREQ 同值。過大僅提升 it/s，不利學習效率"""
 
-    # ==================== Policy / 網路結構 ====================
-    # 新的雙 CNN 架構參數（DualCnnFeatureExtractor）
-    EMB_5M_TARGET: int = 128
-    """Target 5m 特徵維度（price_seq_target 的 CNN 輸出維度）"""
+    # ==================== Policy / 網路結構（偏泛化：較小容量 + 正則）====================
+    # 雙 CNN 架構參數（DualCnnFeatureExtractor）：適度縮小維度以減少記住訓練期噪音
+    EMB_5M_TARGET: int = 96
+    """Target 5m 特徵維度（原 128，縮小以利泛化）"""
     
-    EMB_5M_OTHERS: int = 64
-    """Others 5m 特徵維度（price_seq_others 的 CNN 輸出維度）"""
+    EMB_5M_OTHERS: int = 48
+    """Others 5m 特徵維度（原 64）"""
     
-    EMB_1D_TARGET: int = 64
-    """Target 1d 特徵維度（price_seq_1d_target 的 CNN 輸出維度）"""
+    EMB_1D_TARGET: int = 48
+    """Target 1d 特徵維度（原 64）"""
     
-    EMB_1D_OTHERS: int = 32
-    """Others 1d 特徵維度（price_seq_1d_others 的 CNN 輸出維度）"""
+    EMB_1D_OTHERS: int = 24
+    """Others 1d 特徵維度（原 32）"""
     
-    EMB_VEC: int = 128
-    """向量特徵維度（account_state + cost_state 的 MLP 輸出維度）"""
+    EMB_VEC: int = 96
+    """向量特徵維度（原 128）"""
     
-    OUT_DIM: int = 256
-    """最終融合層輸出維度"""
+    OUT_DIM: int = 192
+    """最終融合層輸出維度（原 256）"""
     
     # 相容性：保留舊參數（用於向後相容，目前未使用）
     EMB_5M: int = 256
@@ -196,11 +196,16 @@ class TrainConfig:
     EMB_1D: int = 128
     """舊版 1d 特徵維度（已棄用）"""
     
-    PI_ARCH: tuple[int, int] = (256, 256)
-    """Policy 網路結構（隱藏層大小）"""
+    PI_ARCH: tuple[int, int] = (192, 192)
+    """Policy 網路結構（原 (256,256)，縮小以利泛化）"""
     
-    QF_ARCH: tuple[int, int] = (128, 128)
-    """Q 網路結構（隱藏層大小）"""
+    QF_ARCH: tuple[int, int] = (96, 96)
+    """Q 網路結構（原 (128,128)）"""
+    
+    FEATURE_EXTRACTOR_DROPOUT: float = 0.1
+    """特徵抽取器 Dropout 比例（0=關閉；0.1～0.2 可減輕過擬合，建議與較小容量搭配）"""
+
+    # 註：L2 正則（weight_decay）需在優化器設定，SB3 預設未暴露；目前依賴較小 net_arch + dropout 降低過擬合。
 
     # ==================== Wrapper（動作平滑/重複）====================
     ACTION_REPEAT: int = 1
@@ -252,7 +257,7 @@ class TrainConfig:
     WINDOW_SIZE_5M: int = 288 // 8  # 36（約 3 小時）；288 = 1 天
     """5 分鐘 K 線視窗大小（根數）。288 = 1 天。"""
     
-    WINDOW_SIZE_1D: int = 7
+    WINDOW_SIZE_1D: int = 15
     """1 日 K 線視窗大小（天數）。"""
 
     # ==================== 資料切分（Train/Eval 分離）====================
@@ -261,6 +266,13 @@ class TrainConfig:
     
     HOLDOUT_MONTHS: int = 2
     """保留用於評估的月份數（從資料末尾往前取）"""
+
+    # ==================== 訓練 vs 評估差距說明 ====================
+    # 訓練端「Last N Episodes」統計來自「訓練資料」（非最近 HOLDOUT_MONTHS）；評估端在「最近 N 個月」上跑。
+    # 因此訓練數字好、評估數字差，常見原因：
+    # 1) 分布偏移：近期行情與訓練期不同，策略在 holdout 上泛化差。
+    # 2) 口徑一致：訓練端已輸出「Simple Return (同 Eval 口徑)」，可與 eval/mean_return 直接對比（同一資料期內仍可能因 random_start 不同而有差異）。
+    # 3) 若希望訓練期也看「與 Eval 同口徑」的收益，請看 STATS 裡的 Simple Return；若訓練 Simple Return 高而 Eval mean_return 低，多半是泛化問題，可考慮增加訓練多樣性、正則或縮短 holdout 做診斷。
 
     # ==================== Log / Checkpoint ====================
     TENSORBOARD_LOG_DIR: str = "logs/sac_lag_tb"
@@ -283,21 +295,21 @@ class TrainConfig:
     - 依規則挑選並保存 best model
     """
     
-    EVAL_EVERY_TIMESTEPS: int = 10_000_000
+    EVAL_EVERY_TIMESTEPS: int = 5_000_000
     """
     評估頻率（每 N 個 timesteps）
     - 以「訓練總 timesteps」為基準（使用 SB3 的 model.num_timesteps）
     - 確保在 VecEnv 下語意正確
     """
     
-    EVAL_N_EVAL_EPISODES: int = 25
+    EVAL_N_EVAL_EPISODES: int = 5
     """每次評估運行的 episode 數量"""
     
     EVAL_DETERMINISTIC: bool = True
     """評估時是否使用確定性策略（True 表示使用平均策略，False 表示採樣）"""
     
     EVAL_RANDOM_START: bool = True
-    """Eval 環境設定：是否使用隨機起點（True 可增加評估多樣性，False 可重現）"""
+    """Eval 環境設定：是否使用隨機起點（與訓練 random_start=True 一致，避免 eval 起點過於集中）"""
     
     EVAL_MAX_EPISODE_STEPS: int = 288 * 14
     """Eval episode 最大步數（避免回合過長拖慢訓練）"""

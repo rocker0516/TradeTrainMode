@@ -154,6 +154,7 @@ class ModelConfig:
     qf_arch: tuple[int, ...] = TrainConfig.QF_ARCH
     use_cross_attention: bool = True
     compile_policy: bool = TrainConfig.COMPILE_POLICY
+    feature_extractor_dropout: float = TrainConfig.FEATURE_EXTRACTOR_DROPOUT
 
     def to_dict(self) -> Dict[str, any]:
         """转换为字典（用于模型初始化）。"""
@@ -176,6 +177,7 @@ class ModelConfig:
                     "emb_vec": self.emb_vec,
                     "out_dim": self.out_dim,
                     "use_cross_attention": self.use_cross_attention,
+                    "dropout": self.feature_extractor_dropout,
                 },
                 "net_arch": {
                     "pi": list(self.pi_arch),

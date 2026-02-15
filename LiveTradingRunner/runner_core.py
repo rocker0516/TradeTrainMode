@@ -35,34 +35,29 @@ def _build_account_and_context_obs_named(obs: dict) -> Dict[str, Dict[str, float
     """
 
     account_state_names = [
-        "position_side",              # 1
-        "position_size_norm",          # 2
-        "equity_ratio",               # 3
-        "realized_pnl_ratio",          # 4
-        "unrealized_pnl_atr",          # 5
-        "drawdown",                    # 6
-        "liq_distance_atr",           # 7
-        "stop_loss_distance_atr",      # 8
-        "margin_usage_ratio",         # 9
-        "cooldown_remaining_norm",     # 10
-        "fee_rate",                   # 11
-        "rolling_fee_ratio",          # 12
-        "fee_budget_remaining",       # 13
-        "trade_count_log",            # 14
-        "stop_loss_count_log",         # 15
-        "holding_time_log",           # 16
-        "buffer_to_min_balance_ratio", # 17
-        "stop_loss_rate",             # 18
-        "realized_pnl_per_close_norm", # 19
-        "episode_progress",           # 20
-        "steps_since_trade_norm",     # 21
-        "trade_freq_remaining_ratio", # 22
-        "trade_freq_blocked_last",    # 23
-        "entry_price_ratio",         # 24
-        "stop_loss_price_ratio",     # 25
-        "recent_flat_ratio",         # 26（與 cost_flat 同口徑，實盤可算）
-        "trend_strength_last",       # 27（可交易性彙總）
-        "chop_last",                 # 28（可交易性彙總）
+        "position_side",              # 0
+        "position_size_norm",         # 1
+        "equity_ratio",               # 2
+        "realized_pnl_ratio",         # 3
+        "unrealized_pnl_atr",         # 4
+        "drawdown",                   # 5
+        "liq_distance_atr",           # 6
+        "stop_loss_distance_atr",     # 7
+        "margin_usage_ratio",         # 8
+        "cooldown_remaining_norm",    # 9
+        "fee_rate",                   # 10
+        "rolling_fee_ratio",          # 11
+        "trade_count_log",            # 12
+        "stop_loss_count_log",        # 13
+        "holding_time_log",           # 14
+        "buffer_to_min_balance_ratio", # 15
+        "stop_loss_rate",             # 16
+        "steps_since_trade_norm",     # 17
+        "trade_freq_remaining_ratio", # 18
+        "trade_freq_blocked_last",    # 19
+        "entry_price_ratio",          # 20
+        "stop_loss_price_ratio",      # 21
+        "recent_flat_ratio",          # 22（與 cost_flat 同口徑，實盤可算）
     ]
     cost_state_names = [
         "placeholder",  # 佔位欄位（cost_state 已清空）

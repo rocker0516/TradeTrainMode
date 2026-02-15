@@ -367,6 +367,9 @@ class LagrangianCallback(BaseCallback):
         print(f"    ↳ Conviction Bonus Sum   : {avg_conviction_bonus_sum:8.4f}")
         roi_est = (np.exp(avg_log_ret_only) - 1.0) * 100.0
         print(f"  Est. ROI (from LogRet)      : {roi_est:8.2f} %")
+        avg_simple_ret = end_stats.get("avg_simple_return")
+        if avg_simple_ret is not None:
+            print(f"  Simple Return (同 Eval 口徑) : {avg_simple_ret * 100:8.2f} %  [= (final_bal/init_bal)-1]")
         print(f"  Avg Profit (USDT)           : {avg_profit:8.2f}")
         print(f"  Win Rate                    : {win_rate:8.1f} %")
         print("-" * 60)
@@ -520,6 +523,8 @@ class LagrangianCallback(BaseCallback):
         self.logger.record("custom/truncated_rate", truncated_rate)
         self.logger.record("custom/avg_episode_len", avg_episode_len)
         self.logger.record("custom/avg_final_balance", avg_final_balance)
+        if end_stats.get("avg_simple_return") is not None:
+            self.logger.record("custom/avg_simple_return", float(end_stats["avg_simple_return"]))
         for k, v in dict(end_stats.get("reason_counts", {})).items():
             # 只記錄有限長度 key，避免 logger key 太亂
             safe_k = str(k).replace(" ", "_")[:64]

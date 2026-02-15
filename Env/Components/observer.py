@@ -78,9 +78,9 @@ class TradingObserver:
         }
 
     def _build_account_space(self) -> dict:
-        """定義帳戶狀態相關的觀察空間（含 recent_flat_ratio、trend_strength_last、chop_last 等，實盤可算、無需 cost_state）"""
+        """定義帳戶狀態相關的觀察空間（23 維：已移除冗餘/常數/易誘發不良行為的欄位）"""
         return {
-            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(28,), dtype=self.obs_dtype)
+            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(23,), dtype=self.obs_dtype)
         }
 
     def _build_context_space(self) -> dict:
@@ -248,7 +248,7 @@ class TradingObserver:
         current_price: float,
         atr_ratio: float,
     ) -> dict:
-        """生成帳戶狀態觀察值（28 欄位：含 recent_flat_ratio、trend_strength_last、chop_last，實盤可算）"""
+        """生成帳戶狀態觀察值（23 欄位：已移除 fee_budget_remaining、realized_pnl_per_close_norm、episode_progress、trend_strength_last、chop_last）"""
         
         # 緩存常用計算值（優化效率）
         equity = float(executor.equity(current_price))
@@ -340,53 +340,41 @@ class TradingObserver:
         # 12. rolling_fee_ratio [0, 1]
         rolling_fee_ratio = rolling_fee_sum / equity if equity > 0 else 0.0
         rolling_fee_ratio = np.clip(rolling_fee_ratio, 0.0, 1.0)
-        
-        # 13. fee_budget_remaining [0, 1]（固定 1.0，Fee Limit 功能已移除）
-        fee_budget_remaining = 1.0
 
-        # 14. trade_count_log [0, ∞)
+        # 13. trade_count_log [0, ∞)
         trade_count = executor.long_entry_count + executor.short_entry_count
         trade_count_log = np.log1p(float(trade_count))
         
-        # 15. stop_loss_count_log [0, ∞)
+        # 14. stop_loss_count_log [0, ∞)
         stop_loss_count_log = np.log1p(float(episode_stop_loss_count))
         
-        # 16. holding_time_log [0, ∞)
+        # 15. holding_time_log [0, ∞)
         holding_time_log = np.log1p(max(0.0, holding_steps))
 
-        # 17. buffer_to_min_balance_ratio [0, 1]：離 balance_insufficient 門檻的緩衝（0=碰到死亡線）
+        # 16. buffer_to_min_balance_ratio [0, 1]：離 balance_insufficient 門檻的緩衝（0=碰到死亡線）
         buffer_to_min = (equity - min_balance) / initial_balance if initial_balance > 0 else 0.0
         buffer_to_min_balance_ratio = np.clip(buffer_to_min, 0.0, 1.0)
 
-        # 18. stop_loss_rate [0, 1]：本回合進場後被止損的比例
+        # 17. stop_loss_rate [0, 1]：本回合進場後被止損的比例
         entry_count = int(getattr(executor, 'long_entry_count', 0)) + int(getattr(executor, 'short_entry_count', 0))
         stop_loss_rate = float(episode_stop_loss_count) / max(1, entry_count)
         stop_loss_rate = np.clip(stop_loss_rate, 0.0, 1.0)
 
-        # 19. realized_pnl_per_close_norm [-0.5, 0.5]：平均每筆平倉盈虧（相對 initial）
-        close_count = int(getattr(executor, 'long_close_count', 0)) + int(getattr(executor, 'short_close_count', 0))
-        pnl_per_close = (realized_pnl / initial_balance) / max(1, close_count) if initial_balance > 0 else 0.0
-        realized_pnl_per_close_norm = np.clip(pnl_per_close, -0.5, 0.5)
-
-        # 20. episode_progress [0, 1]：回合進度
-        episode_progress = float(episode_steps) / float(episode_max_steps)
-        episode_progress = np.clip(episode_progress, 0.0, 1.0)
-
-        # 21. steps_since_trade_norm [0, 1]：距上次成交步數正規化（供 trade_freq / flat cost 學習）
+        # 18. steps_since_trade_norm [0, 1]：距上次成交步數正規化（供 trade_freq / flat cost 學習）
         steps_since_trade_norm = np.clip(
             np.log1p(steps_since_trade) / np.log1p(max(1.0, float(episode_max_steps))),
             0.0, 1.0,
         )
 
-        # 22. trade_freq_remaining_ratio [0, 1]：交易頻率硬限制剩餘額度（視窗內還可交易步數/上限）
+        # 19. trade_freq_remaining_ratio [0, 1]：交易頻率硬限制剩餘額度（視窗內還可交易步數/上限）
         trade_freq_remaining_ratio = float(account_metrics.get('trade_freq_remaining_ratio', 1.0))
         trade_freq_remaining_ratio = np.clip(trade_freq_remaining_ratio, 0.0, 1.0)
 
-        # 23. trade_freq_blocked_last [0, 1]：上一步是否因額度滿被擋（1=被擋）
+        # 20. trade_freq_blocked_last [0, 1]：上一步是否因額度滿被擋（1=被擋）
         trade_freq_blocked_last = float(account_metrics.get('trade_freq_blocked_last', 0.0))
         trade_freq_blocked_last = np.clip(trade_freq_blocked_last, 0.0, 1.0)
 
-        # 24. entry_price_ratio [0.5, 1.5]：進場價 / 當前價，無倉位時 1.0（與當前價同）
+        # 21. entry_price_ratio [0.5, 1.5]：進場價 / 當前價，無倉位時 1.0（與當前價同）
         entry_price = float(executor.position.entry_price)
         if current_price > 0 and abs(size) > 1e-12 and entry_price > 0:
             entry_price_ratio = entry_price / current_price
@@ -394,7 +382,7 @@ class TradingObserver:
             entry_price_ratio = 1.0
         entry_price_ratio = np.clip(entry_price_ratio, 0.5, 1.5)
 
-        # 25. stop_loss_price_ratio [0.5, 1.5]：止損價 / 當前價，無止損時 1.0
+        # 22. stop_loss_price_ratio [0.5, 1.5]：止損價 / 當前價，無止損時 1.0
         stop_loss_price = float(executor.position.stop_loss_price)
         if current_price > 0 and stop_loss_price > 0:
             stop_loss_price_ratio = stop_loss_price / current_price
@@ -402,45 +390,34 @@ class TradingObserver:
             stop_loss_price_ratio = 1.0
         stop_loss_price_ratio = np.clip(stop_loss_price_ratio, 0.5, 1.5)
 
-        # 26. recent_flat_ratio [0, 1]：最近 N 步空倉比例（與 cost_flat 同口徑；實盤可算）
+        # 23. recent_flat_ratio [0, 1]：最近 N 步空倉比例（與 cost_flat 同口徑；實盤可算）
         recent_flat_ratio = float(account_metrics.get('recent_flat_ratio', 0.5))
         recent_flat_ratio = np.clip(recent_flat_ratio, 0.0, 1.0)
 
-        # 27. trend_strength_last [-1, 1]：當前步趨勢強度（可交易性彙總，實盤可算）
-        # 28. chop_48 [-1, 1]：當前步震盪指標（可交易性彙總，實盤可算）
-        scalars = market_data.get_target_scalars_at_step(step_idx)
-        trend_strength_last = float(scalars.get('trend_strength_atr', 0.0))
-        chop_last = float(scalars.get('chop_48', 0.0))
-
         account_state = np.array([
-            position_side,              # 1
-            position_size_norm,         # 2
-            equity_ratio,               # 3
-            realized_pnl_ratio,         # 4
-            unrealized_pnl_atr,         # 5
-            drawdown,                   # 6
-            liq_distance_atr,           # 7
-            stop_loss_distance_atr,     # 8
-            margin_usage_ratio,         # 9
-            cooldown_remaining_norm,    # 10
-            fee_rate,                   # 11
-            rolling_fee_ratio,          # 12
-            fee_budget_remaining,       # 13
-            trade_count_log,            # 14
-            stop_loss_count_log,        # 15
-            holding_time_log,           # 16
-            buffer_to_min_balance_ratio,  # 17
-            stop_loss_rate,             # 18
-            realized_pnl_per_close_norm, # 19
-            episode_progress,          # 20
-            steps_since_trade_norm,    # 21
-            trade_freq_remaining_ratio, # 22
-            trade_freq_blocked_last,   # 23
-            entry_price_ratio,         # 24
-            stop_loss_price_ratio,     # 25
-            recent_flat_ratio,         # 26
-            trend_strength_last,      # 27
-            chop_last,                # 28
+            position_side,              # 0
+            position_size_norm,         # 1
+            equity_ratio,               # 2
+            realized_pnl_ratio,         # 3
+            unrealized_pnl_atr,         # 4
+            drawdown,                   # 5
+            liq_distance_atr,           # 6
+            stop_loss_distance_atr,     # 7
+            margin_usage_ratio,         # 8
+            cooldown_remaining_norm,    # 9
+            fee_rate,                   # 10
+            rolling_fee_ratio,          # 11
+            trade_count_log,            # 12
+            stop_loss_count_log,        # 13
+            holding_time_log,           # 14
+            buffer_to_min_balance_ratio,  # 15
+            stop_loss_rate,             # 16
+            steps_since_trade_norm,     # 17
+            trade_freq_remaining_ratio, # 18
+            trade_freq_blocked_last,    # 19
+            entry_price_ratio,          # 20
+            stop_loss_price_ratio,      # 21
+            recent_flat_ratio,          # 22
         ], dtype=self.obs_dtype)
         
         return {'account_state': account_state}

@@ -23,8 +23,8 @@ class Config:
     # -------------------------------------------------------------------------
     WINDOW_SIZE: int = 288 * 1.5  # 5m 根數，432 ≈ 1.5 天
     WINDOW_SIZE_1D: int = 30
-    MIN_EPISODE_STEPS: int = 288 * 31 * 1
-    MAX_EPISODE_STEPS: int = 288 * 31 * 1
+    MIN_EPISODE_STEPS: int = 288 * 15 * 1
+    MAX_EPISODE_STEPS: int = 288 * 15 * 1
     RISK_BASE_UPDATE_STEPS: int = 288  # 每 N steps 更新 daily_risk_base（用於單步倉位變化上限）
 
     # -------------------------------------------------------------------------
@@ -44,12 +44,12 @@ class Config:
     # 主線獎勵：順向交易獎勵（Conviction Trend Bonus）
     # -------------------------------------------------------------------------
     # 順向獎勵權重；>0 啟用「強訊號 + 大倉 + 同向」時加分，建議從小值開始（如 0.1）
-    CONVICTION_TREND_BONUS_WEIGHT: float = 5
+    CONVICTION_TREND_BONUS_WEIGHT: float = 0.3
     # trend_score 縮放倍數（(ma50-ma200)/ma200 為小數比，乘上此倍數後再 tanh 算 strength）
     # 例如 scale=10：trend_score=0.05 → strength≈0.46，易通過 min_strength 0.25
     CONVICTION_TREND_SCORE_SCALE: float = 10.0
     # 趨勢強度門檻 [0,1]；strength = |tanh(scale * trend_score)|，達此值才加分
-    CONVICTION_TREND_MIN_STRENGTH: float = 0.4
+    CONVICTION_TREND_MIN_STRENGTH: float = 0.35
     # 最小曝險門檻 [0,1]，僅當 abs(position_pct) >= 此值才加分，避免小倉刷分
     CONVICTION_MIN_ABS_POS: float = 0.5
 

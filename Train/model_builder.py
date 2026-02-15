@@ -55,6 +55,7 @@ class ModelBuilder(IModelBuilder):
                     emb_vec=self.config.emb_vec,
                     out_dim=self.config.out_dim,
                     use_cross_attention=self.config.use_cross_attention,
+                    dropout=getattr(self.config, "feature_extractor_dropout", 0.0),
                 ),
                 net_arch=dict(
                     pi=list(self.config.pi_arch),

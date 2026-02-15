@@ -158,6 +158,7 @@ def compute_end_result_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
             "avg_episode_len": 0.0,
             "avg_episode_steps_inner": 0.0,
             "avg_final_balance": 0.0,
+            "avg_simple_return": None,
         }
 
     terminated_flags = [bool(x.get("terminated", False)) for x in ep_infos]
@@ -198,11 +199,19 @@ def compute_end_result_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
             ep_steps_inner.append(ep_lens[-1] if ep_lens else 0)
 
     final_balances: List[float] = []
+    simple_returns: List[float] = []
     for x in ep_infos:
         try:
             final_balances.append(float(x.get("final_balance", 0.0)))
         except (TypeError, ValueError):
             final_balances.append(0.0)
+        try:
+            init_bal = float(x.get("initial_balance", 0.0))
+            fin_bal = float(x.get("final_balance", 0.0))
+            if init_bal > 0:
+                simple_returns.append(fin_bal / init_bal - 1.0)
+        except (TypeError, ValueError):
+            pass
 
     return {
         "n": n,
@@ -215,5 +224,6 @@ def compute_end_result_stats(ep_infos: List[Dict[str, Any]]) -> Dict[str, Any]:
         "avg_episode_len": float(np.mean(ep_lens)) if ep_lens else 0.0,
         "avg_episode_steps_inner": float(np.mean(ep_steps_inner)) if ep_steps_inner else 0.0,
         "avg_final_balance": float(np.mean(final_balances)) if final_balances else 0.0,
+        "avg_simple_return": float(np.mean(simple_returns)) if simple_returns else None,
     }
 

@@ -212,8 +212,10 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
         emb_vec: int = 128,
         out_dim: int = 256,
         use_cross_attention: bool = True,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__(observation_space, features_dim=int(out_dim))
+        self._dropout = float(dropout)
 
         # ---- 解析 observation_space ----
         # 新的分离 observation space
@@ -275,26 +277,31 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
         if use_cross_attention:
             emb_5m_fused = emb_5m_target + emb_5m_others
             emb_1d_fused = emb_1d_target + emb_1d_others
+            # hidden_dim 適度縮小以配合較小 embedding，利於泛化
+            attn_hidden = min(96, emb_5m_fused, emb_1d_fused)
             self.cross_attn = CrossTimeframeAttention(
                 emb_5m=emb_5m_fused,
                 emb_1d=emb_1d_fused,
-                hidden_dim=128
+                hidden_dim=max(64, attn_hidden),
             )
 
-        # ---- 向量 MLP ----
-        self.mlp_vec = nn.Sequential(
+        # ---- 向量 MLP（含 Dropout 以利泛化）----
+        mlp_layers = [
             nn.Linear(vdim, 128),
             nn.ReLU(),
+            nn.Dropout(self._dropout),
             nn.Linear(128, emb_vec),
             nn.ReLU(),
-        )
+            nn.Dropout(self._dropout),
+        ]
+        self.mlp_vec = nn.Sequential(*mlp_layers)
 
-        # ---- 融合層 ----
-        # 如果使用 cross-attention，5m 特征已经被增强
+        # ---- 融合層（含 Dropout）----
         fusion_in = int(emb_5m_target + emb_5m_others + emb_1d_target + emb_1d_others + emb_vec)
         self.fusion = nn.Sequential(
             nn.Linear(fusion_in, int(out_dim)),
             nn.ReLU(),
+            nn.Dropout(self._dropout),
         )
 
         # 保存一些資訊，方便 debug

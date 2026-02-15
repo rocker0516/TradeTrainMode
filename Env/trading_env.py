@@ -809,6 +809,7 @@ class TradingEnvironment(gym.Env):
         if done:
             info["termination_reason"] = termination_reason
             info["final_balance"] = float(new_equity)
+            info["initial_balance"] = float(self.initial_balance)
             # 評估/統計常用：episode 起點與步數
             info["episode_start_step"] = int(getattr(self, "episode_start_step", 0))
             info["episode_start_timestamp"] = getattr(self, "episode_start_timestamp", None)

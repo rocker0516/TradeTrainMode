@@ -33,8 +33,7 @@
 
 | 分類 | 特徵名 | 用途與影響 |
 |------|--------|------------|
-| **基礎回報與價格** | `ret_1_z` | 單根 K 線 log 報酬的 z-score。影響：捕捉極短期動量/反轉。 |
-| | `ret_15m_z` | 15 分鐘（3 根）累積報酬 z-score。影響：短線趨勢強度。 |
+| **基礎回報與價格** | `ret_15m_z` | 15 分鐘（3 根）累積報酬 z-score。影響：短線趨勢強度。（已移除 ret_1_z 單 bar 高噪音） |
 | | `range_z` | (high-low)/prev_close 的 z-score。影響：當根 K 波動幅度。 |
 | | `body_z` | (close-open)/prev_close 的 z-score。影響：實體方向與大小。 |
 | | `log_close_z` | log(close) 的 z-score。影響：價格水位相對近期常態。 |
@@ -132,10 +131,10 @@
 
 ---
 
-## 三、帳戶觀察 (account_state) — 21 維
+## 三、帳戶觀察 (account_state) — 23 維
 
-**Shape**: `(21,)`  
-**用途**: 讓 agent 知道當前持倉、權益、風險距離、手續費與回合進度等，以控制槓桿、止損與交易頻率。
+**Shape**: `(23,)`  
+**用途**: 讓 agent 知道當前持倉、權益、風險距離、手續費等，以控制槓桿、止損與交易頻率。已移除常數、與序列重複、易誘發不良行為或回合依賴的欄位。
 
 | 索引 | 名稱 | 範圍/計算 | 用途與影響 |
 |------|------|-----------|------------|
@@ -143,25 +142,29 @@
 | 1 | **position_size_norm** | [0, 1] | 持倉名目/（權益×槓桿）。影響：倉位與槓桿使用，避免過度曝險。 |
 | 2 | **equity_ratio** | [0, 5] | 權益/初始資金。影響：總績效與存活，>1 為獲利。 |
 | 3 | **realized_pnl_ratio** | [-1, 5] | 已實現損益/初始資金。影響：平倉累計盈虧。 |
-| 4 | **unrealized_pnl_atr** | [-10, 10] | 未實現損益/(初始×atr_ratio)。影響：持倉浮盈虧以「波動單位」表示，便於與止損/持倉時間權衡。 |
+| 4 | **unrealized_pnl_atr** | [-10, 10] | 未實現損益/(初始×atr_ratio)。影響：持倉浮盈虧以「波動單位」表示。 |
 | 5 | **drawdown** | [0, 1] | (max_equity - equity)/max_equity。影響：回撤控制與保守行為。 |
 | 6 | **liq_distance_atr** | [0, 10] | 現價到強平價距離（ATR 倍數），無倉時=10。影響：避免逼近強平。 |
-| 7 | **stop_loss_distance_atr** | [-10, 10] | 現價到止損價距離（ATR），有符號（多倉為正表安全側）。影響：止損緩衝與 stop-buffer 成本對齊。 |
+| 7 | **stop_loss_distance_atr** | [-10, 10] | 現價到止損價距離（ATR），有符號。影響：止損緩衝與 stop-buffer 成本對齊。 |
 | 8 | **margin_usage_ratio** | [0, 1.1] | 維持保證金/權益。影響：保證金壓力，接近 1 危險。 |
 | 9 | **cooldown_remaining_norm** | [0, 1] | 止損冷卻剩餘步數/STOP_LOSS_COOLDOWN_STEPS。影響：止損後是否可立刻再進場。 |
 | 10 | **fee_rate** | [0, 0.05] | 手續費率（小數）。影響：交易成本意識。 |
 | 11 | **rolling_fee_ratio** | [0, 1] | 滾動手續費/權益。影響：近期成本負擔。 |
-| 12 | **fee_budget_remaining** | 固定 1.0 | 保留欄位（Fee Limit 已移除）。影響：無，僅相容。 |
-| 13 | **trade_count_log** | [0, ∞) | log1p(進場次數)。影響：交易頻率與 over-trading 懲罰。 |
-| 14 | **stop_loss_count_log** | [0, ∞) | log1p(本回合止損次數)。影響：止損頻率與風控品質。 |
-| 15 | **holding_time_log** | [0, ∞) | log1p(持倉步數)。影響：持倉時間與成本/報酬取捨。 |
-| 16 | **buffer_to_min_balance_ratio** | [0, 1] | (equity - min_balance)/initial_balance，0=觸及底線。影響：避免 balance_insufficient 終止。 |
-| 17 | **stop_loss_rate** | [0, 1] | 本回合止損次數/進場次數。影響：進場品質與過早止損。 |
-| 18 | **realized_pnl_per_close_norm** | [-0.5, 0.5] | (realized_pnl/initial)/平倉次數。影響：平均每筆盈虧，鼓勵提高單筆品質。 |
-| 19 | **episode_progress** | [0, 1] | 當前步數/回合最大步數。影響：回合末保守/收斂行為。 |
-| 20 | **steps_since_trade_norm** | [0, 1] | log1p(距上次成交步數)/log1p(episode_max_steps)。影響：交易頻率與 flat cost 學習。 |
+| 12 | **trade_count_log** | [0, ∞) | log1p(進場次數)。影響：交易頻率與 over-trading 懲罰。 |
+| 13 | **stop_loss_count_log** | [0, ∞) | log1p(本回合止損次數)。影響：止損頻率與風控品質。 |
+| 14 | **holding_time_log** | [0, ∞) | log1p(持倉步數)。影響：持倉時間與成本/報酬取捨。 |
+| 15 | **buffer_to_min_balance_ratio** | [0, 1] | (equity - min_balance)/initial_balance，0=觸及底線。影響：避免 balance_insufficient 終止。 |
+| 16 | **stop_loss_rate** | [0, 1] | 本回合止損次數/進場次數。影響：進場品質與過早止損。 |
+| 17 | **steps_since_trade_norm** | [0, 1] | log1p(距上次成交步數)/log1p(episode_max_steps)。影響：交易頻率與 flat cost 學習。 |
+| 18 | **trade_freq_remaining_ratio** | [0, 1] | 交易頻率硬限制剩餘額度。影響：與 cost_trade_freq 對齊。 |
+| 19 | **trade_freq_blocked_last** | 0/1 | 上一步是否因額度滿被擋。影響：區分「未下單」與「被擋」。 |
+| 20 | **entry_price_ratio** | [0.5, 1.5] | 進場價/當前價，無倉=1。影響：持倉成本與盈虧。 |
+| 21 | **stop_loss_price_ratio** | [0.5, 1.5] | 止損價/當前價，無止損=1。影響：止損距離感。 |
+| 22 | **recent_flat_ratio** | [0, 1] | 最近 N 步空倉比例（與 cost_flat 同口徑）。影響：flat cost 學習。 |
 
-**影響總結**: 這 21 維直接綁定獎勵/成本設計（強平、止損、手續費、drawdown、flat），agent 需依此在「進攻」與「風控」之間取得平衡。
+**已移除欄位**: fee_budget_remaining（常數 1.0）、realized_pnl_per_close_norm（易誘發只平贏單）、episode_progress（回合依賴）、trend_strength_last / chop_last（與 price_seq_target 最後一筆重複）。
+
+**影響總結**: 此 23 維直接綁定獎勵/成本設計（強平、止損、手續費、drawdown、flat），agent 需依此在「進攻」與「風控」之間取得平衡。
 
 ---
 
