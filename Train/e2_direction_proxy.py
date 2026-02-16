@@ -1,0 +1,421 @@
+"""
+E2 最小可驗證規格：方向 proxy（bar close 決策、統計彙總特徵、時間切分、LR + LightGBM、破壞測試）。
+
+- 標籤：二分類 y = 1[log(close_{t+k}/close_t) > 0]，三分類 ±1/0 用 δ = 0.1*atr_ratio[t]。
+- 特徵：price_seq_target 每 channel 取 last/mean/std/min/max → 5*F，concat account_state(22)。
+- 時間切分：Train 70% / Valid 15% / Test 15%，禁止 shuffle。
+- 模型：LogisticRegression(L2) + LightGBM。
+- 破壞測試：label shuffle（AUC→0.5）、market shuffle（AUC 顯著下降）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+# 專案根目錄加入 path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from Env.load_file import load_data
+from Env.trading_env import TradingEnvironment
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    f1_score,
+    precision_recall_fscore_support,
+    roc_auc_score,
+)
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+import lightgbm as lgb
+
+
+# ---------- 常數 ----------
+HORIZON_K = 12
+DELTA_COEF = 0.1
+TRAIN_RATIO = 0.7
+VALID_RATIO = 0.15
+TEST_RATIO = 0.15
+RANDOM_STATE = 42
+
+
+def build_labels(
+    close_arr: np.ndarray,
+    atr_ratio_arr: np.ndarray,
+    valid_indices: np.ndarray,
+    k: int = HORIZON_K,
+    delta_coef: float = DELTA_COEF,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    依 close[t], close[t+k], atr_ratio[t] 計算二分類與三分類標籤（僅對 valid_indices）。
+
+    Returns:
+        y_binary: 0/1，shape (n_valid,)
+        y_3class: -1/0/1，shape (n_valid,)
+    """
+    n = len(valid_indices)
+    y_binary = np.zeros(n, dtype=np.int32)
+    y_3class = np.zeros(n, dtype=np.int32)
+
+    for i, t in enumerate(valid_indices):
+        close_t = close_arr[t]
+        close_tk = close_arr[t + k]
+        if close_t <= 0:
+            log_ret = 0.0
+        else:
+            log_ret = np.log(close_tk / close_t)
+
+        # 二分類
+        y_binary[i] = 1 if log_ret > 0 else 0
+
+        # 三分類：δ = delta_coef * atr_ratio[t]
+        delta = delta_coef * float(atr_ratio_arr[t])
+        if log_ret > delta:
+            y_3class[i] = 1
+        elif log_ret < -delta:
+            y_3class[i] = -1
+        else:
+            y_3class[i] = 0
+
+    return y_binary, y_3class
+
+
+def obs_to_summary_features(obs: Dict[str, Any]) -> np.ndarray:
+    """
+    從單步 obs 抽出 5*F + 22：對 price_seq_target 每 channel 取 last, mean, std, min, max；再 concat account_state。
+
+    Returns:
+        一維 float32 向量，shape (5*F + 22,)
+    """
+    seq = obs["price_seq_target"]  # (window, F)
+    acc = obs["account_state"]     # (22,)
+    if hasattr(seq, "numpy"):
+        seq = seq.numpy()
+    if hasattr(acc, "numpy"):
+        acc = acc.numpy()
+    seq = np.asarray(seq, dtype=np.float64)
+    acc = np.asarray(acc, dtype=np.float64).ravel()
+
+    F = seq.shape[1]
+    last = seq[-1]
+    mean = np.mean(seq, axis=0)
+    std = np.std(seq, axis=0)
+    np.place(std, std <= 0, 1e-12)
+    min_ = np.min(seq, axis=0)
+    max_ = np.max(seq, axis=0)
+
+    feats = np.concatenate([last, mean, std, min_, max_, acc]).astype(np.float32)
+    return feats
+
+
+def train_valid_test_split_time_ordered(
+    n: int,
+    train_ratio: float = TRAIN_RATIO,
+    valid_ratio: float = VALID_RATIO,
+    test_ratio: float = TEST_RATIO,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    按時間序切分索引：前 train_ratio、中 valid_ratio、後 test_ratio。
+    返回 train_idx, valid_idx, test_idx（各為 0..n-1 的子集）。
+    """
+    assert abs(train_ratio + valid_ratio + test_ratio - 1.0) < 1e-6
+    indices = np.arange(n)
+    n_train = int(round(n * train_ratio))
+    n_valid = int(round(n * valid_ratio))
+    n_test = n - n_train - n_valid
+    train_idx = indices[:n_train]
+    valid_idx = indices[n_train : n_train + n_valid]
+    test_idx = indices[n_train + n_valid :]
+    return train_idx, valid_idx, test_idx
+
+
+def collect_obs_and_indices(
+    window_size: int = 288,
+    horizon_k: int = HORIZON_K,
+    max_steps: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], np.ndarray, np.ndarray, np.ndarray]:
+    """
+    建立 env（全量資料、不切分），以固定策略 action=0 沿時間軸收集 obs，僅保留可算 label 的 step_idx。
+
+    Returns:
+        obs_list: 長度 = len(valid_indices)，每個元素為 obs dict
+        valid_indices: 對應的 step_idx，shape (n_valid,)
+        close_arr: 5m close 陣列（來自 MarketData）
+        atr_ratio_arr: 5m atr_ratio 陣列
+    """
+    kwargs = {
+        "env_id": 0,
+        "window_size": window_size,
+        "data_split_enabled": False,
+        "random_start": False,
+        "max_episode_steps": 500000,
+    }
+    env = TradingEnvironment(**kwargs)
+    close_arr = np.array(env.market_data.close_arr, copy=True)
+    atr_ratio_arr = np.array(env.market_data.atr_ratio_arr, copy=True)
+    N = len(close_arr)
+    last_valid_step = N - 1 - horizon_k
+    if last_valid_step < window_size:
+        env.close()
+        raise ValueError(
+            f"Data too short: need at least window_size + k = {window_size + horizon_k}, got N={N}"
+        )
+
+    obs, _ = env.reset()
+    done = False
+    truncated = False
+    steps = 0
+    obs_list: List[Dict[str, Any]] = []
+    step_indices: List[int] = []
+    limit = (N - 1) if max_steps is None else min(N - 1, max_steps)
+
+    while not (done or truncated) and env.current_step <= last_valid_step and steps < limit:
+        step_idx = int(env.get_current_step())
+        if step_idx >= window_size and step_idx <= last_valid_step:
+            obs_list.append(obs)
+            step_indices.append(step_idx)
+        action = np.array([0.0], dtype=np.float32)  # 固定平倉
+        obs, _, terminated, truncated, _ = env.step(action)
+        done = bool(terminated or truncated)
+        steps += 1
+
+    env.close()
+    valid_indices = np.array(step_indices, dtype=np.int64)
+    return obs_list, valid_indices, close_arr, atr_ratio_arr
+
+
+def _to_lgb_df(X: np.ndarray) -> pd.DataFrame:
+    """將 numpy 特徵矩陣轉成具欄位名的 DataFrame，供 LightGBM 使用以消除 feature names 警告。"""
+    n_cols = X.shape[1]
+    return pd.DataFrame(X, columns=[f"f{i}" for i in range(n_cols)])
+
+
+def fit_predict_binary(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    use_lightgbm: bool,
+    random_state: int = RANDOM_STATE,
+) -> Tuple[np.ndarray, float, Dict[str, float]]:
+    """訓練二分類並回傳 test 預測、AUC、與 precision/recall。"""
+    if use_lightgbm:
+        df_train = _to_lgb_df(X_train)
+        df_test = _to_lgb_df(X_test)
+        model = lgb.LGBMClassifier(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.05,
+            reg_alpha=0.1,
+            reg_lambda=0.1,
+            random_state=random_state,
+            verbosity=-1,
+            n_jobs=1,
+        )
+        model.fit(df_train, y_train)
+        proba = model.predict_proba(df_test)[:, 1]
+        pred = model.predict(df_test)
+    else:
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        model = LogisticRegression(
+            penalty="l2", max_iter=3000, random_state=random_state, solver="lbfgs"
+        )
+        model.fit(X_train_scaled, y_train)
+        proba = model.predict_proba(X_test_scaled)[:, 1]
+        pred = model.predict(X_test_scaled)
+
+    auc = roc_auc_score(y_test, proba) if np.unique(y_test).size > 1 else 0.5
+    acc = accuracy_score(y_test, pred)
+    prec, rec, _, _ = precision_recall_fscore_support(y_test, pred, average="binary", zero_division=0)
+    return pred, auc, {"accuracy": acc, "precision": prec, "recall": rec}
+
+
+def fit_predict_3class(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    use_lightgbm: bool,
+    random_state: int = RANDOM_STATE,
+) -> Tuple[np.ndarray, float, float, Dict[str, float]]:
+    """三分類：y in {-1,0,1}。回傳 test 預測、macro_f1、balanced_accuracy、輔助指標。"""
+    le = LabelEncoder()
+    y_train_enc = le.fit_transform(y_train)
+    y_test_enc = le.transform(y_test)
+
+    if use_lightgbm:
+        df_train = _to_lgb_df(X_train)
+        df_test = _to_lgb_df(X_test)
+        model = lgb.LGBMClassifier(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.05,
+            reg_alpha=0.1,
+            reg_lambda=0.1,
+            random_state=random_state,
+            verbosity=-1,
+            n_jobs=1,
+        )
+        model.fit(df_train, y_train_enc)
+        pred_enc = model.predict(df_test)
+    else:
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        model = LogisticRegression(
+            penalty="l2", max_iter=3000, random_state=random_state, solver="lbfgs"
+        )
+        model.fit(X_train_scaled, y_train_enc)
+        pred_enc = model.predict(X_test_scaled)
+
+    pred = le.inverse_transform(pred_enc)
+    macro_f1 = f1_score(y_test_enc, pred_enc, average="macro", zero_division=0)
+    bal_acc = balanced_accuracy_score(y_test_enc, pred_enc)
+    acc = accuracy_score(y_test_enc, pred_enc)
+    prec, rec, _, _ = precision_recall_fscore_support(
+        y_test_enc, pred_enc, average="macro", zero_division=0
+    )
+    return pred, macro_f1, bal_acc, {"accuracy": acc, "precision": prec, "recall": rec}
+
+
+def run_sanity_label_shuffle(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    use_lightgbm: bool,
+    random_state: int = RANDOM_STATE,
+) -> float:
+    """破壞測試 A：打亂 y_train，再訓練二分類，回傳 Test AUC（預期 ~0.5）。"""
+    rng = np.random.default_rng(random_state)
+    y_train_shuf = rng.permutation(y_train)
+    _, auc, _ = fit_predict_binary(
+        X_train, y_train_shuf, X_test, y_test, use_lightgbm=use_lightgbm, random_state=random_state
+    )
+    return auc
+
+
+def run_sanity_market_shuffle(
+    X_full: np.ndarray,
+    y_full: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    n_features_market: int,
+    use_lightgbm: bool,
+    random_state: int = RANDOM_STATE,
+) -> float:
+    """
+    破壞測試 B：對每個樣本的「市場特徵」（前 n_features_market 維）用隨機 permutation 打亂樣本間對應
+    （即：把該維度整列重排），帳戶特徵（後 22 維）不變。再訓練二分類，回傳 Test AUC（預期顯著下降）。
+
+    實作：對 X 的每一行，前 n_features_market 維用「隨機選的另一行的市場部分」替換，後 22 維保留。
+    """
+    rng = np.random.default_rng(random_state)
+    n = X_full.shape[0]
+    X_shuf = X_full.copy()
+    # 為每行隨機選一行，取其市場部分覆蓋本行市場部分
+    perm = rng.permutation(n)
+    X_shuf[:, :n_features_market] = X_full[perm, :n_features_market]
+
+    X_tr = X_shuf[train_idx]
+    y_tr = y_full[train_idx]
+    X_te = X_shuf[test_idx]
+    y_te = y_full[test_idx]
+    _, auc, _ = fit_predict_binary(X_tr, y_tr, X_te, y_te, use_lightgbm=use_lightgbm, random_state=random_state)
+    return auc
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="E2 direction proxy: LR + LightGBM, sanity tests")
+    parser.add_argument("--window_size", type=int, default=288)
+    parser.add_argument("--k", type=int, default=HORIZON_K)
+    parser.add_argument("--max_steps", type=int, default=None, help="Cap collection steps (default: all)")
+    parser.add_argument("--use_3class", action="store_true", help="Use 3-class labels for primary metrics")
+    parser.add_argument("--no_sanity", action="store_true", help="Skip sanity tests")
+    parser.add_argument("--out", type=str, default="logs/e2_report.txt")
+    args = parser.parse_args()
+
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+
+    print("E2: Loading data and collecting obs...")
+    obs_list, valid_indices, close_arr, atr_ratio_arr = collect_obs_and_indices(
+        window_size=args.window_size,
+        horizon_k=args.k,
+        max_steps=args.max_steps,
+    )
+    n_valid = len(valid_indices)
+    print(f"  Collected {n_valid} samples (valid step indices).")
+
+    y_binary, y_3class = build_labels(
+        close_arr, atr_ratio_arr, valid_indices, k=args.k, delta_coef=DELTA_COEF
+    )
+
+    X_list = [obs_to_summary_features(o) for o in obs_list]
+    X = np.stack(X_list, axis=0)
+    F = obs_list[0]["price_seq_target"].shape[1]
+    n_features_market = 5 * F
+    assert X.shape[1] == n_features_market + 22, f"Expected 5*F+22, got {X.shape[1]}"
+
+    train_idx, valid_idx, test_idx = train_valid_test_split_time_ordered(
+        n_valid, TRAIN_RATIO, VALID_RATIO, TEST_RATIO
+    )
+    X_train, X_valid, X_test = X[train_idx], X[valid_idx], X[test_idx]
+    y_train_bin = y_binary[train_idx]
+    y_test_bin = y_binary[test_idx]
+    y_train_3 = y_3class[train_idx]
+    y_test_3 = y_3class[test_idx]
+
+    lines: List[str] = []
+    lines.append("=" * 60)
+    lines.append("E2 Direction Proxy Report (LR + LightGBM)")
+    lines.append("=" * 60)
+    lines.append(f"Train/Valid/Test: {len(train_idx)} / {len(valid_idx)} / {len(test_idx)}")
+    lines.append(f"Features: 5*F + 22 = {X.shape[1]} (F={F})")
+    lines.append("")
+
+    # 二分類
+    for name, use_lgb in [("LogisticRegression (L2)", False), ("LightGBM", True)]:
+        _, auc, extra = fit_predict_binary(
+            X_train, y_train_bin, X_test, y_test_bin, use_lightgbm=use_lgb
+        )
+        lines.append(f"[Binary] {name}: Test AUC = {auc:.4f}, Acc = {extra['accuracy']:.4f}, P = {extra['precision']:.4f}, R = {extra['recall']:.4f}")
+
+    # 三分類
+    if args.use_3class:
+        for name, use_lgb in [("LogisticRegression (L2)", False), ("LightGBM", True)]:
+            _, macro_f1, bal_acc, extra = fit_predict_3class(
+                X_train, y_train_3, X_test, y_test_3, use_lightgbm=use_lgb
+            )
+            lines.append(f"[3-class] {name}: Macro-F1 = {macro_f1:.4f}, BalancedAcc = {bal_acc:.4f}, Acc = {extra['accuracy']:.4f}")
+
+    # 破壞測試
+    if not args.no_sanity:
+        lines.append("")
+        lines.append("--- Sanity Tests ---")
+        auc_label_shuf = run_sanity_label_shuffle(
+            X_train, y_train_bin, X_test, y_test_bin, use_lightgbm=True
+        )
+        lines.append(f"Label shuffle (LightGBM): Test AUC = {auc_label_shuf:.4f} (expect ~0.5)")
+        auc_market_shuf = run_sanity_market_shuffle(
+            X, y_binary, train_idx, test_idx, n_features_market, use_lightgbm=True
+        )
+        lines.append(f"Market shuffle (LightGBM): Test AUC = {auc_market_shuf:.4f} (expect drop)")
+    lines.append("")
+    lines.append("=" * 60)
+
+    report = "\n".join(lines)
+    print(report)
+    with open(args.out, "w", encoding="utf-8") as f:
+        f.write(report)
+    print(f"Report written to {args.out}")
+
+
+if __name__ == "__main__":
+    main()
