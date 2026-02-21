@@ -36,12 +36,30 @@ import lightgbm as lgb
 
 
 # ---------- 常數 ----------
-HORIZON_K = 12
-DELTA_COEF = 0.1
+HORIZON_K = 6
+DELTA_COEF = 0.15
 TRAIN_RATIO = 0.7
 VALID_RATIO = 0.15
 TEST_RATIO = 0.15
 RANDOM_STATE = 42
+# Account state: S = 前 12 維（state-only），H = 後 10 維（history/behavior）
+ACCOUNT_S_NDIM = 12
+
+FEATURE_MODES = ("market_only", "account_s_only", "market_plus_account_s", "market_plus_account_full")
+
+
+def n_market_dims_from_feature_mode(feature_mode: str, n_total: int) -> int:
+    """
+    依 feature_mode 與總特徵維度 n_total 回傳「市場」特徵數（供 market shuffle 用）。
+    account_s_only 時為 0；market_only 時為 n_total；其餘為 n_total - account 維數。
+    """
+    if feature_mode == "account_s_only":
+        return 0
+    if feature_mode == "market_only":
+        return n_total
+    if feature_mode == "market_plus_account_s":
+        return n_total - ACCOUNT_S_NDIM
+    return n_total - 22  # market_plus_account_full
 
 
 def build_labels(
@@ -85,32 +103,60 @@ def build_labels(
     return y_binary, y_3class
 
 
-def obs_to_summary_features(obs: Dict[str, Any]) -> np.ndarray:
-    """
-    從單步 obs 抽出 5*F + 22：對 price_seq_target 每 channel 取 last, mean, std, min, max；再 concat account_state。
-
-    Returns:
-        一維 float32 向量，shape (5*F + 22,)
-    """
-    seq = obs["price_seq_target"]  # (window, F)
-    acc = obs["account_state"]     # (22,)
-    if hasattr(seq, "numpy"):
-        seq = seq.numpy()
-    if hasattr(acc, "numpy"):
-        acc = acc.numpy()
+def _seq_to_five_stats(seq: np.ndarray) -> np.ndarray:
+    """對 (T, F) 序列取 last, mean, std, min, max，回傳 (5*F,) float64。"""
     seq = np.asarray(seq, dtype=np.float64)
-    acc = np.asarray(acc, dtype=np.float64).ravel()
-
-    F = seq.shape[1]
     last = seq[-1]
     mean = np.mean(seq, axis=0)
     std = np.std(seq, axis=0)
     np.place(std, std <= 0, 1e-12)
     min_ = np.min(seq, axis=0)
     max_ = np.max(seq, axis=0)
+    return np.concatenate([last, mean, std, min_, max_])
 
-    feats = np.concatenate([last, mean, std, min_, max_, acc]).astype(np.float32)
-    return feats
+
+def obs_to_summary_features(
+    obs: Dict[str, Any],
+    use_1d: bool = False,
+    feature_mode: str = "market_plus_account_full",
+) -> np.ndarray:
+    """
+    從單步 obs 抽出統計彙總特徵；依 feature_mode 決定市場與帳戶組合。
+
+    feature_mode:
+        market_only: 僅 5*F_5m（+ 5*F_1d 若 use_1d）
+        account_s_only: 僅 account_state[0:ACCOUNT_S_NDIM]
+        market_plus_account_s: 市場彙總 + account_state[0:ACCOUNT_S_NDIM]
+        market_plus_account_full: 市場彙總 + account_state 全 22 維（預設）
+
+    Returns:
+        一維 float32 向量，維度依 feature_mode 不同。
+    """
+    if feature_mode not in FEATURE_MODES:
+        raise ValueError(f"feature_mode must be one of {FEATURE_MODES}, got {feature_mode!r}")
+    acc = obs["account_state"]
+    if hasattr(acc, "numpy"):
+        acc = acc.numpy()
+    acc = np.asarray(acc, dtype=np.float64).ravel()
+    parts: List[np.ndarray] = []
+    if feature_mode in ("market_only", "market_plus_account_s", "market_plus_account_full"):
+        seq = obs["price_seq_target"]
+        if hasattr(seq, "numpy"):
+            seq = seq.numpy()
+        feats_5m = _seq_to_five_stats(seq)
+        parts.append(feats_5m)
+        if use_1d and "price_seq_1d_target" in obs:
+            seq_1d = obs["price_seq_1d_target"]
+            if hasattr(seq_1d, "numpy"):
+                seq_1d = seq_1d.numpy()
+            parts.append(_seq_to_five_stats(seq_1d))
+    if feature_mode == "account_s_only":
+        parts.append(acc[0:ACCOUNT_S_NDIM].copy())
+    elif feature_mode == "market_plus_account_s":
+        parts.append(acc[0:ACCOUNT_S_NDIM].copy())
+    elif feature_mode == "market_plus_account_full":
+        parts.append(acc)
+    return np.concatenate(parts).astype(np.float32)
 
 
 def train_valid_test_split_time_ordered(
@@ -136,11 +182,18 @@ def train_valid_test_split_time_ordered(
 
 def collect_obs_and_indices(
     window_size: int = 288,
+    window_size_1d: Optional[int] = None,
     horizon_k: int = HORIZON_K,
     max_steps: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], np.ndarray, np.ndarray, np.ndarray]:
     """
     建立 env（全量資料、不切分），以固定策略 action=0 沿時間軸收集 obs，僅保留可算 label 的 step_idx。
+
+    Args:
+        window_size: 5m 視窗長度（bar 數）
+        window_size_1d: 1d 視窗長度（日數）；None 時使用 Env 預設
+        horizon_k: 標籤 horizon（bar 數）
+        max_steps: 最多收集步數，None 表示不限制
 
     Returns:
         obs_list: 長度 = len(valid_indices)，每個元素為 obs dict
@@ -155,6 +208,8 @@ def collect_obs_and_indices(
         "random_start": False,
         "max_episode_steps": 500000,
     }
+    if window_size_1d is not None:
+        kwargs["window_size_1d"] = window_size_1d
     env = TradingEnvironment(**kwargs)
     close_arr = np.array(env.market_data.close_arr, copy=True)
     atr_ratio_arr = np.array(env.market_data.atr_ratio_arr, copy=True)
