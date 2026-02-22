@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from Env.load_file import load_data
 from Env.trading_env import TradingEnvironment
+from Train.train_config import TrainConfig
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
@@ -36,7 +37,7 @@ import lightgbm as lgb
 
 
 # ---------- 常數 ----------
-HORIZON_K = 6
+HORIZON_K = 12
 DELTA_COEF = 0.15
 TRAIN_RATIO = 0.7
 VALID_RATIO = 0.15
@@ -46,6 +47,15 @@ RANDOM_STATE = 42
 ACCOUNT_S_NDIM = 12
 
 FEATURE_MODES = ("market_only", "account_s_only", "market_plus_account_s", "market_plus_account_full")
+
+# 四路 CNN 對應 obs key，供單路摘要與依 CNN 輸出用
+CNN_KEYS = ("5m_target", "5m_others", "1d_target", "1d_others")
+OBS_KEY_BY_CNN = {
+    "5m_target": "price_seq_target",
+    "5m_others": "price_seq_others",
+    "1d_target": "price_seq_1d_target",
+    "1d_others": "price_seq_1d_others",
+}
 
 
 def n_market_dims_from_feature_mode(feature_mode: str, n_total: int) -> int:
@@ -159,6 +169,29 @@ def obs_to_summary_features(
     return np.concatenate(parts).astype(np.float32)
 
 
+def obs_to_summary_features_one_cnn(obs: Dict[str, Any], cnn_key: str) -> np.ndarray:
+    """
+    從單步 obs 抽出單一 CNN 的統計彙總特徵（5*F）。
+
+    Args:
+        obs: 單步觀察 dict
+        cnn_key: 其一 CNN_KEYS（5m_target, 5m_others, 1d_target, 1d_others）
+
+    Returns:
+        一維 float32 向量，長度 5*F（F 為該路 channel 數）。
+    """
+    if cnn_key not in OBS_KEY_BY_CNN:
+        raise ValueError(f"cnn_key must be one of {CNN_KEYS}, got {cnn_key!r}")
+    obs_key = OBS_KEY_BY_CNN[cnn_key]
+    if obs_key not in obs:
+        raise KeyError(f"obs missing key {obs_key!r}")
+    seq = obs[obs_key]
+    if hasattr(seq, "numpy"):
+        seq = seq.numpy()
+    seq = np.asarray(seq, dtype=np.float64)
+    return _seq_to_five_stats(seq).astype(np.float32)
+
+
 def train_valid_test_split_time_ordered(
     n: int,
     train_ratio: float = TRAIN_RATIO,
@@ -185,7 +218,11 @@ def collect_obs_and_indices(
     window_size_1d: Optional[int] = None,
     horizon_k: int = HORIZON_K,
     max_steps: Optional[int] = None,
-) -> Tuple[List[Dict[str, Any]], np.ndarray, np.ndarray, np.ndarray]:
+    return_cnn_cols: bool = False,
+) -> Union[
+    Tuple[List[Dict[str, Any]], np.ndarray, np.ndarray, np.ndarray],
+    Tuple[List[Dict[str, Any]], np.ndarray, np.ndarray, np.ndarray, Dict[str, Tuple[str, ...]]],
+]:
     """
     建立 env（全量資料、不切分），以固定策略 action=0 沿時間軸收集 obs，僅保留可算 label 的 step_idx。
 
@@ -194,12 +231,11 @@ def collect_obs_and_indices(
         window_size_1d: 1d 視窗長度（日數）；None 時使用 Env 預設
         horizon_k: 標籤 horizon（bar 數）
         max_steps: 最多收集步數，None 表示不限制
+        return_cnn_cols: 若 True，多回傳 cnn_cols（四路 CNN 的 channel 名稱）
 
     Returns:
-        obs_list: 長度 = len(valid_indices)，每個元素為 obs dict
-        valid_indices: 對應的 step_idx，shape (n_valid,)
-        close_arr: 5m close 陣列（來自 MarketData）
-        atr_ratio_arr: 5m atr_ratio 陣列
+        obs_list, valid_indices, close_arr, atr_ratio_arr；若 return_cnn_cols 則再回傳 cnn_cols。
+        cnn_cols: Dict[cnn_key, tuple of channel names]，cnn_key in CNN_KEYS。
     """
     kwargs = {
         "env_id": 0,
@@ -207,6 +243,8 @@ def collect_obs_and_indices(
         "data_split_enabled": False,
         "random_start": False,
         "max_episode_steps": 500000,
+        "target_symbol": TrainConfig.SYMBOL,
+        "feature_symbols": list(TrainConfig.FEATURE_SYMBOLS),
     }
     if window_size_1d is not None:
         kwargs["window_size_1d"] = window_size_1d
@@ -239,8 +277,17 @@ def collect_obs_and_indices(
         done = bool(terminated or truncated)
         steps += 1
 
+    if return_cnn_cols:
+        cnn_cols = {
+            "5m_target": tuple(env.market_data.cols_5m_target),
+            "5m_others": tuple(env.market_data.cols_5m_others),
+            "1d_target": tuple(env.market_data.cols_1d_target),
+            "1d_others": tuple(env.market_data.cols_1d_others),
+        }
     env.close()
     valid_indices = np.array(step_indices, dtype=np.int64)
+    if return_cnn_cols:
+        return obs_list, valid_indices, close_arr, atr_ratio_arr, cnn_cols
     return obs_list, valid_indices, close_arr, atr_ratio_arr
 
 
@@ -412,16 +459,9 @@ def main() -> None:
         close_arr, atr_ratio_arr, valid_indices, k=args.k, delta_coef=DELTA_COEF
     )
 
-    X_list = [obs_to_summary_features(o) for o in obs_list]
-    X = np.stack(X_list, axis=0)
-    F = obs_list[0]["price_seq_target"].shape[1]
-    n_features_market = 5 * F
-    assert X.shape[1] == n_features_market + 22, f"Expected 5*F+22, got {X.shape[1]}"
-
     train_idx, valid_idx, test_idx = train_valid_test_split_time_ordered(
         n_valid, TRAIN_RATIO, VALID_RATIO, TEST_RATIO
     )
-    X_train, X_valid, X_test = X[train_idx], X[valid_idx], X[test_idx]
     y_train_bin = y_binary[train_idx]
     y_test_bin = y_binary[test_idx]
     y_train_3 = y_3class[train_idx]
@@ -429,40 +469,49 @@ def main() -> None:
 
     lines: List[str] = []
     lines.append("=" * 60)
-    lines.append("E2 Direction Proxy Report (LR + LightGBM)")
+    lines.append("E2 Direction Proxy Report (LR + LightGBM, per CNN)")
     lines.append("=" * 60)
     lines.append(f"Train/Valid/Test: {len(train_idx)} / {len(valid_idx)} / {len(test_idx)}")
-    lines.append(f"Features: 5*F + 22 = {X.shape[1]} (F={F})")
     lines.append("")
 
-    # 二分類
-    for name, use_lgb in [("LogisticRegression (L2)", False), ("LightGBM", True)]:
-        _, auc, extra = fit_predict_binary(
-            X_train, y_train_bin, X_test, y_test_bin, use_lightgbm=use_lgb
-        )
-        lines.append(f"[Binary] {name}: Test AUC = {auc:.4f}, Acc = {extra['accuracy']:.4f}, P = {extra['precision']:.4f}, R = {extra['recall']:.4f}")
+    for cnn_key in CNN_KEYS:
+        lines.append(f"--- CNN: {cnn_key} ---")
+        X_list = [obs_to_summary_features_one_cnn(o, cnn_key) for o in obs_list]
+        X = np.stack(X_list, axis=0)
+        n_feat = X.shape[1]
+        if n_feat == 0:
+            lines.append("Skip (no features, F=0).")
+            lines.append("")
+            continue
+        n_features_market = n_feat
+        X_train, X_test = X[train_idx], X[test_idx]
+        lines.append(f"Features: 5*F = {n_feat} (F={n_feat // 5})")
 
-    # 三分類
-    if args.use_3class:
         for name, use_lgb in [("LogisticRegression (L2)", False), ("LightGBM", True)]:
-            _, macro_f1, bal_acc, extra = fit_predict_3class(
-                X_train, y_train_3, X_test, y_test_3, use_lightgbm=use_lgb
+            _, auc, extra = fit_predict_binary(
+                X_train, y_train_bin, X_test, y_test_bin, use_lightgbm=use_lgb
             )
-            lines.append(f"[3-class] {name}: Macro-F1 = {macro_f1:.4f}, BalancedAcc = {bal_acc:.4f}, Acc = {extra['accuracy']:.4f}")
+            lines.append(f"[Binary] {name}: Test AUC = {auc:.4f}, Acc = {extra['accuracy']:.4f}, P = {extra['precision']:.4f}, R = {extra['recall']:.4f}")
 
-    # 破壞測試
-    if not args.no_sanity:
+        if args.use_3class:
+            for name, use_lgb in [("LogisticRegression (L2)", False), ("LightGBM", True)]:
+                _, macro_f1, bal_acc, extra = fit_predict_3class(
+                    X_train, y_train_3, X_test, y_test_3, use_lightgbm=use_lgb
+                )
+                lines.append(f"[3-class] {name}: Macro-F1 = {macro_f1:.4f}, BalancedAcc = {bal_acc:.4f}, Acc = {extra['accuracy']:.4f}")
+
+        if not args.no_sanity:
+            lines.append("Sanity Tests:")
+            auc_label_shuf = run_sanity_label_shuffle(
+                X_train, y_train_bin, X_test, y_test_bin, use_lightgbm=True
+            )
+            lines.append(f"  Label shuffle (LightGBM): Test AUC = {auc_label_shuf:.4f} (expect ~0.5)")
+            auc_market_shuf = run_sanity_market_shuffle(
+                X, y_binary, train_idx, test_idx, n_features_market, use_lightgbm=True
+            )
+            lines.append(f"  Market shuffle (LightGBM): Test AUC = {auc_market_shuf:.4f} (expect drop)")
         lines.append("")
-        lines.append("--- Sanity Tests ---")
-        auc_label_shuf = run_sanity_label_shuffle(
-            X_train, y_train_bin, X_test, y_test_bin, use_lightgbm=True
-        )
-        lines.append(f"Label shuffle (LightGBM): Test AUC = {auc_label_shuf:.4f} (expect ~0.5)")
-        auc_market_shuf = run_sanity_market_shuffle(
-            X, y_binary, train_idx, test_idx, n_features_market, use_lightgbm=True
-        )
-        lines.append(f"Market shuffle (LightGBM): Test AUC = {auc_market_shuf:.4f} (expect drop)")
-    lines.append("")
+
     lines.append("=" * 60)
 
     report = "\n".join(lines)

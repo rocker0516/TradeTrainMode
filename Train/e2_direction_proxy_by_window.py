@@ -1,8 +1,8 @@
 """
-E2 多 window_size 版本：對多種 (window_size_5m, window_size_1d) 組合跑方向 proxy，並以圖表顯示結果。
+E2 多 window_size 版本：對多種 (window_size_5m, window_size_1d) × 四路 CNN × task 跑方向 proxy，並以圖表顯示結果。
 
-- 迴圈 (ws_5m, ws_1d) 組合，每個都做：收集 obs → 標籤 → 特徵（5*F_5m + [5*F_1d] + 22）→ 時間切分 → LR + LightGBM → 破壞測試。
-- 產出：文字報告與圖表（單維度時為折線圖，雙維度時為 heatmap）。
+- 迴圈 (ws_5m, ws_1d, cnn_key, task)，每組合：收集 obs → 標籤 → 單路 CNN 摘要特徵（5*F）→ 時間切分 → LR + LightGBM → 破壞測試。
+- 產出：文字報告與圖表，檔名含 cnn_key（5m_target, 5m_others, 1d_target, 1d_others）。
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 從單一 window 版本複用邏輯
 from Train.e2_direction_proxy import (
+    CNN_KEYS,
     DELTA_COEF,
-    FEATURE_MODES,
     HORIZON_K,
     RANDOM_STATE,
     TEST_RATIO,
@@ -29,8 +29,7 @@ from Train.e2_direction_proxy import (
     VALID_RATIO,
     build_labels,
     collect_obs_and_indices,
-    n_market_dims_from_feature_mode,
-    obs_to_summary_features,
+    obs_to_summary_features_one_cnn,
     run_sanity_label_shuffle,
     run_sanity_market_shuffle,
     train_valid_test_split_time_ordered,
@@ -46,16 +45,15 @@ import matplotlib.pyplot as plt
 def run_one_combination(
     window_size_5m: int,
     window_size_1d: int,
-    use_1d: bool,
     task: str,
-    feature_mode: str,
+    cnn_key: str,
     k: int = HORIZON_K,
     max_steps: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    對單一 (window_size_5m, window_size_1d, feature_mode, task) 跑完整 E2 pipeline。
+    對單一 (window_size_5m, window_size_1d, cnn_key, task) 跑完整 E2 pipeline（單路 CNN 摘要特徵）。
     task: "binary" | "3class"
-    feature_mode: "market_only" | "account_s_only" | "market_plus_account_s" | "market_plus_account_full"
+    cnn_key: 其一 CNN_KEYS（5m_target, 5m_others, 1d_target, 1d_others）
     """
     obs_list, valid_indices, close_arr, atr_ratio_arr = collect_obs_and_indices(
         window_size=window_size_5m,
@@ -67,12 +65,27 @@ def run_one_combination(
     y_binary, y_3class = build_labels(
         close_arr, atr_ratio_arr, valid_indices, k=k, delta_coef=DELTA_COEF
     )
-    X_list = [
-        obs_to_summary_features(o, use_1d=use_1d, feature_mode=feature_mode)
-        for o in obs_list
-    ]
+    X_list = [obs_to_summary_features_one_cnn(o, cnn_key) for o in obs_list]
     X = np.stack(X_list, axis=0)
-    n_features_market = n_market_dims_from_feature_mode(feature_mode, X.shape[1])
+    n_features_market = X.shape[1]
+    if n_features_market == 0:
+        nan = float("nan")
+        return {
+            "window_size_5m": window_size_5m,
+            "window_size_1d": window_size_1d,
+            "cnn_key": cnn_key,
+            "task": task,
+            "n_samples": n_valid,
+            "n_feat": 0,
+            "n_feat_market": 0,
+            "auc_lr": nan,
+            "auc_lgb": nan,
+            "auc_label_shuf": nan,
+            "auc_market_shuf": None,
+            "macro_f1_lr": nan,
+            "macro_f1_lgb": nan,
+            "bal_acc_lgb": nan,
+        }
 
     train_idx, valid_idx, test_idx = train_valid_test_split_time_ordered(
         n_valid, TRAIN_RATIO, VALID_RATIO, TEST_RATIO
@@ -86,7 +99,7 @@ def run_one_combination(
     out: Dict[str, Any] = {
         "window_size_5m": window_size_5m,
         "window_size_1d": window_size_1d,
-        "feature_mode": feature_mode,
+        "cnn_key": cnn_key,
         "task": task,
         "n_samples": n_valid,
         "n_feat": X.shape[1],
@@ -259,7 +272,7 @@ def plot_results(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="E2 direction proxy: sweep (window_size_5m, window_size_1d), feature_mode, task"
+        description="E2 direction proxy: sweep (window_size_5m, window_size_1d), cnn_key, task"
     )
     parser.add_argument(
         "--window_sizes",
@@ -274,11 +287,6 @@ def main() -> None:
         help="Comma-separated window_size_1d list (days)",
     )
     parser.add_argument(
-        "--use_1d",
-        action="store_true",
-        help="Include 1d summary features (5*F_1d) in proxy",
-    )
-    parser.add_argument(
         "--task",
         type=str,
         choices=("binary", "3class", "both"),
@@ -286,16 +294,9 @@ def main() -> None:
         help="Task: binary, 3class, or both",
     )
     parser.add_argument(
-        "--feature_mode",
-        type=str,
-        choices=("market_only", "account_s_only", "market_plus_account_s", "market_plus_account_full", "all"),
-        default="market_plus_account_full",
-        help="Feature mode or 'all' for all four",
-    )
-    parser.add_argument(
         "--run_all",
         action="store_true",
-        help="Run all 4 feature_modes x 2 tasks (overrides --task and --feature_mode)",
+        help="Run all 4 CNNs x 2 tasks (overrides --task)",
     )
     parser.add_argument("--k", type=int, default=HORIZON_K)
     parser.add_argument("--max_steps", type=int, default=None)
@@ -309,25 +310,22 @@ def main() -> None:
 
     if args.run_all:
         tasks = ["binary", "3class"]
-        feature_modes = list(FEATURE_MODES)
     else:
         tasks = [args.task] if args.task != "both" else ["binary", "3class"]
-        feature_modes = list(FEATURE_MODES) if args.feature_mode == "all" else [args.feature_mode]
 
-    run_combos = list(product(window_combos, feature_modes, tasks))
+    run_combos = list(product(window_combos, CNN_KEYS, tasks))
     os.makedirs(args.out_dir, exist_ok=True)
     report_path = os.path.join(args.out_dir, args.out_report)
 
     results: List[Dict[str, Any]] = []
-    for idx, ((ws_5m, ws_1d), feature_mode, task) in enumerate(run_combos):
-        print(f"[{idx+1}/{len(run_combos)}] ws_5m={ws_5m}, ws_1d={ws_1d}, mode={feature_mode}, task={task} ...")
+    for idx, ((ws_5m, ws_1d), cnn_key, task) in enumerate(run_combos):
+        print(f"[{idx+1}/{len(run_combos)}] ws_5m={ws_5m}, ws_1d={ws_1d}, cnn={cnn_key}, task={task} ...")
         try:
             r = run_one_combination(
                 window_size_5m=ws_5m,
                 window_size_1d=ws_1d,
-                use_1d=args.use_1d,
                 task=task,
-                feature_mode=feature_mode,
+                cnn_key=cnn_key,
                 k=args.k,
                 max_steps=args.max_steps,
             )
@@ -348,38 +346,42 @@ def main() -> None:
         print("No results to report or plot.")
         return
 
-    # 文字報告（依 feature_mode, task 分組列出）
+    # 文字報告（依 cnn_key, task 分組列出）
     lines = [
         "=" * 100,
-        "E2 Direction Proxy by (window_size_5m, window_size_1d, feature_mode, task)",
+        "E2 Direction Proxy by (window_size_5m, window_size_1d, cnn_key, task)",
         "=" * 100,
-        f"window_sizes_5m: {window_sizes_5m}, window_sizes_1d: {window_sizes_1d}, use_1d: {args.use_1d}",
-        f"tasks: {tasks}, feature_modes: {feature_modes}, k={args.k}, max_steps={args.max_steps}",
+        f"window_sizes_5m: {window_sizes_5m}, window_sizes_1d: {window_sizes_1d}",
+        f"tasks: {tasks}, cnn_keys: {list(CNN_KEYS)}, k={args.k}, max_steps={args.max_steps}",
         "",
     ]
-    for (fm, t) in product(feature_modes, tasks):
-        subset = [r for r in results if r["feature_mode"] == fm and r["task"] == t]
+    for (cnn_key, t) in product(CNN_KEYS, tasks):
+        subset = [r for r in results if r["cnn_key"] == cnn_key and r["task"] == t]
         if not subset:
             continue
-        lines.append(f"--- feature_mode={fm}, task={t} ---")
+        lines.append(f"--- cnn_key={cnn_key}, task={t} ---")
         if t == "binary":
             lines.append(f"{'ws_5m':>6} {'ws_1d':>6} {'n':>8} {'feat':>6} {'AUC_LR':>8} {'AUC_LGB':>8} {'LblShuf':>8} {'MktShuf':>8}")
         else:
             lines.append(f"{'ws_5m':>6} {'ws_1d':>6} {'n':>8} {'feat':>6} {'F1_LR':>8} {'F1_LGB':>8} {'BalAcc':>8} {'LblShuf':>8} {'MktShuf':>8}")
         lines.append("-" * 80)
+        def _fmt(v: Any) -> str:
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return "N/A"
+            return f"{v:.4f}"
         for r in subset:
-            mkt_str = f"{r['auc_market_shuf']:.4f}" if r.get("auc_market_shuf") is not None else "N/A"
+            mkt_str = _fmt(r.get("auc_market_shuf"))
             if t == "binary":
                 lines.append(
                     f"{r['window_size_5m']:>6} {r['window_size_1d']:>6} {r['n_samples']:>8} {r['n_feat']:>6} "
-                    f"{r['auc_lr']:>8.4f} {r['auc_lgb']:>8.4f} "
-                    f"{r['auc_label_shuf']:>8.4f} {mkt_str:>8}"
+                    f"{_fmt(r.get('auc_lr')):>8} {_fmt(r.get('auc_lgb')):>8} "
+                    f"{_fmt(r.get('auc_label_shuf')):>8} {mkt_str:>8}"
                 )
             else:
                 lines.append(
                     f"{r['window_size_5m']:>6} {r['window_size_1d']:>6} {r['n_samples']:>8} {r['n_feat']:>6} "
-                    f"{r['macro_f1_lr']:>8.4f} {r['macro_f1_lgb']:>8.4f} {r['bal_acc_lgb']:>8.4f} "
-                    f"{r['auc_label_shuf']:>8.4f} {mkt_str:>8}"
+                    f"{_fmt(r.get('macro_f1_lr')):>8} {_fmt(r.get('macro_f1_lgb')):>8} {_fmt(r.get('bal_acc_lgb')):>8} "
+                    f"{_fmt(r.get('auc_label_shuf')):>8} {mkt_str:>8}"
                 )
         lines.append("")
     lines.append("=" * 100)
@@ -388,12 +390,12 @@ def main() -> None:
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(report)
 
-    # 多張圖：每張對應一個 (feature_mode, task)
-    for (fm, t) in product(feature_modes, tasks):
-        subset = [r for r in results if r["feature_mode"] == fm and r["task"] == t]
+    # 多張圖：每張對應一個 (cnn_key, task)
+    for (cnn_key, t) in product(CNN_KEYS, tasks):
+        subset = [r for r in results if r["cnn_key"] == cnn_key and r["task"] == t]
         if not subset:
             continue
-        fig_name = f"e2_by_window_{fm}_{t}.png"
+        fig_name = f"e2_by_window_{cnn_key}_{t}.png"
         fig_path = os.path.join(args.out_dir, fig_name)
         plot_results(subset, fig_path, task=t)
         print(f"Figure: {fig_path}")
