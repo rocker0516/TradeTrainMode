@@ -71,6 +71,26 @@ def _get_symbol_col(df: pd.DataFrame, *, target_symbol: str, suffix: str, defaul
     return pd.Series(default, index=df.index, dtype=float)
 
 
+def _get_symbol_col_first_of(
+    df: pd.DataFrame,
+    *,
+    target_symbol: str,
+    suffixes: Iterable[str],
+    default: float = 0.0,
+) -> pd.Series:
+    """
+    依序嘗試多個 suffix，回傳第一個「欄位存在」的序列；若皆不存在則回傳全 default。
+    用於 volume / quote_volume 等在不同資料源有不同命名（volume vs volume_usd）時避免 5m 全 0。
+    """
+    for suf in suffixes:
+        prefixed = f"{target_symbol}_{suf}"
+        if prefixed in df.columns:
+            return df[prefixed].astype(float)
+        if suf in df.columns:
+            return df[suf].astype(float)
+    return pd.Series(default, index=df.index, dtype=float)
+
+
 @dataclass(frozen=True)
 class FeatureSpec:
     """特徵規格：固定欄位名稱與順序（用於解析與 debug）。"""
@@ -116,6 +136,21 @@ class FeatureTransformer:
         "bb_pos_48",
         "trend_strength_atr",
         "chop_48",
+        # === 低頻趨勢（不做 z-score，3） ===
+        "price_pos_288",
+        "close_over_sma_288",
+        "ema_48_192_spread_raw",
+        # === 與 1～3h 方向相關：12/36-bar 位置、短動量、量價結構、中頻（不做 z-score，10） ===
+        "price_pos_12",
+        "close_over_sma_12",
+        "price_pos_36",
+        "close_over_sma_36",
+        "ema_12_48_spread_raw",
+        "ret_6_raw",
+        "ret_12_raw",
+        "momentum_12_atr",
+        "volume_surge_12",
+        "up_volume_ratio_12",
         # === 波动率与风险（2） ===
         "atr_ratio_z",
         "rv_ratio_z",
@@ -136,7 +171,7 @@ class FeatureTransformer:
         "alts_trend_spread_std_z",
     )
     
-    # ---- 5m Others 特征：每个币种 8-10 通道 ----
+    # ---- 5m Others 特征：每个币种 8-10 通道 + 低頻趨勢（不做 z-score）----
     OTHERS_5M_COLS_PER_SYMBOL: Final[Tuple[str, ...]] = (
         # 价格动量（3）
         "ret_1_z",
@@ -149,9 +184,24 @@ class FeatureTransformer:
         "close_over_ema_12_z",
         "rsi_14",
         "atr_ratio_z",
-        # 可选：趋势强度（2）
+        # 趋势强度（2）
         "trend_strength_atr",
         "vol_imbalance_z",
+        # 低頻趨勢（不做 z-score，3）
+        "price_pos_288",
+        "close_over_sma_288",
+        "ema_48_192_spread_raw",
+        # 與 1～3h 方向相關（不做 z-score，10）
+        "price_pos_12",
+        "close_over_sma_12",
+        "price_pos_36",
+        "close_over_sma_36",
+        "ema_12_48_spread_raw",
+        "ret_6_raw",
+        "ret_12_raw",
+        "momentum_12_atr",
+        "volume_surge_12",
+        "up_volume_ratio_12",
     )
     
     # ---- 兼容性：保留 BASE_5M_COLS 供旧代码使用 ----
@@ -300,11 +350,11 @@ class FeatureTransformer:
         o = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="open")
         h = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="high")
         l = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="low")
-        v = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="volume")
+        v = _get_symbol_col_first_of(df_5m, target_symbol=target_symbol, suffixes=("volume", "volume_usd"))
         buy_v = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="buy_volume")
         sell_v = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="sell_volume")
         trades = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="trades")
-        quote_v = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="quote_volume")
+        quote_v = _get_symbol_col_first_of(df_5m, target_symbol=target_symbol, suffixes=("quote_volume", "quote_volume_usd"))
         volume_ratio = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="volume_ratio")
         
         # === Target 特征计算 ===
@@ -335,6 +385,43 @@ class FeatureTransformer:
         pos_96 = (c - lo_96) / np.clip((hi_96 - lo_96), 1e-12, None)
         pos_96 = (pos_96.clip(0.0, 1.0) * 2.0) - 1.0
         
+        # 低頻趨勢特徵（不做 z-score，直接比例/區間，保留絕對尺度）
+        # 288 ≈ 1 天、192 ≈ 16h
+        hi_288 = h.rolling(288, min_periods=48).max()
+        lo_288 = l.rolling(288, min_periods=48).min()
+        pos_288 = (c - lo_288) / np.clip((hi_288 - lo_288), 1e-12, None)
+        price_pos_288 = (pos_288.clip(0.0, 1.0) * 2.0 - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+        sma_288 = c.rolling(288, min_periods=48).mean().replace(0.0, np.nan).fillna(c)
+        close_over_sma_288 = np.log(np.clip(c / np.clip(sma_288, 1e-12, None), 1e-12, None))
+        close_over_sma_288 = close_over_sma_288.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.5, 0.5)
+        ema192 = self._ema(c, 192)
+        ema_48_192_spread_raw = (ema48 - ema192) / np.clip(ema192, 1e-12, None)
+        ema_48_192_spread_raw = ema_48_192_spread_raw.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.3, 0.3)
+        
+        # 與未來 1～3 小時方向相關：12-bar 尺度位置/偏離、中頻 36-bar、中頻 ema spread（不做 z-score）
+        hi_12 = h.rolling(12, min_periods=3).max()
+        lo_12 = l.rolling(12, min_periods=3).min()
+        sma_12 = c.rolling(12, min_periods=3).mean().replace(0.0, np.nan).fillna(c)
+        pos_12 = (c - lo_12) / np.clip((hi_12 - lo_12), 1e-12, None)
+        price_pos_12 = (pos_12.clip(0.0, 1.0) * 2.0 - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+        close_over_sma_12 = np.log(np.clip(c / np.clip(sma_12, 1e-12, None), 1e-12, None)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.3, 0.3)
+        hi_36 = h.rolling(36, min_periods=12).max()
+        lo_36 = l.rolling(36, min_periods=12).min()
+        sma_36 = c.rolling(36, min_periods=12).mean().replace(0.0, np.nan).fillna(c)
+        pos_36 = (c - lo_36) / np.clip((hi_36 - lo_36), 1e-12, None)
+        price_pos_36 = (pos_36.clip(0.0, 1.0) * 2.0 - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+        close_over_sma_36 = np.log(np.clip(c / np.clip(sma_36, 1e-12, None), 1e-12, None)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.5, 0.5)
+        ema_12_48_spread_raw = (ema12 - ema48) / np.clip(ema48, 1e-12, None)
+        ema_12_48_spread_raw = ema_12_48_spread_raw.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.3, 0.3)
+        
+        # 量價結構：12-bar 成交量相對放量、上漲 bar 成交量佔比（不做 z-score）
+        v_ma12 = v.rolling(12, min_periods=1).mean().replace(0.0, np.nan).fillna(1.0)
+        volume_surge_12 = (v / v_ma12 - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.5, 0.5)
+        up_bar = (c > o).astype(float)
+        up_vol_12 = (up_bar * v).rolling(12, min_periods=1).sum()
+        total_vol_12 = v.rolling(12, min_periods=1).sum().replace(0.0, np.nan).fillna(1.0)
+        up_volume_ratio_12 = (up_vol_12 / total_vol_12 * 2.0 - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+        
         # 支撑阻力位（96 窗口）
         support_96 = lo_96
         resistance_96 = hi_96
@@ -342,6 +429,11 @@ class FeatureTransformer:
         atr_est = atr_est.replace(0.0, np.nan).fillna(1e-8)
         dist_to_support_96_atr = (c - support_96) / atr_est
         dist_to_resistance_96_atr = (resistance_96 - c) / atr_est
+        
+        # 短週期動量（與延續/反轉相關，不做 z-score）
+        ret_6_raw = log_c.diff(6).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.03, 0.03)
+        ret_12_raw = log_c.diff(12).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.05, 0.05)
+        momentum_12_atr = ((c - c.shift(12)) / atr_est).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
         
         # 价格跳跃检测
         price_jump = ret_1.abs() / ret_1.rolling(window=20, min_periods=5).std().replace(0.0, np.nan).fillna(1e-8)
@@ -470,6 +562,19 @@ class FeatureTransformer:
             "bb_pos_48": bb_pos_48.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 2.0),
             "trend_strength_atr": trend_strength_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0),
             "chop_48": chop_48.replace([np.inf, -np.inf], np.nan).fillna(0.0),
+            "price_pos_288": price_pos_288,
+            "close_over_sma_288": close_over_sma_288,
+            "ema_48_192_spread_raw": ema_48_192_spread_raw,
+            "price_pos_12": price_pos_12,
+            "close_over_sma_12": close_over_sma_12,
+            "price_pos_36": price_pos_36,
+            "close_over_sma_36": close_over_sma_36,
+            "ema_12_48_spread_raw": ema_12_48_spread_raw,
+            "ret_6_raw": ret_6_raw,
+            "ret_12_raw": ret_12_raw,
+            "momentum_12_atr": momentum_12_atr,
+            "volume_surge_12": volume_surge_12,
+            "up_volume_ratio_12": up_volume_ratio_12,
             "atr_ratio_z": _clip(_rolling_zscore(pd.Series(atr_ratio_arr, index=df_5m.index), z_window, minp)),
             "rv_ratio_z": _clip(_rolling_zscore(pd.Series(rv_ratio_arr, index=df_5m.index), z_window, minp)),
             "dist_to_support_96_atr": _clip(_rolling_zscore(dist_to_support_96_atr, z_window, minp)),
@@ -495,6 +600,9 @@ class FeatureTransformer:
         
         for sym in alt_symbols:
             cs = _get_symbol_col(df_5m, target_symbol=sym, suffix="close")
+            hs = _get_symbol_col(df_5m, target_symbol=sym, suffix="high")
+            ls = _get_symbol_col(df_5m, target_symbol=sym, suffix="low")
+            os = _get_symbol_col(df_5m, target_symbol=sym, suffix="open")
             vs = _get_symbol_col(df_5m, target_symbol=sym, suffix="volume")
             quote_vs = _get_symbol_col(df_5m, target_symbol=sym, suffix="quote_volume")
             buy_vs = _get_symbol_col(df_5m, target_symbol=sym, suffix="buy_volume")
@@ -510,7 +618,41 @@ class FeatureTransformer:
             vol_imb_s = (buy_vs - sell_vs) / (buy_vs + sell_vs + 1e-12)
             
             ema12_s = self._ema(cs, 12)
+            ema48_s = self._ema(cs, 48)
             close_over_ema_12_s = np.log(np.clip(cs / np.clip(ema12_s, 1e-12, None), 1e-12, None))
+            
+            # 低頻趨勢（不做 z-score）
+            hi_288_s = hs.rolling(288, min_periods=48).max()
+            lo_288_s = ls.rolling(288, min_periods=48).min()
+            pos_288_s = (cs - lo_288_s) / np.clip((hi_288_s - lo_288_s), 1e-12, None)
+            price_pos_288_s = (pos_288_s.clip(0.0, 1.0) * 2.0 - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+            sma_288_s = cs.rolling(288, min_periods=48).mean().replace(0.0, np.nan).fillna(cs)
+            close_over_sma_288_s = np.log(np.clip(cs / np.clip(sma_288_s, 1e-12, None), 1e-12, None)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.5, 0.5)
+            ema192_s = self._ema(cs, 192)
+            ema_48_192_spread_raw_s = ((ema48_s - ema192_s) / np.clip(ema192_s, 1e-12, None)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.3, 0.3)
+            
+            # 與 1～3h 方向相關：12/36-bar、短動量、量價結構、中頻 ema spread（不做 z-score）
+            hi_12_s = hs.rolling(12, min_periods=3).max()
+            lo_12_s = ls.rolling(12, min_periods=3).min()
+            sma_12_s = cs.rolling(12, min_periods=3).mean().replace(0.0, np.nan).fillna(cs)
+            pos_12_s = (cs - lo_12_s) / np.clip((hi_12_s - lo_12_s), 1e-12, None)
+            price_pos_12_s = (pos_12_s.clip(0.0, 1.0) * 2.0 - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+            close_over_sma_12_s = np.log(np.clip(cs / np.clip(sma_12_s, 1e-12, None), 1e-12, None)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.3, 0.3)
+            hi_36_s = hs.rolling(36, min_periods=12).max()
+            lo_36_s = ls.rolling(36, min_periods=12).min()
+            sma_36_s = cs.rolling(36, min_periods=12).mean().replace(0.0, np.nan).fillna(cs)
+            pos_36_s = (cs - lo_36_s) / np.clip((hi_36_s - lo_36_s), 1e-12, None)
+            price_pos_36_s = (pos_36_s.clip(0.0, 1.0) * 2.0 - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+            close_over_sma_36_s = np.log(np.clip(cs / np.clip(sma_36_s, 1e-12, None), 1e-12, None)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.5, 0.5)
+            ema_12_48_spread_raw_s = ((ema12_s - ema48_s) / np.clip(ema48_s, 1e-12, None)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.3, 0.3)
+            v_ma12_s = vs.rolling(12, min_periods=1).mean().replace(0.0, np.nan).fillna(1.0)
+            volume_surge_12_s = (vs / v_ma12_s - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.5, 0.5)
+            up_bar_s = (cs > os).astype(float)
+            up_vol_12_s = (up_bar_s * vs).rolling(12, min_periods=1).sum()
+            total_vol_12_s = vs.rolling(12, min_periods=1).sum().replace(0.0, np.nan).fillna(1.0)
+            up_volume_ratio_12_s = (up_vol_12_s / total_vol_12_s * 2.0 - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+            ret_6_raw_s = log_cs.diff(6).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.03, 0.03)
+            ret_12_raw_s = log_cs.diff(12).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.05, 0.05)
             
             # RSI
             delta_s = cs.diff().fillna(0.0)
@@ -523,15 +665,14 @@ class FeatureTransformer:
             rsi_14_s = (((rsi_s - 50.0) / 50.0).clip(-1.0, 1.0)).astype(float)
             
             # ATR ratio
-            atr_ratio_s = self._compute_atr_ratio_from_ohlc(cs, _get_symbol_col(df_5m, target_symbol=sym, suffix="high"), 
-                                                             _get_symbol_col(df_5m, target_symbol=sym, suffix="low"))
+            atr_ratio_s = self._compute_atr_ratio_from_ohlc(cs, hs, ls)
             
             # Trend strength
-            ema48_s = self._ema(cs, 48)
             macd_s = (ema12_s - ema48_s)
             atr_est_s = atr_ratio_s * np.clip(cs, 1e-12, None)
             atr_est_s = atr_est_s.replace(0.0, np.nan).fillna(1e-8)
             trend_strength_s = (macd_s.abs() / atr_est_s).clip(0.0, 10.0)
+            momentum_12_atr_s = ((cs - cs.shift(12)) / atr_est_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
             
             sym_feats = pd.DataFrame({
                 f"{sym}_ret_1_z": _clip(_rolling_zscore(ret1_s, z_window, minp)),
@@ -544,6 +685,19 @@ class FeatureTransformer:
                 f"{sym}_atr_ratio_z": _clip(_rolling_zscore(atr_ratio_s, z_window, minp)),
                 f"{sym}_trend_strength_atr": trend_strength_s.replace([np.inf, -np.inf], np.nan).fillna(0.0),
                 f"{sym}_vol_imbalance_z": _clip(_rolling_zscore(vol_imb_s, z_window, minp)),
+                f"{sym}_price_pos_288": price_pos_288_s,
+                f"{sym}_close_over_sma_288": close_over_sma_288_s,
+                f"{sym}_ema_48_192_spread_raw": ema_48_192_spread_raw_s,
+                f"{sym}_price_pos_12": price_pos_12_s,
+                f"{sym}_close_over_sma_12": close_over_sma_12_s,
+                f"{sym}_price_pos_36": price_pos_36_s,
+                f"{sym}_close_over_sma_36": close_over_sma_36_s,
+                f"{sym}_ema_12_48_spread_raw": ema_12_48_spread_raw_s,
+                f"{sym}_ret_6_raw": ret_6_raw_s,
+                f"{sym}_ret_12_raw": ret_12_raw_s,
+                f"{sym}_momentum_12_atr": momentum_12_atr_s,
+                f"{sym}_volume_surge_12": volume_surge_12_s,
+                f"{sym}_up_volume_ratio_12": up_volume_ratio_12_s,
             }, index=df_5m.index)
             
             others_feats_list.append(sym_feats)

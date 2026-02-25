@@ -93,4 +93,179 @@ class Config:
     # Observation 與相容性
     # -------------------------------------------------------------------------
     OBS_DTYPE: str = "float16"  # "float16" | "float32"（訓練 RAM 優化）
+    # 取代 inf/neginf 的有限值，避免 nan_to_num(..., posinf=0, neginf=0) 把極端訊號壓成 0 而消失
+    OBS_INF_CLIP_HIGH: float = 10.0   # +inf → 此值（與 z-score ±5 略大，保留「極端」訊號）
+    OBS_INF_CLIP_LOW: float = -10.0   # -inf → 此值
     MARKET_STATE_COLS: list[str] = []  # 相容性；MarketData 從 df 推導 features
+
+    # -------------------------------------------------------------------------
+    # Observation 使用特徵（obs state 開關）
+    # -------------------------------------------------------------------------
+    # 納入 observation 的 state 鍵名；預設為目前全部欄位。
+    # 預計收斂為 5 個 state：4 個市場序列 (5m/1d × target/others) + 1 個帳戶/情境；
+    # 可依實驗需求從此 list 關閉某幾項以縮減 obs 維度。
+    OBS_STATE_KEYS: tuple[str, ...] = (
+        "price_seq_target",      # 5m 目標標的序列
+        "price_seq_others",      # 5m 其他標的序列
+        "price_seq_1d_target",   # 1d 目標標的序列
+        "price_seq_1d_others",   # 1d 其他標的序列
+        "account_state",         # 帳戶狀態（22 維）
+        "context_state",         # 情境狀態（8 維）
+    )
+
+    # -------------------------------------------------------------------------
+    # 5 個 state 內部的詳細特徵欄位（空 tuple = 使用該 state 全部欄位）
+    # 要排除某欄：註解掉該行並自 tuple 中移除即可。
+    # -------------------------------------------------------------------------
+    # 5m 目標（固定欄位）
+    OBS_PRICE_SEQ_TARGET_COLS: tuple[str, ...] = (
+        "ret_15m_z",
+        "range_z",
+        "body_z",
+        "log_close_z",
+        "volume_log_z",
+        "quote_volume_log_z",
+        "trades_z",
+        "vol_imbalance_z",
+        "amihud_z",
+        "volume_ratio_z",
+        "close_over_ema_12_z",
+        "close_over_ema_48_z",
+        "ema_12_48_spread_z",
+        "ema_12_slope_z",
+        "ema_48_slope_z",
+        "rsi_14",
+        "macd_atr",
+        "price_pos_96",
+        "bb_width_48_z",
+        "bb_pos_48",
+        "trend_strength_atr",
+        "chop_48",
+        "price_pos_288",
+        "close_over_sma_288",
+        "ema_48_192_spread_raw",
+        "price_pos_12",
+        "close_over_sma_12",
+        "price_pos_36",
+        "close_over_sma_36",
+        "ema_12_48_spread_raw",
+        "ret_6_raw",
+        "ret_12_raw",
+        "momentum_12_atr",
+        "volume_surge_12",
+        "up_volume_ratio_12",
+        "atr_ratio_z",
+        "rv_ratio_z",
+        "dist_to_support_96_atr",
+        "dist_to_resistance_96_atr",
+        "price_jump_z",
+        "ob_depth_imbalance_z",
+        "ob_slope_bid_z",
+        "ob_slope_ask_z",
+        "alts_ret_15m_mean_z",
+        "alts_ret_15m_std_z",
+        "alts_rel_ret_15m_abs_mean_z",
+        "alts_trend_up_ratio",
+        "alts_volume_log_mean_z",
+        "alts_trend_spread_std_z",
+    )
+    # 5m 其他（每標的為 {SYMBOL}_xxx；此處列 base 名稱，註解即不納入該類）
+    OBS_PRICE_SEQ_OTHERS_COLS: tuple[str, ...] = (
+        "ret_1_z",
+        "ret_15m_z",
+        "ret_1h_z",
+        "volume_log_z",
+        "quote_volume_log_z",
+        "close_over_ema_12_z",
+        "rsi_14",
+        "atr_ratio_z",
+        "trend_strength_atr",
+        "vol_imbalance_z",
+        "price_pos_288",
+        "close_over_sma_288",
+        "ema_48_192_spread_raw",
+        "price_pos_12",
+        "close_over_sma_12",
+        "price_pos_36",
+        "close_over_sma_36",
+        "ema_12_48_spread_raw",
+        "ret_6_raw",
+        "ret_12_raw",
+        "momentum_12_atr",
+        "volume_surge_12",
+        "up_volume_ratio_12",
+    )
+    # 1d 目標（固定欄位）
+    OBS_PRICE_SEQ_1D_TARGET_COLS: tuple[str, ...] = (
+        "oi_close_z",
+        "funding_close_z",
+        "ls_account_ratio_z",
+        "ls_position_ratio_z",
+        "liq_long_log_z",
+        "liq_short_log_z",
+        "ob_imbalance_z",
+        "ret_1d_z",
+        "range_1d_z",
+        "close_over_ema_20_z",
+        "ema_20_60_spread_z",
+        "dist_to_support_1d_atr",
+        "dist_to_resistance_1d_atr",
+        "vwap_distance_1d_atr",
+        "hour_sin",
+        "hour_cos",
+        "day_of_week_sin",
+        "day_of_week_cos",
+    )
+    # 1d 其他（每標的為 {SYMBOL}_xxx；最後 4 為 macro 固定名）
+    OBS_PRICE_SEQ_1D_OTHERS_COLS: tuple[str, ...] = (
+        "oi_close_z",
+        "funding_close_z",
+        "ls_account_ratio_z",
+        "ob_imbalance_z",
+        "ret_1d_z",
+        "close_over_ema_20_z",
+        "fear_greed_z",
+        "altcoin_season_z",
+        "bmo_z",
+        "sopr_z",
+    )
+
+    # 帳戶狀態：22 維的完整名稱（順序須與 observer 內建一致）；子集由 OBS_ACCOUNT_STATE_COLS 指定
+    OBS_ACCOUNT_STATE_NAMES: tuple[str, ...] = (
+        "position_side",
+        "position_size_norm",
+        "equity_ratio",
+        "realized_pnl_ratio",
+        "unrealized_pnl_atr",
+        "drawdown",
+        "liq_distance_atr",
+        "stop_loss_distance_atr",
+        "margin_usage_ratio",
+        "cooldown_remaining_norm",
+        "fee_rate",
+        "rolling_fee_ratio",
+        "trade_count_log",
+        "stop_loss_count_log",
+        "holding_time_log",
+        "buffer_to_min_balance_ratio",
+        "steps_since_trade_norm",
+        "trade_freq_remaining_ratio",
+        "trade_freq_blocked_last",
+        "entry_price_ratio",
+        "stop_loss_price_ratio",
+        "recent_flat_ratio",
+    )
+    OBS_ACCOUNT_STATE_COLS: tuple[str, ...] = ()  # 空 = 使用上列全部 22 欄
+
+    # 情境狀態：8 維的完整名稱；子集由 OBS_CONTEXT_STATE_COLS 指定
+    OBS_CONTEXT_STATE_NAMES: tuple[str, ...] = (
+        "action_overridden",
+        "last_action_raw",
+        "last_action_used",
+        "last_target_pos_pct",
+        "last_final_pos_pct",
+        "trade_executed_flag",
+        "predicted_liq_distance_after",
+        "available_balance_after_norm",
+    )
+    OBS_CONTEXT_STATE_COLS: tuple[str, ...] = ()  # 空 = 使用上列全部 8 欄

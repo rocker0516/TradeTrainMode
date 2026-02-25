@@ -5,6 +5,31 @@ from Env.config import Config
 from Env.Executors.trade_executor import TradeExecutor
 from Env.Components.market_data import MarketData
 
+def _resolve_col_indices(full_cols: list[str], want_cols: tuple[str, ...]) -> list[int]:
+    """依 Config 指定欄位解析索引；want_cols 為空則使用全部。"""
+    if not want_cols:
+        return list(range(len(full_cols)))
+    full = list(full_cols)
+    indices = []
+    for c in want_cols:
+        if c not in full:
+            raise ValueError(f"OBS 特徵欄位 '{c}' 不在該 state 的可用欄位中: {full[:15]}...")
+        indices.append(full.index(c))
+    return indices
+
+
+def _resolve_col_indices_others(full_cols: list[str], want_cols: tuple[str, ...]) -> list[int]:
+    """Others 用：full_cols 為 {SYMBOL}_xxx 或 macro 名；want_cols 為 base 名稱，空 = 全部。"""
+    if not want_cols:
+        return list(range(len(full_cols)))
+    want_set = set(want_cols)
+    return [
+        i
+        for i, col in enumerate(full_cols)
+        if col in want_set or ("_" in col and col.split("_", 1)[1] in want_set)
+    ]
+
+
 class TradingObserver:
     """
     負責構建觀察空間 (Observation Space) 與生成觀察值 (Observation)。
@@ -13,7 +38,7 @@ class TradingObserver:
     def __init__(self, window_size: int, window_size_1d: int, market_data: MarketData, *, obs_dtype: str | np.dtype | None = None):
         self.window_size = window_size
         self.window_size_1d = window_size_1d
-        # 新的分离特征维度
+        # 新的分离特征维度（完整維度，供內部切片前使用）
         self.price_seq_target_features_dim = market_data.price_seq_target_features_dim
         self.price_seq_others_features_dim = market_data.price_seq_others_features_dim
         self.price_seq_1d_target_features_dim = market_data.price_seq_1d_target_features_dim
@@ -21,6 +46,33 @@ class TradingObserver:
         # 兼容性：保留旧接口
         self.price_seq_features_dim = market_data.price_seq_features_dim
         self.features_1d_dim = market_data.features_1d_dim
+
+        # 5 個 state 內部特徵欄位：依 Config 解析索引，空 = 全部
+        cols_5m_t = getattr(market_data, "cols_5m_target", [])
+        cols_5m_o = getattr(market_data, "cols_5m_others", [])
+        cols_1d_t = getattr(market_data, "cols_1d_target", [])
+        cols_1d_o = getattr(market_data, "cols_1d_others", [])
+        want_5m_t = getattr(Config, "OBS_PRICE_SEQ_TARGET_COLS", ()) or ()
+        want_5m_o = getattr(Config, "OBS_PRICE_SEQ_OTHERS_COLS", ()) or ()
+        want_1d_t = getattr(Config, "OBS_PRICE_SEQ_1D_TARGET_COLS", ()) or ()
+        want_1d_o = getattr(Config, "OBS_PRICE_SEQ_1D_OTHERS_COLS", ()) or ()
+        self._obs_price_seq_target_idx = _resolve_col_indices(cols_5m_t, want_5m_t)
+        self._obs_price_seq_others_idx = _resolve_col_indices_others(cols_5m_o, want_5m_o)
+        self._obs_price_seq_1d_target_idx = _resolve_col_indices(cols_1d_t, want_1d_t)
+        self._obs_price_seq_1d_others_idx = _resolve_col_indices_others(cols_1d_o, want_1d_o)
+        account_names = getattr(Config, "OBS_ACCOUNT_STATE_NAMES", ())
+        account_cols = getattr(Config, "OBS_ACCOUNT_STATE_COLS", ()) or ()
+        context_names = getattr(Config, "OBS_CONTEXT_STATE_NAMES", ())
+        context_cols = getattr(Config, "OBS_CONTEXT_STATE_COLS", ()) or ()
+        self._obs_account_state_idx = _resolve_col_indices(list(account_names), account_cols) if account_names else list(range(22))
+        self._obs_context_state_idx = _resolve_col_indices(list(context_names), context_cols) if context_names else list(range(8))
+        # 納入 obs 的實際維度（用於 observation_space）
+        self._eff_price_seq_target_dim = len(self._obs_price_seq_target_idx)
+        self._eff_price_seq_others_dim = len(self._obs_price_seq_others_idx)
+        self._eff_price_seq_1d_target_dim = len(self._obs_price_seq_1d_target_idx)
+        self._eff_price_seq_1d_others_dim = len(self._obs_price_seq_1d_others_idx)
+        self._eff_account_state_dim = len(self._obs_account_state_idx)
+        self._eff_context_state_dim = len(self._obs_context_state_idx)
 
         # obs dtype（預設採用 Config.OBS_DTYPE）
         if obs_dtype is None:
@@ -40,47 +92,57 @@ class TradingObserver:
         market_space = self._build_market_space()
         account_space = self._build_account_space()
         context_space = self._build_context_space()
-        
-        # 合併所有空間
-        self.observation_space = spaces.Dict({
-            **market_space,
-            **account_space,
-            **context_space
-        })
+        all_space = {**market_space, **account_space, **context_space}
+
+        # 依 Config.OBS_STATE_KEYS 篩選納入 obs 的 state（預設全部）
+        obs_state_keys = getattr(Config, "OBS_STATE_KEYS", None)
+        if obs_state_keys is not None and len(obs_state_keys) > 0:
+            self._obs_state_keys = tuple(k for k in obs_state_keys if k in all_space)
+            if len(self._obs_state_keys) < len(obs_state_keys):
+                missing = set(obs_state_keys) - set(all_space.keys())
+                if missing:
+                    raise ValueError(f"OBS_STATE_KEYS 含未知鍵: {missing}；可用: {list(all_space.keys())}")
+        else:
+            self._obs_state_keys = tuple(all_space.keys())
+
+        self.observation_space = spaces.Dict({k: all_space[k] for k in self._obs_state_keys})
 
     def _build_market_space(self) -> dict:
-        """定義市場數據相關的觀察空間 (5m & 1d 序列，分离的 target 和 others)"""
+        """定義市場數據相關的觀察空間 (5m & 1d 序列)，維度依 Config 各 state 特徵欄位。"""
+        market_dtype = np.float32
         return {
             'price_seq_target': spaces.Box(
-                low=-np.inf, 
-                high=np.inf, 
-                shape=(self.window_size, self.price_seq_target_features_dim), 
-                dtype=self.obs_dtype
+                low=-np.inf,
+                high=np.inf,
+                shape=(self.window_size, self._eff_price_seq_target_dim),
+                dtype=market_dtype,
             ),
             'price_seq_others': spaces.Box(
-                low=-np.inf, 
-                high=np.inf, 
-                shape=(self.window_size, self.price_seq_others_features_dim), 
-                dtype=self.obs_dtype
+                low=-np.inf,
+                high=np.inf,
+                shape=(self.window_size, self._eff_price_seq_others_dim),
+                dtype=market_dtype,
             ),
             'price_seq_1d_target': spaces.Box(
-                low=-np.inf, 
-                high=np.inf, 
-                shape=(self.window_size_1d, self.price_seq_1d_target_features_dim), 
-                dtype=self.obs_dtype
+                low=-np.inf,
+                high=np.inf,
+                shape=(self.window_size_1d, self._eff_price_seq_1d_target_dim),
+                dtype=market_dtype,
             ),
             'price_seq_1d_others': spaces.Box(
-                low=-np.inf, 
-                high=np.inf, 
-                shape=(self.window_size_1d, self.price_seq_1d_others_features_dim), 
-                dtype=self.obs_dtype
-            )
+                low=-np.inf,
+                high=np.inf,
+                shape=(self.window_size_1d, self._eff_price_seq_1d_others_dim),
+                dtype=market_dtype,
+            ),
         }
 
     def _build_account_space(self) -> dict:
-        """定義帳戶狀態相關的觀察空間（22 維：已移除 stop_loss_rate 等冗餘/常數/易誘發不良行為的欄位）"""
+        """定義帳戶狀態相關的觀察空間，維度依 Config.OBS_ACCOUNT_STATE_COLS。"""
         return {
-            'account_state': spaces.Box(low=-np.inf, high=np.inf, shape=(22,), dtype=self.obs_dtype)
+            'account_state': spaces.Box(
+                low=-np.inf, high=np.inf, shape=(self._eff_account_state_dim,), dtype=self.obs_dtype
+            )
         }
 
     def _build_context_space(self) -> dict:
@@ -92,7 +154,7 @@ class TradingObserver:
             'context_state': spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=(8,),
+                shape=(self._eff_context_state_dim,),
                 dtype=self.obs_dtype,
             )
         }
@@ -216,25 +278,38 @@ class TradingObserver:
         )
 
         out = {**market_obs, **account_obs, **context_obs}
-        # 單一迴圈：dtype 轉換 + nan_to_num，減少對同一陣列的重複遍歷（it/s 優化）
+        # 僅保留 Config 啟用的 state keys（與 observation_space 一致）
+        obs_keys = getattr(self, "_obs_state_keys", None)
+        if obs_keys is not None:
+            out = {k: out[k] for k in obs_keys if k in out}
+        # 取代 inf 的有限值（避免極端訊號被壓成 0 而消失）
+        posinf_val = float(getattr(Config, "OBS_INF_CLIP_HIGH", 10.0))
+        neginf_val = float(getattr(Config, "OBS_INF_CLIP_LOW", -10.0))
+        # 單一迴圈：dtype 轉換 + nan_to_num（nan→0 表缺失；inf→有限值保留極端訊號）
+        # 5m/1d 市場序列不轉成 float16，維持 float32 以保留訊號
         for k, v in list(out.items()):
             if isinstance(v, np.ndarray):
-                if v.dtype != self.obs_dtype:
-                    v = v.astype(self.obs_dtype, copy=False)
-                v = np.nan_to_num(v, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+                target_dtype = np.float32 if k in self._MARKET_SEQ_KEYS else self.obs_dtype
+                if v.dtype != target_dtype:
+                    v = v.astype(target_dtype, copy=False)
+                v = np.nan_to_num(v, copy=False, nan=0.0, posinf=posinf_val, neginf=neginf_val)
                 # 保證 contiguous，讓 CPU→GPU 傳輸時單次連續拷貝（減少 GPU 瓶頸卡在傳輸）
                 out[k] = np.ascontiguousarray(v) if not v.flags.c_contiguous else v
         return out
 
+    # 5m/1d 市場序列強制 float32，避免 float16 精度/underflow 把小幅訊號壓掉（「5m 都沒訊號」）
+    _MARKET_SEQ_KEYS = frozenset({'price_seq_target', 'price_seq_others', 'price_seq_1d_target', 'price_seq_1d_others'})
+
     def _get_market_obs(self, step_idx: int, market_data: MarketData) -> dict:
-        """生成市場數據觀察值（分离的 target 和 others）"""
+        """生成市場數據觀察值（依 Config 各 state 特徵欄位切片）"""
         seq_target, seq_others = market_data.get_price_seq(step_idx)
         seq_1d_target, seq_1d_others = market_data.get_1d_seq(step_idx, self.window_size_1d)
+        dt_market = np.float32
         return {
-            'price_seq_target': seq_target.astype(self.obs_dtype, copy=False),
-            'price_seq_others': seq_others.astype(self.obs_dtype, copy=False),
-            'price_seq_1d_target': seq_1d_target.astype(self.obs_dtype, copy=False),
-            'price_seq_1d_others': seq_1d_others.astype(self.obs_dtype, copy=False),
+            'price_seq_target': seq_target[:, self._obs_price_seq_target_idx].astype(dt_market, copy=False),
+            'price_seq_others': seq_others[:, self._obs_price_seq_others_idx].astype(dt_market, copy=False),
+            'price_seq_1d_target': seq_1d_target[:, self._obs_price_seq_1d_target_idx].astype(dt_market, copy=False),
+            'price_seq_1d_others': seq_1d_others[:, self._obs_price_seq_1d_others_idx].astype(dt_market, copy=False),
         }
 
     def _get_account_obs(
@@ -389,10 +464,10 @@ class TradingObserver:
         recent_flat_ratio = float(account_metrics.get('recent_flat_ratio', 0.5))
         recent_flat_ratio = np.clip(recent_flat_ratio, 0.0, 1.0)
 
-        account_state = np.array([
+        account_state_full = np.array([
             position_side,              # 0
             position_size_norm,         # 1
-            equity_ratio,               # 2
+            equity_ratio,              # 2
             realized_pnl_ratio,         # 3
             unrealized_pnl_atr,         # 4
             drawdown,                   # 5
@@ -413,7 +488,7 @@ class TradingObserver:
             stop_loss_price_ratio,      # 21
             recent_flat_ratio,          # 22
         ], dtype=self.obs_dtype)
-        
+        account_state = account_state_full[self._obs_account_state_idx]
         return {'account_state': account_state}
 
     def _get_context_obs(
@@ -447,7 +522,7 @@ class TradingObserver:
         liq_dist = float(effects.get('predicted_liq_distance_after_action', 0.0))
         available_after = float(effects.get('predicted_available_balance_after_action', 0.0))
         available_norm = np.clip(available_after / initial_balance, 0.0, 2.0)
-        context_state = np.array([
+        context_state_full = np.array([
             action_overridden,
             np.clip(last_action_raw, -1.0, 1.0),
             np.clip(last_action_used, -1.0, 1.0),
@@ -457,5 +532,6 @@ class TradingObserver:
             np.clip(liq_dist, 0.0, 5.0),
             available_norm,
         ], dtype=self.obs_dtype)
-        context_state = np.nan_to_num(context_state, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        context_state_full = np.nan_to_num(context_state_full, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        context_state = context_state_full[self._obs_context_state_idx]
         return {'context_state': context_state}

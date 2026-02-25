@@ -22,6 +22,8 @@ from Train.e2_direction_proxy import (
     DELTA_COEF,
     HORIZON_K,
     RANDOM_STATE,
+    SUMMARY_STATS_TEMPORAL,
+    STATS_PER_CHANNEL_TEMPORAL,
     TEST_RATIO,
     TRAIN_RATIO,
     VALID_RATIO,
@@ -38,14 +40,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-STATS = ("last", "mean", "std", "min", "max")
-
-
-def get_summary_feature_names(channel_names: List[str]) -> List[str]:
-    """依 channel 名產生 5*F 個彙總特徵名（每 channel 對應 last, mean, std, min, max）。"""
+def get_summary_feature_names(
+    channel_names: List[str],
+    *,
+    stats: Tuple[str, ...] = SUMMARY_STATS_TEMPORAL,
+) -> List[str]:
+    """依 channel 名產生 (len(stats)*F) 個彙總特徵名（預設時序彙總：recent_last, recent_mean, ...）。"""
     names: List[str] = []
     for c in channel_names:
-        for s in STATS:
+        for s in stats:
             names.append(f"{c}_{s}")
     return names
 
@@ -105,13 +108,15 @@ def run_per_channel(
     task: str,
     F: int,
     channel_names: List[str],
+    *,
+    stats_per_channel: int = STATS_PER_CHANNEL_TEMPORAL,
 ) -> Tuple[List[str], List[float]]:
-    """每個 channel 只用 5 維特徵訓練，回傳 channel 名列表與對應 Test 指標（AUC 或 Macro-F1）。"""
-    assert X.shape[1] == 5 * F
+    """每個 channel 只用該 channel 的 stats_per_channel 維訓練，回傳 channel 名列表與對應 Test 指標。"""
+    assert X.shape[1] == stats_per_channel * F
     assert len(channel_names) == F
     metrics: List[float] = []
     for ch in range(F):
-        start, end = ch * 5, (ch + 1) * 5
+        start, end = ch * stats_per_channel, (ch + 1) * stats_per_channel
         X_ch = X[:, start:end]
         X_tr = X_ch[train_idx]
         X_te = X_ch[test_idx]
@@ -159,12 +164,15 @@ def main() -> None:
     y_test_3 = y_3class[test_idx]
 
     metric_name = "AUC" if args.task == "binary" else "MacroF1"
+    # 收集各 CNN 的繪圖資料，最後合成一張 4x2 圖
+    plot_imp: List[Tuple[str, pd.DataFrame, int]] = []   # (cnn_key, plot_df, top_n)
+    plot_ch: List[Tuple[str, List[str], List[float]]] = []  # (cnn_key, ch_names, ch_metrics)
 
     for cnn_key in CNN_KEYS:
         print(f"--- CNN: {cnn_key} ---")
         X_list = [obs_to_summary_features_one_cnn(o, cnn_key) for o in obs_list]
         X = np.stack(X_list, axis=0)
-        F = X.shape[1] // 5
+        F = X.shape[1] // STATS_PER_CHANNEL_TEMPORAL
         if F == 0:
             print(f"  Skip (F=0).")
             continue
@@ -190,20 +198,9 @@ def main() -> None:
         df_imp.to_csv(csv_imp, index=False)
         print(f"  Saved {csv_imp}")
 
-        fig1, ax1 = plt.subplots(figsize=(12, 10))
         top_n = min(60, len(df_imp))
         plot_df = df_imp.head(top_n)
-        ax1.barh(range(len(plot_df)), plot_df["importance"].values, align="center")
-        ax1.set_yticks(range(len(plot_df)))
-        ax1.set_yticklabels(plot_df["feature"].values, fontsize=8)
-        ax1.invert_yaxis()
-        ax1.set_xlabel("Feature importance (LightGBM)")
-        ax1.set_title(f"E2 top-{top_n} features ({cnn_key}, {args.task})")
-        plt.tight_layout()
-        fig1_path = os.path.join(args.out_dir, f"e2_feature_importance_{cnn_key}_{args.task}.png")
-        plt.savefig(fig1_path, dpi=150, bbox_inches="tight")
-        plt.close()
-        print(f"  Saved {fig1_path}")
+        plot_imp.append((cnn_key, plot_df, top_n))
 
         # ---------- (2) Per-channel univariate metric ----------
         ch_names, ch_metrics = run_per_channel(
@@ -217,22 +214,50 @@ def main() -> None:
         df_ch.to_csv(csv_ch, index=False)
         print(f"  Saved {csv_ch}")
 
-        fig2, ax2 = plt.subplots(figsize=(10, 8))
-        ax2.barh(range(len(ch_names)), ch_metrics, align="center")
-        ax2.set_yticks(range(len(ch_names)))
-        ax2.set_yticklabels(ch_names, fontsize=8)
-        ax2.invert_yaxis()
-        ax2.set_xlabel(metric_name)
-        ax2.set_title(f"E2 per-channel {metric_name} ({cnn_key}, {args.task})")
-        if args.task == "binary":
-            ax2.axvline(0.5, color="gray", linestyle="--", alpha=0.7)
-        else:
-            ax2.axvline(1.0 / 3.0, color="gray", linestyle="--", alpha=0.7)
+        # 依 sort 後順序供繪圖
+        ch_names_sorted = df_ch["channel"].tolist()
+        ch_metrics_sorted = df_ch[metric_name].tolist()
+        plot_ch.append((cnn_key, ch_names_sorted, ch_metrics_sorted))
+
+    # ---------- 合成一張 2x4 圖（第 1 列：4 個 Feature importance；第 2 列：4 個 Per-channel）----------
+    n_cnns = len(plot_imp)
+    if n_cnns > 0:
+        fig, axes = plt.subplots(2, n_cnns, figsize=(5 * n_cnns, 10))
+        if n_cnns == 1:
+            axes = axes.reshape(-1, 1)
+        for i in range(n_cnns):
+            cnn_key = plot_imp[i][0]
+            ax_imp = axes[0, i]
+            ax_ch = axes[1, i]
+
+            # 第 1 列：feature importance (top N)
+            _, plot_df, top_n = plot_imp[i]
+            ax_imp.barh(range(len(plot_df)), plot_df["importance"].values, align="center")
+            ax_imp.set_yticks(range(len(plot_df)))
+            ax_imp.set_yticklabels(plot_df["feature"].values, fontsize=6)
+            ax_imp.invert_yaxis()
+            ax_imp.set_xlabel("Feature importance (LightGBM)")
+            ax_imp.set_title(f"Top-{top_n} features ({cnn_key})")
+
+            # 第 2 列：per-channel metric
+            _, ch_names, ch_metrics = plot_ch[i]
+            ax_ch.barh(range(len(ch_names)), ch_metrics, align="center")
+            ax_ch.set_yticks(range(len(ch_names)))
+            ax_ch.set_yticklabels(ch_names, fontsize=6)
+            ax_ch.invert_yaxis()
+            ax_ch.set_xlabel(metric_name)
+            ax_ch.set_title(f"Per-channel {metric_name} ({cnn_key})")
+            if args.task == "binary":
+                ax_ch.axvline(0.5, color="gray", linestyle="--", alpha=0.7)
+            else:
+                ax_ch.axvline(1.0 / 3.0, color="gray", linestyle="--", alpha=0.7)
+
+        plt.suptitle(f"E2 Feature Signal Analysis ({args.task})", fontsize=12, y=1.002)
         plt.tight_layout()
-        fig2_path = os.path.join(args.out_dir, f"e2_per_channel_metric_{cnn_key}_{args.task}.png")
-        plt.savefig(fig2_path, dpi=150, bbox_inches="tight")
+        combined_path = os.path.join(args.out_dir, f"e2_feature_signal_combined_{args.task}.png")
+        plt.savefig(combined_path, dpi=150, bbox_inches="tight")
         plt.close()
-        print(f"  Saved {fig2_path}")
+        print(f"  Saved combined figure: {combined_path}")
 
     print("Done.")
 

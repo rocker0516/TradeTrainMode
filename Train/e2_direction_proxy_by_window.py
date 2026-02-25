@@ -1,7 +1,7 @@
 """
 E2 多 window_size 版本：對多種 (window_size_5m, window_size_1d) × 四路 CNN × task 跑方向 proxy，並以圖表顯示結果。
 
-- 迴圈 (ws_5m, ws_1d, cnn_key, task)，每組合：收集 obs → 標籤 → 單路 CNN 摘要特徵（5*F）→ 時間切分 → LR + LightGBM → 破壞測試。
+- 迴圈 (ws_5m, ws_1d, cnn_key, task)，每組合：收集 obs → 標籤 → 單路 CNN 時序彙總（7*F：近期+全窗）→ 時間切分 → LR + LightGBM → 破壞測試。
 - 產出：文字報告與圖表，檔名含 cnn_key（5m_target, 5m_others, 1d_target, 1d_others）。
 """
 

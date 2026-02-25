@@ -2,7 +2,7 @@
 E2 最小可驗證規格：方向 proxy（bar close 決策、統計彙總特徵、時間切分、LR + LightGBM、破壞測試）。
 
 - 標籤：二分類 y = 1[log(close_{t+k}/close_t) > 0]，三分類 ±1/0 用 δ = 0.1*atr_ratio[t]。
-- 特徵：price_seq_target 每 channel 取 last/mean/std/min/max → 5*F，concat account_state(22)。
+- 特徵：預設時序彙總（近期+全窗）每 channel 7 統計量 → 7*F；或 five_stats 模式 5*F。可 concat account_state(22)。
 - 時間切分：Train 70% / Valid 15% / Test 15%，禁止 shuffle。
 - 模型：LogisticRegression(L2) + LightGBM。
 - 破壞測試：label shuffle（AUC→0.5）、market shuffle（AUC 顯著下降）。
@@ -38,13 +38,29 @@ import lightgbm as lgb
 
 # ---------- 常數 ----------
 HORIZON_K = 12
-DELTA_COEF = 0.15
+DELTA_COEF = 0.2
 TRAIN_RATIO = 0.7
 VALID_RATIO = 0.15
 TEST_RATIO = 0.15
 RANDOM_STATE = 42
 # Account state: S = 前 12 維（state-only），H = 後 10 維（history/behavior）
 ACCOUNT_S_NDIM = 12
+# 時序彙總：近期視窗 bar 數（與 HORIZON_K 對齊，保留短期結構）
+RECENT_WINDOW_BARS = 12
+# 雙時間尺度彙總：每 channel 7 個統計量（近期 3 + 全窗 4）
+SUMMARY_STATS_TEMPORAL: Tuple[str, ...] = (
+    "recent_last",
+    "recent_mean",
+    "recent_std",
+    "full_mean",
+    "full_std",
+    "full_min",
+    "full_max",
+)
+STATS_PER_CHANNEL_TEMPORAL = len(SUMMARY_STATS_TEMPORAL)  # 7
+# 舊版單一視窗彙總（相容用）
+SUMMARY_STATS_FIVE: Tuple[str, ...] = ("last", "mean", "std", "min", "max")
+STATS_PER_CHANNEL_FIVE = 5
 
 FEATURE_MODES = ("market_only", "account_s_only", "market_plus_account_s", "market_plus_account_full")
 
@@ -125,22 +141,58 @@ def _seq_to_five_stats(seq: np.ndarray) -> np.ndarray:
     return np.concatenate([last, mean, std, min_, max_])
 
 
+def _seq_to_temporal_stats(
+    seq: np.ndarray,
+    recent_bars: int = RECENT_WINDOW_BARS,
+) -> np.ndarray:
+    """
+    雙時間尺度彙總：保留「近期 vs 全窗」時序，回傳 (7*F,) float64。
+
+    - 近期（last recent_bars）：recent_last, recent_mean, recent_std
+    - 全窗（all T）：full_mean, full_std, full_min, full_max
+
+    當 T < recent_bars 時，近期用整段序列計算。
+    """
+    seq = np.asarray(seq, dtype=np.float64)
+    T, F = seq.shape
+    R = min(max(1, int(recent_bars)), T)
+    recent_slice = seq[-R:]
+    recent_last = recent_slice[-1]
+    recent_mean = np.mean(recent_slice, axis=0)
+    recent_std = np.std(recent_slice, axis=0)
+    np.place(recent_std, recent_std <= 0, 1e-12)
+    full_mean = np.mean(seq, axis=0)
+    full_std = np.std(seq, axis=0)
+    np.place(full_std, full_std <= 0, 1e-12)
+    full_min = np.min(seq, axis=0)
+    full_max = np.max(seq, axis=0)
+    return np.concatenate(
+        [recent_last, recent_mean, recent_std, full_mean, full_std, full_min, full_max]
+    )
+
+
 def obs_to_summary_features(
     obs: Dict[str, Any],
     use_1d: bool = False,
     feature_mode: str = "market_plus_account_full",
+    *,
+    summary_mode: str = "temporal",
+    recent_bars: int = RECENT_WINDOW_BARS,
 ) -> np.ndarray:
     """
     從單步 obs 抽出統計彙總特徵；依 feature_mode 決定市場與帳戶組合。
 
     feature_mode:
-        market_only: 僅 5*F_5m（+ 5*F_1d 若 use_1d）
+        market_only: 僅市場彙總（5m + 可選 1d）
         account_s_only: 僅 account_state[0:ACCOUNT_S_NDIM]
         market_plus_account_s: 市場彙總 + account_state[0:ACCOUNT_S_NDIM]
         market_plus_account_full: 市場彙總 + account_state 全 22 維（預設）
 
+    summary_mode: "temporal"（近期+全窗）或 "five_stats"（單一視窗 5 統計量）
+    recent_bars: summary_mode=="temporal" 時近期視窗 bar 數
+
     Returns:
-        一維 float32 向量，維度依 feature_mode 不同。
+        一維 float32 向量，維度依 feature_mode 與 summary_mode 不同。
     """
     if feature_mode not in FEATURE_MODES:
         raise ValueError(f"feature_mode must be one of {FEATURE_MODES}, got {feature_mode!r}")
@@ -149,17 +201,21 @@ def obs_to_summary_features(
         acc = acc.numpy()
     acc = np.asarray(acc, dtype=np.float64).ravel()
     parts: List[np.ndarray] = []
+    if summary_mode == "temporal":
+        _seq_summary = lambda s: _seq_to_temporal_stats(s, recent_bars=recent_bars)
+    else:
+        _seq_summary = _seq_to_five_stats
     if feature_mode in ("market_only", "market_plus_account_s", "market_plus_account_full"):
         seq = obs["price_seq_target"]
         if hasattr(seq, "numpy"):
             seq = seq.numpy()
-        feats_5m = _seq_to_five_stats(seq)
+        feats_5m = _seq_summary(np.asarray(seq, dtype=np.float64))
         parts.append(feats_5m)
         if use_1d and "price_seq_1d_target" in obs:
             seq_1d = obs["price_seq_1d_target"]
             if hasattr(seq_1d, "numpy"):
                 seq_1d = seq_1d.numpy()
-            parts.append(_seq_to_five_stats(seq_1d))
+            parts.append(_seq_summary(np.asarray(seq_1d, dtype=np.float64)))
     if feature_mode == "account_s_only":
         parts.append(acc[0:ACCOUNT_S_NDIM].copy())
     elif feature_mode == "market_plus_account_s":
@@ -169,16 +225,24 @@ def obs_to_summary_features(
     return np.concatenate(parts).astype(np.float32)
 
 
-def obs_to_summary_features_one_cnn(obs: Dict[str, Any], cnn_key: str) -> np.ndarray:
+def obs_to_summary_features_one_cnn(
+    obs: Dict[str, Any],
+    cnn_key: str,
+    *,
+    summary_mode: str = "temporal",
+    recent_bars: int = RECENT_WINDOW_BARS,
+) -> np.ndarray:
     """
-    從單步 obs 抽出單一 CNN 的統計彙總特徵（5*F）。
+    從單步 obs 抽出單一 CNN 的統計彙總特徵。
 
     Args:
         obs: 單步觀察 dict
         cnn_key: 其一 CNN_KEYS（5m_target, 5m_others, 1d_target, 1d_others）
+        summary_mode: "temporal"（近期+全窗，7*F）或 "five_stats"（last/mean/std/min/max，5*F）
+        recent_bars: summary_mode=="temporal" 時近期視窗 bar 數
 
     Returns:
-        一維 float32 向量，長度 5*F（F 為該路 channel 數）。
+        一維 float32 向量，長度 7*F（temporal）或 5*F（five_stats）。
     """
     if cnn_key not in OBS_KEY_BY_CNN:
         raise ValueError(f"cnn_key must be one of {CNN_KEYS}, got {cnn_key!r}")
@@ -189,7 +253,11 @@ def obs_to_summary_features_one_cnn(obs: Dict[str, Any], cnn_key: str) -> np.nda
     if hasattr(seq, "numpy"):
         seq = seq.numpy()
     seq = np.asarray(seq, dtype=np.float64)
-    return _seq_to_five_stats(seq).astype(np.float32)
+    if summary_mode == "temporal":
+        return _seq_to_temporal_stats(seq, recent_bars=recent_bars).astype(np.float32)
+    if summary_mode == "five_stats":
+        return _seq_to_five_stats(seq).astype(np.float32)
+    raise ValueError(f"summary_mode must be 'temporal' or 'five_stats', got {summary_mode!r}")
 
 
 def train_valid_test_split_time_ordered(
@@ -485,7 +553,8 @@ def main() -> None:
             continue
         n_features_market = n_feat
         X_train, X_test = X[train_idx], X[test_idx]
-        lines.append(f"Features: 5*F = {n_feat} (F={n_feat // 5})")
+        stats_per_ch = STATS_PER_CHANNEL_TEMPORAL
+        lines.append(f"Features: {stats_per_ch}*F = {n_feat} (F={n_feat // stats_per_ch})")
 
         for name, use_lgb in [("LogisticRegression (L2)", False), ("LightGBM", True)]:
             _, auc, extra = fit_predict_binary(
