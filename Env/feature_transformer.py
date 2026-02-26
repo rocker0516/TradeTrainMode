@@ -112,27 +112,58 @@ class FeatureTransformer:
     OPTIMIZED_TARGET_5M_COLS: Final[Tuple[str, ...]] = (
         # === 基础回报与价格（4，移除 ret_1_z 避免單根 K 噪音拖累訓練）===
         "ret_15m_z",
+        "ret_15m_scale",
         "range_z",
         "body_z",
+        # === scale/clip 僅（不做 z），保留短期尖峰對比；雙尺度短期 z ===
+        "ret_1_atr",
+        "range_atr",
+        "body_atr",
+        "ret_1_z_short",
+        "ret_15m_z_short",
+        "range_z_short",
+        "volume_log_z_short",
         "log_close_z",
-        # === 成交量与流动性（6） ===
+        "log_close_scale",
+        # === 成交量与流动性（6 + scale） ===
         "volume_log_z",
+        "volume_log_scale",
         "quote_volume_log_z",
+        "quote_volume_log_scale",
         "trades_z",
+        "trades_scale",
         "vol_imbalance_z",
+        "vol_imbalance_scale",
         "amihud_z",
+        "amihud_scale",
         "volume_ratio_z",
-        # === 技术指标（7） ===
+        "volume_ratio_scale",
+        "long_short_ratio_z",
+        "long_short_ratio_scale",
+        "trades_per_volume_z",
+        "trades_per_volume_scale",
+        "body_range_ratio",
+        "vol_imbalance_delta_z",
+        "vol_imbalance_delta_scale",
+        "volume_impact_z",
+        "volume_impact_scale",
+        # === 技术指标（7 + scale） ===
         "close_over_ema_12_z",
+        "close_over_ema_12_scale",
         "close_over_ema_48_z",
+        "close_over_ema_48_scale",
         "ema_12_48_spread_z",
+        "ema_12_48_spread_scale",
         "ema_12_slope_z",
+        "ema_12_slope_scale",
         "ema_48_slope_z",
+        "ema_48_slope_scale",
         "rsi_14",
         "macd_atr",
-        # === 市场结构（5） ===
+        # === 市场结构（5 + scale） ===
         "price_pos_96",
         "bb_width_48_z",
+        "bb_width_48_scale",
         "bb_pos_48",
         "trend_strength_atr",
         "chop_48",
@@ -151,42 +182,84 @@ class FeatureTransformer:
         "momentum_12_atr",
         "volume_surge_12",
         "up_volume_ratio_12",
-        # === 波动率与风险（2） ===
+        # === 波动率与风险（2 + scale） ===
         "atr_ratio_z",
+        "atr_ratio_scale",
         "rv_ratio_z",
-        # === 关键价位（新增，3） ===
+        "rv_ratio_scale",
+        # === 关键价位（新增，3 + scale） ===
         "dist_to_support_96_atr",
+        "dist_to_support_96_atr_scale",
         "dist_to_resistance_96_atr",
+        "dist_to_resistance_96_atr_scale",
         "price_jump_z",
-        # === 订单簿信息（新增，如果数据可用，2-3） ===
+        "price_jump_scale",
+        # === 订单簿信息（新增，如果数据可用，2-3 + scale） ===
         "ob_depth_imbalance_z",
+        "ob_depth_imbalance_scale",
         "ob_slope_bid_z",
+        "ob_slope_bid_scale",
         "ob_slope_ask_z",
-        # === 跨市场摘要（6，保持不变） ===
+        "ob_slope_ask_scale",
+        # === 跨市场摘要（6 + scale） ===
         "alts_ret_15m_mean_z",
+        "alts_ret_15m_mean_scale",
         "alts_ret_15m_std_z",
+        "alts_ret_15m_std_scale",
         "alts_rel_ret_15m_abs_mean_z",
+        "alts_rel_ret_15m_abs_mean_scale",
         "alts_trend_up_ratio",
         "alts_volume_log_mean_z",
+        "alts_volume_log_mean_scale",
         "alts_trend_spread_std_z",
+        "alts_trend_spread_std_scale",
+        # === 近期做多/做空流動性區（做法一：swing 代理 + sweep） ===
+        "dist_to_long_liq_zone_atr",
+        "dist_to_short_liq_zone_atr",
+        "liq_sweep_up",
+        "liq_sweep_down",
     )
     
     # ---- 5m Others 特征：每个币种 8-10 通道 + 低頻趨勢（不做 z-score）----
     OTHERS_5M_COLS_PER_SYMBOL: Final[Tuple[str, ...]] = (
-        # 价格动量（3）
+        # 价格动量（3 + scale）
         "ret_1_z",
         "ret_15m_z",
+        "ret_15m_scale",
         "ret_1h_z",
-        # 成交量（2）
+        "ret_1h_scale",
+        # scale/clip 僅 + 雙尺度短期 z
+        "ret_1_atr",
+        "range_atr",
+        "body_atr",
+        "ret_1_z_short",
+        "ret_15m_z_short",
+        "range_z_short",
+        "volume_log_z_short",
+        # 成交量（2 + scale）
         "volume_log_z",
+        "volume_log_scale",
         "quote_volume_log_z",
-        # 技术指标（3）
+        "quote_volume_log_scale",
+        # 技术指标（3 + scale）
         "close_over_ema_12_z",
+        "close_over_ema_12_scale",
         "rsi_14",
         "atr_ratio_z",
-        # 趋势强度（2）
+        "atr_ratio_scale",
+        # 趋势强度（2 + scale）
         "trend_strength_atr",
         "vol_imbalance_z",
+        "vol_imbalance_scale",
+        "long_short_ratio_z",
+        "long_short_ratio_scale",
+        "trades_per_volume_z",
+        "trades_per_volume_scale",
+        "body_range_ratio",
+        "vol_imbalance_delta_z",
+        "vol_imbalance_delta_scale",
+        "volume_impact_z",
+        "volume_impact_scale",
         # 低頻趨勢（不做 z-score，3）
         "price_pos_288",
         "close_over_sma_288",
@@ -202,56 +275,95 @@ class FeatureTransformer:
         "momentum_12_atr",
         "volume_surge_12",
         "up_volume_ratio_12",
+        # 近期做多/做空流動性區（與 5m target 同口徑）
+        "dist_to_long_liq_zone_atr",
+        "dist_to_short_liq_zone_atr",
+        "liq_sweep_up",
+        "liq_sweep_down",
     )
     
     # ---- 兼容性：保留 BASE_5M_COLS 供旧代码使用 ----
     BASE_5M_COLS: Final[Tuple[str, ...]] = OPTIMIZED_TARGET_5M_COLS
 
-    # ---- 1d Target 特征：扩展到 18 通道（包含长期关键价位、VWAP、时间特征）----
+    # ---- 1d Target 特征：扩展到 18 通道（包含长期关键价位、VWAP、时间特征）+ scale/clip ----
     TARGET_1D_COLS: Final[Tuple[str, ...]] = (
-        # Coinglass 数据（7）
+        # Coinglass 数据（7 + scale）
         "oi_close_z",
+        "oi_close_scale",
         "funding_close_z",
+        "funding_close_scale",
         "ls_account_ratio_z",
+        "ls_account_ratio_scale",
         "ls_position_ratio_z",
+        "ls_position_ratio_scale",
         "liq_long_log_z",
+        "liq_long_log_scale",
         "liq_short_log_z",
+        "liq_short_log_scale",
         "ob_imbalance_z",
-        # Price regime（4）
+        "ob_imbalance_scale",
+        # Price regime（4 + scale）
         "ret_1d_z",
+        "ret_1d_scale",
         "range_1d_z",
+        "range_1d_scale",
         "close_over_ema_20_z",
+        "close_over_ema_20_scale",
         "ema_20_60_spread_z",
-        # 长期关键价位（新增，2）
+        "ema_20_60_spread_scale",
+        # 长期关键价位（新增，2 + scale）
         "dist_to_support_1d_atr",
+        "dist_to_support_1d_atr_scale",
         "dist_to_resistance_1d_atr",
-        # VWAP 距离（新增，1）
+        "dist_to_resistance_1d_atr_scale",
+        # VWAP 距离（新增，1 + scale）
         "vwap_distance_1d_atr",
+        "vwap_distance_1d_atr_scale",
         # 时间特征（新增，4）
         "hour_sin",
         "hour_cos",
         "day_of_week_sin",
         "day_of_week_cos",
+        # 近期做多/做空流動性區（1d 尺度）
+        "dist_to_long_liq_zone_atr",
+        "dist_to_short_liq_zone_atr",
+        "liq_sweep_up",
+        "liq_sweep_down",
     )
     
-    # ---- 1d Others 特征：每个币种 6 通道 ----
+    # ---- 1d Others 特征：每个币种 6 通道 + scale + 流動性區 4 ----
     OTHERS_1D_COLS_PER_SYMBOL: Final[Tuple[str, ...]] = (
-        # 关键 coinglass（4）
+        # 关键 coinglass（4 + scale）
         "oi_close_z",
+        "oi_close_scale",
         "funding_close_z",
+        "funding_close_scale",
         "ls_account_ratio_z",
+        "ls_account_ratio_scale",
         "ob_imbalance_z",
-        # Price regime（2）
+        "ob_imbalance_scale",
+        # Price regime（2 + scale）
         "ret_1d_z",
+        "ret_1d_scale",
         "close_over_ema_20_z",
+        "close_over_ema_20_scale",
+        # 近期做多/做空流動性區（1d 尺度）
+        "dist_to_long_liq_zone_atr",
+        "dist_to_short_liq_zone_atr",
+        "liq_sweep_up",
+        "liq_sweep_down",
     )
-    
-    # ---- 1d Macro 指标（4通道）----
+
+    # ---- 1d Macro 指标（4 + scale）----
     PRICE_SEQ_1D_MACRO_COLS: Final[Tuple[str, ...]] = (
         "fear_greed_z",
+        "fear_greed_scale",
         "altcoin_season_z",
+        "altcoin_season_scale",
         "bmo_z",
+        "bmo_scale",
         "sopr_z",
+        "sopr_scale",
     )
     
     # ---- 兼容性：保留 PRICE_SEQ_1D_SYMBOL_COLS 供旧代码使用 ----
@@ -315,17 +427,21 @@ class FeatureTransformer:
         atr_ratio_arr: np.ndarray,
         rv_ratio_arr: np.ndarray,
         z_window: int = 288,
+        z_window_short: int = 96,
         feature_symbols: Iterable[str] | None = None,
     ) -> Tuple[np.ndarray, np.ndarray, List[str], List[str]]:
         """
         建立分离的 5m 特征矩阵（target 和 others）。
-        
+
+        支援雙尺度 z：長期 z_window（預設 288）與短期 z_window_short（預設 96），
+        以及部分特徵僅 scale/clip（ret_1_atr, range_atr, body_atr）保留原始對比。
+
         Returns:
             (target_features, others_features, target_cols, others_cols)
         """
         if len(df_5m) != len(atr_ratio_arr) or len(df_5m) != len(rv_ratio_arr):
             raise ValueError("atr_ratio_arr/rv_ratio_arr 長度必須與 df_5m 相同")
-        
+
         # 确定符号列表
         symbols = [str(target_symbol)]
         if feature_symbols is not None:
@@ -341,9 +457,10 @@ class FeatureTransformer:
             else:
                 ordered = [str(target_symbol)] + ordered
             symbols = ordered
-        
+
         alt_symbols = [s for s in symbols if s != str(target_symbol)]
         minp = max(20, z_window // 10)
+        minp_short = max(12, z_window_short // 4)
         
         # === 读取 target_symbol 数据 ===
         c = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="close")
@@ -356,7 +473,8 @@ class FeatureTransformer:
         trades = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="trades")
         quote_v = _get_symbol_col_first_of(df_5m, target_symbol=target_symbol, suffixes=("quote_volume", "quote_volume_usd"))
         volume_ratio = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="volume_ratio")
-        
+        long_short_ratio = _get_symbol_col(df_5m, target_symbol=target_symbol, suffix="long_short_ratio")
+
         # === Target 特征计算 ===
         log_c = _safe_log(c)
         ret_1 = log_c.diff().fillna(0.0)
@@ -429,7 +547,18 @@ class FeatureTransformer:
         atr_est = atr_est.replace(0.0, np.nan).fillna(1e-8)
         dist_to_support_96_atr = (c - support_96) / atr_est
         dist_to_resistance_96_atr = (resistance_96 - c) / atr_est
-        
+
+        # 部分特徵僅 scale/clip（不做 rolling z-score），保留短期尖峰對比
+        ret_1_atr = ((c - c.shift(1)) / atr_est).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+        range_atr = ((h - l) / atr_est).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+        body_atr = ((c - o) / atr_est).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+
+        # 雙尺度 z：短期 z（window=96）供 CNN 敏感度，長期 z 保留日級穩定性
+        ret_1_z_short = _clip(_rolling_zscore(ret_1, z_window_short, minp_short))
+        ret_15m_z_short = _clip(_rolling_zscore(ret_15m, z_window_short, minp_short))
+        range_z_short = _clip(_rolling_zscore(range_raw, z_window_short, minp_short))
+        volume_log_z_short = _clip(_rolling_zscore(volume_log, z_window_short, minp_short))
+
         # 短週期動量（與延續/反轉相關，不做 z-score）
         ret_6_raw = log_c.diff(6).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.03, 0.03)
         ret_12_raw = log_c.diff(12).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.05, 0.05)
@@ -537,28 +666,113 @@ class FeatureTransformer:
             alts_volume_log_mean = pd.Series(0.0, index=df_5m.index)
             alts_trend_spread_std = pd.Series(0.0, index=df_5m.index)
         
+        # === 近期做多/做空流動性區（做法一：塞進 5m target CNN）===
+        # 以 swing high/low 代理空頭/多頭流動性集中區，ATR 正規化距離 + sweep 旗標
+        left_swing, right_swing = 2, 2
+        swing_high = (h.shift(1).rolling(left_swing, min_periods=1).max() < h) & (h > h.shift(-1).rolling(right_swing, min_periods=1).max())
+        swing_low = (l.shift(1).rolling(left_swing, min_periods=1).min() > l) & (l < l.shift(-1).rolling(right_swing, min_periods=1).min())
+        recent_swing_high = h.where(swing_high).ffill().bfill()
+        recent_swing_low = l.where(swing_low).ffill().bfill()
+        dist_to_long_liq_zone_atr = ((c - recent_swing_low) / atr_est).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+        dist_to_short_liq_zone_atr = ((recent_swing_high - c) / atr_est).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+        N_sweep = max(10, z_window // 12)
+        recent_max_h = h.rolling(N_sweep, min_periods=5).max()
+        recent_min_l = l.rolling(N_sweep, min_periods=5).min()
+        liq_sweep_up = ((h > recent_max_h.shift(1)) & (c < recent_max_h.shift(1))).astype(np.float32)
+        liq_sweep_down = ((l < recent_min_l.shift(1)) & (c > recent_min_l.shift(1))).astype(np.float32)
+
+        # === 所有 rolling z 的 scale/clip 版本（保留原始對比，不做 z）===
+        ret_15m_scale = ((c - c.shift(3)) / atr_est).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+        log_close_scale = ((c - c.rolling(96, min_periods=24).mean()) / atr_est).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+        volume_log_scale = volume_log.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+        quote_volume_log_scale = np.log1p(np.clip(quote_v, 0.0, None)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+        trades_ma96 = trades.rolling(96, min_periods=20).mean().replace(0.0, np.nan).fillna(1.0)
+        trades_scale = ((trades / trades_ma96) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 2.0)
+        vol_imbalance_scale = vol_imb.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+        amihud_scale = amihud.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 0.01)
+        volume_ratio_scale = (volume_ratio - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 2.0)
+        close_over_ema_12_scale = ((c - ema12) / atr_est).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+        close_over_ema_48_scale = ((c - ema48) / atr_est).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+        ema_12_48_spread_scale = ((ema12 - ema48) / atr_est).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+        ema_12_slope_scale = (ema12.diff() / atr_est).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+        ema_48_slope_scale = (ema48.diff() / atr_est).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+        bb_width_48_scale = bb_width_48.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 0.15)
+        atr_ratio_scale = pd.Series(atr_ratio_arr, index=df_5m.index).clip(0.0, 0.03)
+        rv_ratio_scale = pd.Series(rv_ratio_arr, index=df_5m.index).clip(0.0, 0.05)
+        dist_to_support_96_atr_scale = dist_to_support_96_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+        dist_to_resistance_96_atr_scale = dist_to_resistance_96_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+        price_jump_scale = price_jump.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 10.0)
+        ob_depth_imbalance_scale = ob_depth_imbalance.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+        ob_slope_bid_scale = ob_slope_bid.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.01, 0.01)
+        ob_slope_ask_scale = ob_slope_ask.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.01, 0.01)
+        alts_ret_15m_mean_scale = alts_ret_15m_mean.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.05, 0.05)
+        alts_ret_15m_std_scale = alts_ret_15m_std.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 0.03)
+        alts_rel_ret_15m_abs_mean_scale = alts_rel_ret_15m_abs_mean.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 0.05)
+        alts_volume_log_mean_scale = alts_volume_log_mean.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+        alts_trend_spread_std_scale = alts_trend_spread_std.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 0.2)
+
+        # === 推薦 1～5：long_short_ratio、trades_per_volume、body_range_ratio、vol_imbalance_delta、volume_impact ===
+        long_short_ratio_scale = (long_short_ratio - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 2.0)
+        trades_per_volume = trades / (v + 1e-12)
+        trades_per_volume_scale = ((trades_per_volume / trades_per_volume.rolling(96, min_periods=20).mean().replace(0.0, np.nan).fillna(1.0)) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 2.0)
+        body_range_ratio = (body_raw / (range_raw + 1e-12)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+        vol_imbalance_delta = vol_imb.diff(3).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.5, 0.5)
+        vol_imbalance_delta_scale = vol_imbalance_delta
+        volume_impact = np.abs(ret_1) / (v + 1e-12)
+        volume_impact_scale = volume_impact.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 0.001)
+
         # === 构建 Target 特征 DataFrame ===
         target_feats = pd.DataFrame({
             "ret_1_z": _clip(_rolling_zscore(ret_1, z_window, minp)),
             "ret_15m_z": _clip(_rolling_zscore(ret_15m, z_window, minp)),
+            "ret_15m_scale": ret_15m_scale,
             "range_z": _clip(_rolling_zscore(range_raw, z_window, minp)),
             "body_z": _clip(_rolling_zscore(body_raw, z_window, minp)),
+            "ret_1_atr": ret_1_atr,
+            "range_atr": range_atr,
+            "body_atr": body_atr,
+            "ret_1_z_short": ret_1_z_short,
+            "ret_15m_z_short": ret_15m_z_short,
+            "range_z_short": range_z_short,
+            "volume_log_z_short": volume_log_z_short,
             "log_close_z": _clip(_rolling_zscore(log_c, z_window, minp)),
+            "log_close_scale": log_close_scale,
             "volume_log_z": _clip(_rolling_zscore(volume_log, z_window, minp)),
+            "volume_log_scale": volume_log_scale,
             "quote_volume_log_z": _clip(_rolling_zscore(np.log1p(np.clip(quote_v, 0.0, None)), z_window, minp)),
+            "quote_volume_log_scale": quote_volume_log_scale,
             "trades_z": _clip(_rolling_zscore(trades, z_window, minp)),
+            "trades_scale": trades_scale,
             "vol_imbalance_z": _clip(_rolling_zscore(vol_imb, z_window, minp)),
+            "vol_imbalance_scale": vol_imbalance_scale,
             "amihud_z": _clip(_rolling_zscore(amihud, z_window, minp)),
+            "amihud_scale": amihud_scale,
             "volume_ratio_z": _clip(_rolling_zscore(volume_ratio, z_window, minp)),
+            "volume_ratio_scale": volume_ratio_scale,
+            "long_short_ratio_z": _clip(_rolling_zscore(long_short_ratio, z_window, minp)),
+            "long_short_ratio_scale": long_short_ratio_scale,
+            "trades_per_volume_z": _clip(_rolling_zscore(trades_per_volume, z_window, minp)),
+            "trades_per_volume_scale": trades_per_volume_scale,
+            "body_range_ratio": body_range_ratio,
+            "vol_imbalance_delta_z": _clip(_rolling_zscore(vol_imbalance_delta, z_window, minp)),
+            "vol_imbalance_delta_scale": vol_imbalance_delta_scale,
+            "volume_impact_z": _clip(_rolling_zscore(volume_impact, z_window, minp)),
+            "volume_impact_scale": volume_impact_scale,
             "close_over_ema_12_z": _clip(_rolling_zscore(pd.Series(close_over_ema_12, index=df_5m.index), z_window, minp)),
+            "close_over_ema_12_scale": close_over_ema_12_scale,
             "close_over_ema_48_z": _clip(_rolling_zscore(pd.Series(close_over_ema_48, index=df_5m.index), z_window, minp)),
+            "close_over_ema_48_scale": close_over_ema_48_scale,
             "ema_12_48_spread_z": _clip(_rolling_zscore(pd.Series(ema_12_48_spread, index=df_5m.index), z_window, minp)),
+            "ema_12_48_spread_scale": ema_12_48_spread_scale,
             "ema_12_slope_z": _clip(_rolling_zscore(ema_12_slope, z_window, minp)),
+            "ema_12_slope_scale": ema_12_slope_scale,
             "ema_48_slope_z": _clip(_rolling_zscore(ema_48_slope, z_window, minp)),
+            "ema_48_slope_scale": ema_48_slope_scale,
             "rsi_14": rsi_14.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0),
             "macd_atr": macd_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0),
             "price_pos_96": pos_96.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0),
             "bb_width_48_z": _clip(_rolling_zscore(bb_width_48, z_window, minp)),
+            "bb_width_48_scale": bb_width_48_scale,
             "bb_pos_48": bb_pos_48.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 2.0),
             "trend_strength_atr": trend_strength_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0),
             "chop_48": chop_48.replace([np.inf, -np.inf], np.nan).fillna(0.0),
@@ -576,19 +790,36 @@ class FeatureTransformer:
             "volume_surge_12": volume_surge_12,
             "up_volume_ratio_12": up_volume_ratio_12,
             "atr_ratio_z": _clip(_rolling_zscore(pd.Series(atr_ratio_arr, index=df_5m.index), z_window, minp)),
+            "atr_ratio_scale": atr_ratio_scale,
             "rv_ratio_z": _clip(_rolling_zscore(pd.Series(rv_ratio_arr, index=df_5m.index), z_window, minp)),
+            "rv_ratio_scale": rv_ratio_scale,
             "dist_to_support_96_atr": _clip(_rolling_zscore(dist_to_support_96_atr, z_window, minp)),
+            "dist_to_support_96_atr_scale": dist_to_support_96_atr_scale,
             "dist_to_resistance_96_atr": _clip(_rolling_zscore(dist_to_resistance_96_atr, z_window, minp)),
+            "dist_to_resistance_96_atr_scale": dist_to_resistance_96_atr_scale,
             "price_jump_z": _clip(price_jump_z),
+            "price_jump_scale": price_jump_scale,
             "ob_depth_imbalance_z": _clip(_rolling_zscore(ob_depth_imbalance, z_window, minp)),
+            "ob_depth_imbalance_scale": ob_depth_imbalance_scale,
             "ob_slope_bid_z": _clip(_rolling_zscore(ob_slope_bid, z_window, minp)),
+            "ob_slope_bid_scale": ob_slope_bid_scale,
             "ob_slope_ask_z": _clip(_rolling_zscore(ob_slope_ask, z_window, minp)),
+            "ob_slope_ask_scale": ob_slope_ask_scale,
             "alts_ret_15m_mean_z": _clip(_rolling_zscore(alts_ret_15m_mean, z_window, minp)),
+            "alts_ret_15m_mean_scale": alts_ret_15m_mean_scale,
             "alts_ret_15m_std_z": _clip(_rolling_zscore(alts_ret_15m_std, z_window, minp)),
+            "alts_ret_15m_std_scale": alts_ret_15m_std_scale,
             "alts_rel_ret_15m_abs_mean_z": _clip(_rolling_zscore(alts_rel_ret_15m_abs_mean, z_window, minp)),
+            "alts_rel_ret_15m_abs_mean_scale": alts_rel_ret_15m_abs_mean_scale,
             "alts_trend_up_ratio": alts_trend_up_ratio.replace([np.inf, -np.inf], np.nan).fillna(0.0),
             "alts_volume_log_mean_z": _clip(_rolling_zscore(alts_volume_log_mean, z_window, minp)),
+            "alts_volume_log_mean_scale": alts_volume_log_mean_scale,
             "alts_trend_spread_std_z": _clip(_rolling_zscore(alts_trend_spread_std, z_window, minp)),
+            "alts_trend_spread_std_scale": alts_trend_spread_std_scale,
+            "dist_to_long_liq_zone_atr": dist_to_long_liq_zone_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0),
+            "dist_to_short_liq_zone_atr": dist_to_short_liq_zone_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0),
+            "liq_sweep_up": liq_sweep_up,
+            "liq_sweep_down": liq_sweep_down,
         }, index=df_5m.index)
         
         target_cols = list(self.OPTIMIZED_TARGET_5M_COLS)
@@ -607,7 +838,9 @@ class FeatureTransformer:
             quote_vs = _get_symbol_col(df_5m, target_symbol=sym, suffix="quote_volume")
             buy_vs = _get_symbol_col(df_5m, target_symbol=sym, suffix="buy_volume")
             sell_vs = _get_symbol_col(df_5m, target_symbol=sym, suffix="sell_volume")
-            
+            trades_s = _get_symbol_col(df_5m, target_symbol=sym, suffix="trades")
+            long_short_ratio_s = _get_symbol_col(df_5m, target_symbol=sym, suffix="long_short_ratio")
+
             log_cs = _safe_log(cs)
             ret1_s = log_cs.diff().fillna(0.0)
             ret15_s = ret1_s.rolling(window=3, min_periods=1).sum()
@@ -666,25 +899,92 @@ class FeatureTransformer:
             
             # ATR ratio
             atr_ratio_s = self._compute_atr_ratio_from_ohlc(cs, hs, ls)
-            
+
             # Trend strength
             macd_s = (ema12_s - ema48_s)
             atr_est_s = atr_ratio_s * np.clip(cs, 1e-12, None)
             atr_est_s = atr_est_s.replace(0.0, np.nan).fillna(1e-8)
             trend_strength_s = (macd_s.abs() / atr_est_s).clip(0.0, 10.0)
             momentum_12_atr_s = ((cs - cs.shift(12)) / atr_est_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+
+            # 部分特徵僅 scale/clip（不做 z），保留短期對比
+            range_raw_s = (hs - ls) / np.clip(cs.shift(1).bfill(), 1e-12, None)
+            ret_1_atr_s = ((cs - cs.shift(1)) / atr_est_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+            range_atr_s = ((hs - ls) / atr_est_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+            body_atr_s = ((cs - os) / atr_est_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+            ret_1_z_short_s = _clip(_rolling_zscore(ret1_s, z_window_short, minp_short))
+            ret_15m_z_short_s = _clip(_rolling_zscore(ret15_s, z_window_short, minp_short))
+            range_z_short_s = _clip(_rolling_zscore(range_raw_s, z_window_short, minp_short))
+            volume_log_z_short_s = _clip(_rolling_zscore(vol_log_s, z_window_short, minp_short))
+
+            # 5m others：rolling z 的 scale/clip 版本
+            ret_15m_scale_s = ((cs - cs.shift(3)) / atr_est_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+            ret_1h_scale_s = ((cs - cs.shift(12)) / atr_est_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+            volume_log_scale_s = vol_log_s.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+            quote_volume_log_scale_s = np.log1p(np.clip(quote_vs, 0.0, None)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+            close_over_ema_12_scale_s = ((cs - ema12_s) / atr_est_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-3.0, 3.0)
+            atr_ratio_scale_s = atr_ratio_s.clip(0.0, 0.03)
+            vol_imbalance_scale_s = vol_imb_s.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+
+            # 推薦 1～5：long_short_ratio、trades_per_volume、body_range_ratio、vol_imbalance_delta、volume_impact（others）
+            body_raw_s = (cs - os) / np.clip(cs.shift(1).bfill(), 1e-12, None)
+            long_short_ratio_scale_s = (long_short_ratio_s - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 2.0)
+            trades_per_volume_s = trades_s / (vs + 1e-12)
+            tpv_ma96_s = trades_per_volume_s.rolling(96, min_periods=20).mean().replace(0.0, np.nan).fillna(1.0)
+            trades_per_volume_scale_s = ((trades_per_volume_s / tpv_ma96_s) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 2.0)
+            body_range_ratio_s = (body_raw_s / (range_raw_s + 1e-12)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+            vol_imbalance_delta_s = vol_imb_s.diff(3).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.5, 0.5)
+            volume_impact_s = np.abs(ret1_s) / (vs + 1e-12)
+            volume_impact_scale_s = volume_impact_s.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 0.001)
+
+            # 近期做多/做空流動性區（與 5m target 同口徑，per symbol）
+            left_swing_s, right_swing_s = 2, 2
+            swing_high_s = (hs.shift(1).rolling(left_swing_s, min_periods=1).max() < hs) & (hs > hs.shift(-1).rolling(right_swing_s, min_periods=1).max())
+            swing_low_s = (ls.shift(1).rolling(left_swing_s, min_periods=1).min() > ls) & (ls < ls.shift(-1).rolling(right_swing_s, min_periods=1).min())
+            recent_swing_high_s = hs.where(swing_high_s).ffill().bfill()
+            recent_swing_low_s = ls.where(swing_low_s).ffill().bfill()
+            dist_to_long_liq_zone_atr_s = ((cs - recent_swing_low_s) / atr_est_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+            dist_to_short_liq_zone_atr_s = ((recent_swing_high_s - cs) / atr_est_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+            N_sweep_s = max(10, z_window // 12)
+            recent_max_h_s = hs.rolling(N_sweep_s, min_periods=5).max()
+            recent_min_l_s = ls.rolling(N_sweep_s, min_periods=5).min()
+            liq_sweep_up_s = ((hs > recent_max_h_s.shift(1)) & (cs < recent_max_h_s.shift(1))).astype(np.float32)
+            liq_sweep_down_s = ((ls < recent_min_l_s.shift(1)) & (cs > recent_min_l_s.shift(1))).astype(np.float32)
             
             sym_feats = pd.DataFrame({
                 f"{sym}_ret_1_z": _clip(_rolling_zscore(ret1_s, z_window, minp)),
                 f"{sym}_ret_15m_z": _clip(_rolling_zscore(ret15_s, z_window, minp)),
+                f"{sym}_ret_15m_scale": ret_15m_scale_s,
                 f"{sym}_ret_1h_z": _clip(_rolling_zscore(ret1h_s, z_window, minp)),
+                f"{sym}_ret_1h_scale": ret_1h_scale_s,
+                f"{sym}_ret_1_atr": ret_1_atr_s,
+                f"{sym}_range_atr": range_atr_s,
+                f"{sym}_body_atr": body_atr_s,
+                f"{sym}_ret_1_z_short": ret_1_z_short_s,
+                f"{sym}_ret_15m_z_short": ret_15m_z_short_s,
+                f"{sym}_range_z_short": range_z_short_s,
+                f"{sym}_volume_log_z_short": volume_log_z_short_s,
                 f"{sym}_volume_log_z": _clip(_rolling_zscore(vol_log_s, z_window, minp)),
+                f"{sym}_volume_log_scale": volume_log_scale_s,
                 f"{sym}_quote_volume_log_z": _clip(_rolling_zscore(np.log1p(np.clip(quote_vs, 0.0, None)), z_window, minp)),
+                f"{sym}_quote_volume_log_scale": quote_volume_log_scale_s,
                 f"{sym}_close_over_ema_12_z": _clip(_rolling_zscore(pd.Series(close_over_ema_12_s, index=df_5m.index), z_window, minp)),
+                f"{sym}_close_over_ema_12_scale": close_over_ema_12_scale_s,
                 f"{sym}_rsi_14": rsi_14_s.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0),
                 f"{sym}_atr_ratio_z": _clip(_rolling_zscore(atr_ratio_s, z_window, minp)),
+                f"{sym}_atr_ratio_scale": atr_ratio_scale_s,
                 f"{sym}_trend_strength_atr": trend_strength_s.replace([np.inf, -np.inf], np.nan).fillna(0.0),
                 f"{sym}_vol_imbalance_z": _clip(_rolling_zscore(vol_imb_s, z_window, minp)),
+                f"{sym}_vol_imbalance_scale": vol_imbalance_scale_s,
+                f"{sym}_long_short_ratio_z": _clip(_rolling_zscore(long_short_ratio_s, z_window, minp)),
+                f"{sym}_long_short_ratio_scale": long_short_ratio_scale_s,
+                f"{sym}_trades_per_volume_z": _clip(_rolling_zscore(trades_per_volume_s, z_window, minp)),
+                f"{sym}_trades_per_volume_scale": trades_per_volume_scale_s,
+                f"{sym}_body_range_ratio": body_range_ratio_s,
+                f"{sym}_vol_imbalance_delta_z": _clip(_rolling_zscore(vol_imbalance_delta_s, z_window, minp)),
+                f"{sym}_vol_imbalance_delta_scale": vol_imbalance_delta_s,
+                f"{sym}_volume_impact_z": _clip(_rolling_zscore(volume_impact_s, z_window, minp)),
+                f"{sym}_volume_impact_scale": volume_impact_scale_s,
                 f"{sym}_price_pos_288": price_pos_288_s,
                 f"{sym}_close_over_sma_288": close_over_sma_288_s,
                 f"{sym}_ema_48_192_spread_raw": ema_48_192_spread_raw_s,
@@ -698,6 +998,10 @@ class FeatureTransformer:
                 f"{sym}_momentum_12_atr": momentum_12_atr_s,
                 f"{sym}_volume_surge_12": volume_surge_12_s,
                 f"{sym}_up_volume_ratio_12": up_volume_ratio_12_s,
+                f"{sym}_dist_to_long_liq_zone_atr": dist_to_long_liq_zone_atr_s.replace([np.inf, -np.inf], np.nan).fillna(0.0),
+                f"{sym}_dist_to_short_liq_zone_atr": dist_to_short_liq_zone_atr_s.replace([np.inf, -np.inf], np.nan).fillna(0.0),
+                f"{sym}_liq_sweep_up": liq_sweep_up_s,
+                f"{sym}_liq_sweep_down": liq_sweep_down_s,
             }, index=df_5m.index)
             
             others_feats_list.append(sym_feats)
@@ -1245,26 +1549,76 @@ class FeatureTransformer:
         day_sin = np.sin(2 * np.pi * day_of_week / 7)
         day_cos = np.cos(2 * np.pi * day_of_week / 7)
         
+        # 近期做多/做空流動性區（1d 尺度，與 5m target 同口徑）
+        left_swing_1d, right_swing_1d = 2, 2
+        swing_high_1d = (high_1d.shift(1).rolling(left_swing_1d, min_periods=1).max() < high_1d) & (high_1d > high_1d.shift(-1).rolling(right_swing_1d, min_periods=1).max())
+        swing_low_1d = (low_1d.shift(1).rolling(left_swing_1d, min_periods=1).min() > low_1d) & (low_1d < low_1d.shift(-1).rolling(right_swing_1d, min_periods=1).min())
+        recent_swing_high_1d = high_1d.where(swing_high_1d).ffill().bfill()
+        recent_swing_low_1d = low_1d.where(swing_low_1d).ffill().bfill()
+        atr_1d_liq = np.maximum(atr_1d_aligned, 1e-12)
+        dist_to_long_liq_zone_atr_1d = ((close_1d - recent_swing_low_1d) / atr_1d_liq).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+        dist_to_short_liq_zone_atr_1d = ((recent_swing_high_1d - close_1d) / atr_1d_liq).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+        N_sweep_1d = max(3, z_window_1d // 10)
+        recent_max_h_1d = high_1d.rolling(N_sweep_1d, min_periods=2).max()
+        recent_min_l_1d = low_1d.rolling(N_sweep_1d, min_periods=2).min()
+        liq_sweep_up_1d = ((high_1d > recent_max_h_1d.shift(1)) & (close_1d < recent_max_h_1d.shift(1))).astype(np.float32)
+        liq_sweep_down_1d = ((low_1d < recent_min_l_1d.shift(1)) & (close_1d > recent_min_l_1d.shift(1))).astype(np.float32)
+
+        # 1d：所有 rolling z 的 scale/clip 版本
+        oi_ma20 = oi_close.rolling(20, min_periods=5).mean().replace(0.0, np.nan).fillna(oi_close)
+        oi_close_scale = ((oi_close / oi_ma20) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 2.0)
+        funding_close_scale = funding_close.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.01, 0.01) * 500.0
+        ls_account_ratio_scale = (ls_account_ratio - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 2.0)
+        ls_position_ratio_scale = (ls_position_ratio - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 2.0)
+        liq_long_log_scale = np.log1p(np.clip(liq_long, 0.0, None)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+        liq_short_log_scale = np.log1p(np.clip(liq_short, 0.0, None)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+        ob_imbalance_scale = ob_imbalance.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+        ret_1d_scale = ret_1d.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.15, 0.15)
+        range_1d_scale = range_1d.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 0.2)
+        close_over_ema_20_scale = close_over_ema_20.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.2, 0.2)
+        ema_20_60_spread_scale = ema_20_60_spread.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.2, 0.2)
+        dist_to_support_1d_atr_scale = dist_to_support_1d_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+        dist_to_resistance_1d_atr_scale = dist_to_resistance_1d_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+        vwap_distance_1d_atr_scale = vwap_distance_1d_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+
         # 构建 Target 特征 DataFrame
         target_feats = pd.DataFrame({
             "oi_close_z": _clip(_rolling_zscore(oi_close, z_window_1d, minp)),
+            "oi_close_scale": oi_close_scale,
             "funding_close_z": _clip(_rolling_zscore(funding_close, z_window_1d, minp)),
+            "funding_close_scale": funding_close_scale,
             "ls_account_ratio_z": _clip(_rolling_zscore(ls_account_ratio, z_window_1d, minp)),
+            "ls_account_ratio_scale": ls_account_ratio_scale,
             "ls_position_ratio_z": _clip(_rolling_zscore(ls_position_ratio, z_window_1d, minp)),
+            "ls_position_ratio_scale": ls_position_ratio_scale,
             "liq_long_log_z": _clip(_rolling_zscore(np.log1p(np.clip(liq_long, 0.0, None)), z_window_1d, minp)),
+            "liq_long_log_scale": liq_long_log_scale,
             "liq_short_log_z": _clip(_rolling_zscore(np.log1p(np.clip(liq_short, 0.0, None)), z_window_1d, minp)),
+            "liq_short_log_scale": liq_short_log_scale,
             "ob_imbalance_z": _clip(_rolling_zscore(ob_imbalance, z_window_1d, minp)),
+            "ob_imbalance_scale": ob_imbalance_scale,
             "ret_1d_z": _clip(_rolling_zscore(ret_1d, z_window_1d, minp)),
+            "ret_1d_scale": ret_1d_scale,
             "range_1d_z": _clip(_rolling_zscore(range_1d, z_window_1d, minp)),
+            "range_1d_scale": range_1d_scale,
             "close_over_ema_20_z": _clip(_rolling_zscore(close_over_ema_20, z_window_1d, minp)),
+            "close_over_ema_20_scale": close_over_ema_20_scale,
             "ema_20_60_spread_z": _clip(_rolling_zscore(ema_20_60_spread, z_window_1d, minp)),
+            "ema_20_60_spread_scale": ema_20_60_spread_scale,
             "dist_to_support_1d_atr": _clip(_rolling_zscore(dist_to_support_1d_atr, z_window_1d, minp)),
+            "dist_to_support_1d_atr_scale": dist_to_support_1d_atr_scale,
             "dist_to_resistance_1d_atr": _clip(_rolling_zscore(dist_to_resistance_1d_atr, z_window_1d, minp)),
+            "dist_to_resistance_1d_atr_scale": dist_to_resistance_1d_atr_scale,
             "vwap_distance_1d_atr": _clip(_rolling_zscore(vwap_distance_1d_atr, z_window_1d, minp)),
+            "vwap_distance_1d_atr_scale": vwap_distance_1d_atr_scale,
             "hour_sin": hour_sin.values if hasattr(hour_sin, 'values') else hour_sin,
             "hour_cos": hour_cos.values if hasattr(hour_cos, 'values') else hour_cos,
             "day_of_week_sin": day_sin.values if hasattr(day_sin, 'values') else day_sin,
             "day_of_week_cos": day_cos.values if hasattr(day_cos, 'values') else day_cos,
+            "dist_to_long_liq_zone_atr": dist_to_long_liq_zone_atr_1d.replace([np.inf, -np.inf], np.nan).fillna(0.0),
+            "dist_to_short_liq_zone_atr": dist_to_short_liq_zone_atr_1d.replace([np.inf, -np.inf], np.nan).fillna(0.0),
+            "liq_sweep_up": liq_sweep_up_1d,
+            "liq_sweep_down": liq_sweep_down_1d,
         }, index=df_1d.index)
         
         target_cols = list(self.TARGET_1D_COLS)
@@ -1276,6 +1630,8 @@ class FeatureTransformer:
         
         for sym in alt_symbols:
             cs_1d = _get_symbol_col(df_1d, target_symbol=sym, suffix="close")
+            high_1d_s = _get_symbol_col(df_1d, target_symbol=sym, suffix="high")
+            low_1d_s = _get_symbol_col(df_1d, target_symbol=sym, suffix="low")
             log_cs_1d = _safe_log(cs_1d)
             ret_1d_s = log_cs_1d.diff().fillna(0.0)
             ema_20_s = self._ema(cs_1d, span=20)
@@ -1287,31 +1643,79 @@ class FeatureTransformer:
             bids_usd_s = _get_col(df_1d, f"{sym}_ask_bids_bids_usd")
             asks_usd_s = _get_col(df_1d, f"{sym}_ask_bids_asks_usd")
             ob_imbalance_s = (bids_usd_s - asks_usd_s) / (bids_usd_s + asks_usd_s + 1e-12)
+
+            # 1d others：rolling z 的 scale/clip 版本
+            oi_close_scale_s = ((oi_close_s / oi_close_s.rolling(20, min_periods=5).mean().replace(0.0, np.nan).fillna(oi_close_s)) - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 2.0)
+            funding_close_scale_s = funding_close_s.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.01, 0.01) * 500.0
+            ls_account_ratio_scale_s = (ls_account_ratio_s - 1.0).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-2.0, 2.0)
+            ob_imbalance_scale_s = ob_imbalance_s.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
+            ret_1d_scale_s = ret_1d_s.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.15, 0.15)
+            close_over_ema_20_scale_s = close_over_ema_20_s.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.2, 0.2)
+
+            # 1d 流動性區（per symbol）：ATR 用 1d TR 滾動平均
+            prev_c_1d_s = cs_1d.shift(1)
+            tr_1d_s = pd.concat([
+                (high_1d_s - low_1d_s),
+                (high_1d_s - prev_c_1d_s).abs(),
+                (low_1d_s - prev_c_1d_s).abs(),
+            ], axis=1).max(axis=1).fillna(0.0)
+            atr_1d_s = tr_1d_s.rolling(14, min_periods=3).mean().replace(0.0, np.nan).fillna(cs_1d * 0.01)
+            left_swing_1d_s, right_swing_1d_s = 2, 2
+            swing_high_1d_s = (high_1d_s.shift(1).rolling(left_swing_1d_s, min_periods=1).max() < high_1d_s) & (high_1d_s > high_1d_s.shift(-1).rolling(right_swing_1d_s, min_periods=1).max())
+            swing_low_1d_s = (low_1d_s.shift(1).rolling(left_swing_1d_s, min_periods=1).min() > low_1d_s) & (low_1d_s < low_1d_s.shift(-1).rolling(right_swing_1d_s, min_periods=1).min())
+            recent_swing_high_1d_s = high_1d_s.where(swing_high_1d_s).ffill().bfill()
+            recent_swing_low_1d_s = low_1d_s.where(swing_low_1d_s).ffill().bfill()
+            atr_1d_liq_s = np.maximum(atr_1d_s, 1e-12)
+            dist_to_long_liq_zone_atr_1d_s = ((cs_1d - recent_swing_low_1d_s) / atr_1d_liq_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+            dist_to_short_liq_zone_atr_1d_s = ((recent_swing_high_1d_s - cs_1d) / atr_1d_liq_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+            N_sweep_1d_s = max(3, z_window_1d // 10)
+            recent_max_h_1d_s = high_1d_s.rolling(N_sweep_1d_s, min_periods=2).max()
+            recent_min_l_1d_s = low_1d_s.rolling(N_sweep_1d_s, min_periods=2).min()
+            liq_sweep_up_1d_s = ((high_1d_s > recent_max_h_1d_s.shift(1)) & (cs_1d < recent_max_h_1d_s.shift(1))).astype(np.float32)
+            liq_sweep_down_1d_s = ((low_1d_s < recent_min_l_1d_s.shift(1)) & (cs_1d > recent_min_l_1d_s.shift(1))).astype(np.float32)
             
             sym_feats = pd.DataFrame({
                 f"{sym}_oi_close_z": _clip(_rolling_zscore(oi_close_s, z_window_1d, minp)),
+                f"{sym}_oi_close_scale": oi_close_scale_s,
                 f"{sym}_funding_close_z": _clip(_rolling_zscore(funding_close_s, z_window_1d, minp)),
+                f"{sym}_funding_close_scale": funding_close_scale_s,
                 f"{sym}_ls_account_ratio_z": _clip(_rolling_zscore(ls_account_ratio_s, z_window_1d, minp)),
+                f"{sym}_ls_account_ratio_scale": ls_account_ratio_scale_s,
                 f"{sym}_ob_imbalance_z": _clip(_rolling_zscore(ob_imbalance_s, z_window_1d, minp)),
+                f"{sym}_ob_imbalance_scale": ob_imbalance_scale_s,
                 f"{sym}_ret_1d_z": _clip(_rolling_zscore(ret_1d_s, z_window_1d, minp)),
+                f"{sym}_ret_1d_scale": ret_1d_scale_s,
                 f"{sym}_close_over_ema_20_z": _clip(_rolling_zscore(close_over_ema_20_s, z_window_1d, minp)),
+                f"{sym}_close_over_ema_20_scale": close_over_ema_20_scale_s,
+                f"{sym}_dist_to_long_liq_zone_atr": dist_to_long_liq_zone_atr_1d_s.replace([np.inf, -np.inf], np.nan).fillna(0.0),
+                f"{sym}_dist_to_short_liq_zone_atr": dist_to_short_liq_zone_atr_1d_s.replace([np.inf, -np.inf], np.nan).fillna(0.0),
+                f"{sym}_liq_sweep_up": liq_sweep_up_1d_s,
+                f"{sym}_liq_sweep_down": liq_sweep_down_1d_s,
             }, index=df_1d.index)
             
             others_feats_list.append(sym_feats)
             for col in self.OTHERS_1D_COLS_PER_SYMBOL:
                 others_cols.append(f"{sym}_{col}")
         
-        # Macro 指标
+        # Macro 指标（z + scale/clip）
         fear_greed = _get_col(df_1d, "fear_greed_fear_greed_index")
         altcoin_season = _get_col(df_1d, "altcoin_season_altcoin_index")
         bmo_value = _get_col(df_1d, "bitcoin_macro_oscillator_bmo_value")
         sopr_value = _get_col(df_1d, "bitcoin_sth_sopr_lth_sopr")
-        
+        fear_greed_scale = fear_greed.replace([np.inf, -np.inf], np.nan).fillna(50.0).clip(0.0, 100.0) / 50.0 - 1.0  # ~[-1, 1]
+        altcoin_season_scale = altcoin_season.replace([np.inf, -np.inf], np.nan).fillna(50.0).clip(0.0, 100.0) / 50.0 - 1.0
+        bmo_scale = bmo_value.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
+        sopr_scale = sopr_value.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.2, 0.2) * 25.0  # ~[-5, 5]
+
         macro_feats = pd.DataFrame({
             "fear_greed_z": _clip(_rolling_zscore(fear_greed, z_window_1d, minp)),
+            "fear_greed_scale": fear_greed_scale,
             "altcoin_season_z": _clip(_rolling_zscore(altcoin_season, z_window_1d, minp)),
+            "altcoin_season_scale": altcoin_season_scale,
             "bmo_z": _clip(_rolling_zscore(bmo_value, z_window_1d, minp)),
+            "bmo_scale": bmo_scale,
             "sopr_z": _clip(_rolling_zscore(sopr_value, z_window_1d, minp)),
+            "sopr_scale": sopr_scale,
         }, index=df_1d.index)
         
         others_feats_list.append(macro_feats)
