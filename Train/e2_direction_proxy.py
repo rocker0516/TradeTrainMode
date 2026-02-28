@@ -460,6 +460,48 @@ def fit_predict_binary(
     return pred, auc, {"accuracy": acc, "precision": prec, "recall": rec}
 
 
+def fit_predict_binary_return_proba(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    use_lightgbm: bool,
+    random_state: int = RANDOM_STATE,
+) -> Tuple[np.ndarray, float, Dict[str, float], np.ndarray]:
+    """訓練二分類並回傳 test 預測、AUC、輔助指標與 test 預測機率（供 Regime 分桶用）。"""
+    if use_lightgbm:
+        df_train = _to_lgb_df(X_train)
+        df_test = _to_lgb_df(X_test)
+        model = lgb.LGBMClassifier(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.05,
+            reg_alpha=0.1,
+            reg_lambda=0.1,
+            random_state=random_state,
+            verbosity=-1,
+            n_jobs=1,
+        )
+        model.fit(df_train, y_train)
+        proba = model.predict_proba(df_test)[:, 1]
+        pred = model.predict(df_test)
+    else:
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        model = LogisticRegression(
+            penalty="l2", max_iter=3000, random_state=random_state, solver="lbfgs"
+        )
+        model.fit(X_train_scaled, y_train)
+        proba = model.predict_proba(X_test_scaled)[:, 1]
+        pred = model.predict(X_test_scaled)
+
+    auc = roc_auc_score(y_test, proba) if np.unique(y_test).size > 1 else 0.5
+    acc = accuracy_score(y_test, pred)
+    prec, rec, _, _ = precision_recall_fscore_support(y_test, pred, average="binary", zero_division=0)
+    return pred, auc, {"accuracy": acc, "precision": prec, "recall": rec}, proba
+
+
 def fit_predict_3class(
     X_train: np.ndarray,
     y_train: np.ndarray,
