@@ -8,6 +8,7 @@ E2 多 window_size 版本：對多種 (window_size_5m, window_size_1d) × 四路
 from __future__ import annotations
 
 import argparse
+import gc
 import os
 import sys
 from itertools import product
@@ -67,6 +68,9 @@ def run_one_combination(
     )
     X_list = [obs_to_summary_features_one_cnn(o, cnn_key) for o in obs_list]
     X = np.stack(X_list, axis=0)
+    del X_list
+    del obs_list
+    gc.collect()
     n_features_market = X.shape[1]
     if n_features_market == 0:
         nan = float("nan")
@@ -299,11 +303,29 @@ def main() -> None:
         help="Run all 4 CNNs x 2 tasks (overrides --task)",
     )
     parser.add_argument("--k", type=int, default=HORIZON_K)
-    parser.add_argument("--max_steps", type=int, default=None)
+    parser.add_argument(
+        "--max_steps",
+        type=int,
+        default=None,
+        help="每組合最多收集步數，可降低記憶體；None 表示不限制",
+    )
     parser.add_argument("--out_dir", type=str, default="logs")
     parser.add_argument("--out_report", type=str, default="e2_by_window_report.txt")
+    parser.add_argument(
+        "--feature_mode",
+        type=str,
+        default="all",
+        choices=("all", "market_only", "account_s_only", "market_plus_account_s", "market_plus_account_full"),
+        help="Feature mode (by_window 僅用於報告；單路摘要不區分 market/account)",
+    )
+    parser.add_argument(
+        "--use_1d",
+        action="store_true",
+        help="指定時跑全部四路 CNN（含 1d）；未指定僅跑 5m_target, 5m_others",
+    )
     args = parser.parse_args()
 
+    cnn_keys = list(CNN_KEYS) if args.use_1d else [k for k in CNN_KEYS if k.startswith("5m_")]
     window_sizes_5m = [int(x.strip()) for x in args.window_sizes.split(",")]
     window_sizes_1d = [int(x.strip()) for x in args.window_sizes_1d.split(",")]
     window_combos = list(product(window_sizes_5m, window_sizes_1d))
@@ -313,7 +335,7 @@ def main() -> None:
     else:
         tasks = [args.task] if args.task != "both" else ["binary", "3class"]
 
-    run_combos = list(product(window_combos, CNN_KEYS, tasks))
+    run_combos = list(product(window_combos, cnn_keys, tasks))
     os.makedirs(args.out_dir, exist_ok=True)
     report_path = os.path.join(args.out_dir, args.out_report)
 
@@ -330,6 +352,7 @@ def main() -> None:
                 max_steps=args.max_steps,
             )
             results.append(r)
+            gc.collect()
             if task == "binary":
                 mkt = r["auc_market_shuf"] if r["auc_market_shuf"] is not None else float("nan")
                 print(f"  n={r['n_samples']}, feat={r['n_feat']}, AUC_LGB={r['auc_lgb']:.4f}, "
@@ -352,10 +375,10 @@ def main() -> None:
         "E2 Direction Proxy by (window_size_5m, window_size_1d, cnn_key, task)",
         "=" * 100,
         f"window_sizes_5m: {window_sizes_5m}, window_sizes_1d: {window_sizes_1d}",
-        f"tasks: {tasks}, cnn_keys: {list(CNN_KEYS)}, k={args.k}, max_steps={args.max_steps}",
+        f"tasks: {tasks}, cnn_keys: {cnn_keys}, feature_mode={args.feature_mode}, use_1d={args.use_1d}, k={args.k}, max_steps={args.max_steps}",
         "",
     ]
-    for (cnn_key, t) in product(CNN_KEYS, tasks):
+    for (cnn_key, t) in product(cnn_keys, tasks):
         subset = [r for r in results if r["cnn_key"] == cnn_key and r["task"] == t]
         if not subset:
             continue
@@ -391,7 +414,7 @@ def main() -> None:
         f.write(report)
 
     # 多張圖：每張對應一個 (cnn_key, task)
-    for (cnn_key, t) in product(CNN_KEYS, tasks):
+    for (cnn_key, t) in product(cnn_keys, tasks):
         subset = [r for r in results if r["cnn_key"] == cnn_key and r["task"] == t]
         if not subset:
             continue

@@ -58,6 +58,16 @@ SUMMARY_STATS_TEMPORAL: Tuple[str, ...] = (
     "full_max",
 )
 STATS_PER_CHANNEL_TEMPORAL = len(SUMMARY_STATS_TEMPORAL)  # 7
+# 三段時序彙總：early / mid / late，每段 mean+std → 6*F
+SUMMARY_STATS_THREE_SEGMENT: Tuple[str, ...] = (
+    "early_mean",
+    "early_std",
+    "mid_mean",
+    "mid_std",
+    "late_mean",
+    "late_std",
+)
+STATS_PER_CHANNEL_THREE_SEGMENT = len(SUMMARY_STATS_THREE_SEGMENT)  # 6
 # 舊版單一視窗彙總（相容用）
 SUMMARY_STATS_FIVE: Tuple[str, ...] = ("last", "mean", "std", "min", "max")
 STATS_PER_CHANNEL_FIVE = 5
@@ -171,6 +181,39 @@ def _seq_to_temporal_stats(
     )
 
 
+def _seq_to_three_segment_stats(seq: np.ndarray) -> np.ndarray:
+    """
+    三段時序彙總：將視窗均分為 early / mid / late，每段取 mean 與 std，回傳 (6*F,) float64。
+    用於評估「視窗內哪一時段」對預測較重要。
+    """
+    seq = np.asarray(seq, dtype=np.float64)
+    T, F = seq.shape
+    if T < 3:
+        seg = seq
+        one_mean = np.mean(seg, axis=0)
+        one_std = np.std(seg, axis=0)
+        np.place(one_std, one_std <= 0, 1e-12)
+        return np.concatenate([one_mean, one_std] * 3)
+    n1 = T // 3
+    n2 = (T - n1) // 2
+    n3 = T - n1 - n2
+    early = seq[:n1]
+    mid = seq[n1 : n1 + n2]
+    late = seq[n1 + n2 :]
+    early_mean = np.mean(early, axis=0)
+    early_std = np.std(early, axis=0)
+    np.place(early_std, early_std <= 0, 1e-12)
+    mid_mean = np.mean(mid, axis=0)
+    mid_std = np.std(mid, axis=0)
+    np.place(mid_std, mid_std <= 0, 1e-12)
+    late_mean = np.mean(late, axis=0)
+    late_std = np.std(late, axis=0)
+    np.place(late_std, late_std <= 0, 1e-12)
+    return np.concatenate(
+        [early_mean, early_std, mid_mean, mid_std, late_mean, late_std]
+    )
+
+
 def obs_to_summary_features(
     obs: Dict[str, Any],
     use_1d: bool = False,
@@ -238,11 +281,11 @@ def obs_to_summary_features_one_cnn(
     Args:
         obs: 單步觀察 dict
         cnn_key: 其一 CNN_KEYS（5m_target, 5m_others, 1d_target, 1d_others）
-        summary_mode: "temporal"（近期+全窗，7*F）或 "five_stats"（last/mean/std/min/max，5*F）
+        summary_mode: "temporal"（近期+全窗，7*F）、"three_segment"（早/中/晚，6*F）或 "five_stats"（5*F）
         recent_bars: summary_mode=="temporal" 時近期視窗 bar 數
 
     Returns:
-        一維 float32 向量，長度 7*F（temporal）或 5*F（five_stats）。
+        一維 float32 向量，長度依 summary_mode：7*F / 6*F / 5*F。
     """
     if cnn_key not in OBS_KEY_BY_CNN:
         raise ValueError(f"cnn_key must be one of {CNN_KEYS}, got {cnn_key!r}")
@@ -255,9 +298,13 @@ def obs_to_summary_features_one_cnn(
     seq = np.asarray(seq, dtype=np.float64)
     if summary_mode == "temporal":
         return _seq_to_temporal_stats(seq, recent_bars=recent_bars).astype(np.float32)
+    if summary_mode == "three_segment":
+        return _seq_to_three_segment_stats(seq).astype(np.float32)
     if summary_mode == "five_stats":
         return _seq_to_five_stats(seq).astype(np.float32)
-    raise ValueError(f"summary_mode must be 'temporal' or 'five_stats', got {summary_mode!r}")
+    raise ValueError(
+        f"summary_mode must be 'temporal', 'three_segment' or 'five_stats', got {summary_mode!r}"
+    )
 
 
 def train_valid_test_split_time_ordered(
@@ -346,11 +393,17 @@ def collect_obs_and_indices(
         steps += 1
 
     if return_cnn_cols:
+        # 使用 observer 的有效欄位索引，使 cnn_cols 與 obs 實際 channel 數一致（Config 可能只納入部分欄位）
+        obs = env.observer
+        cols_5m_t = env.market_data.cols_5m_target
+        cols_5m_o = env.market_data.cols_5m_others
+        cols_1d_t = env.market_data.cols_1d_target
+        cols_1d_o = env.market_data.cols_1d_others
         cnn_cols = {
-            "5m_target": tuple(env.market_data.cols_5m_target),
-            "5m_others": tuple(env.market_data.cols_5m_others),
-            "1d_target": tuple(env.market_data.cols_1d_target),
-            "1d_others": tuple(env.market_data.cols_1d_others),
+            "5m_target": tuple(cols_5m_t[i] for i in obs._obs_price_seq_target_idx),
+            "5m_others": tuple(cols_5m_o[i] for i in obs._obs_price_seq_others_idx),
+            "1d_target": tuple(cols_1d_t[i] for i in obs._obs_price_seq_1d_target_idx),
+            "1d_others": tuple(cols_1d_o[i] for i in obs._obs_price_seq_1d_others_idx),
         }
     env.close()
     valid_indices = np.array(step_indices, dtype=np.int64)

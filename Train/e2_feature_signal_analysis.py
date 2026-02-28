@@ -22,8 +22,12 @@ from Train.e2_direction_proxy import (
     DELTA_COEF,
     HORIZON_K,
     RANDOM_STATE,
-    SUMMARY_STATS_TEMPORAL,
+    STATS_PER_CHANNEL_FIVE,
     STATS_PER_CHANNEL_TEMPORAL,
+    STATS_PER_CHANNEL_THREE_SEGMENT,
+    SUMMARY_STATS_FIVE,
+    SUMMARY_STATS_TEMPORAL,
+    SUMMARY_STATS_THREE_SEGMENT,
     TEST_RATIO,
     TRAIN_RATIO,
     VALID_RATIO,
@@ -51,6 +55,126 @@ def get_summary_feature_names(
         for s in stats:
             names.append(f"{c}_{s}")
     return names
+
+
+def temporal_importance_breakdown(
+    feature_names: List[str],
+    importance: np.ndarray,
+    summary_mode: str,
+) -> pd.DataFrame:
+    """
+    依特徵名中的時段標記彙總 importance，得到「時間維度」重要性。
+    temporal: 名稱含 _recent 或 _full 者分別加總
+    three_segment: 名稱含 _early、_mid、_late 者分別加總
+    five_stats: single_window
+    """
+    df = pd.DataFrame({"feature": feature_names, "importance": importance})
+    if summary_mode == "temporal":
+        # 特徵名為 {channel}_{stat}，stat 為 recent_last, full_mean 等
+        def _temporal_scale(name: str) -> str:
+            if "_recent" in name:
+                return "recent"
+            if "_full" in name:
+                return "full"
+            return "other"
+        df["time_scale"] = df["feature"].map(_temporal_scale)
+    elif summary_mode == "three_segment":
+        def _segment_scale(name: str) -> str:
+            if "_early" in name:
+                return "early"
+            if "_mid" in name:
+                return "mid"
+            if "_late" in name:
+                return "late"
+            return "other"
+        df["time_scale"] = df["feature"].map(_segment_scale)
+    else:
+        total = float(np.sum(importance))
+        return pd.DataFrame([{"time_scale": "single_window", "importance_sum": total}])
+    out = (
+        df.groupby("time_scale", as_index=False)["importance"]
+        .sum()
+        .rename(columns={"importance": "importance_sum"})
+    )
+    return out
+
+
+def run_interaction_importance(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    task: str,
+    feature_names: List[str],
+    top_n: int = 15,
+) -> pd.DataFrame:
+    """
+    取 importance 前 top_n 個特徵，建 pairwise 乘積交互項，再訓 LightGBM，
+    回傳交互項的 importance 表（feat_a, feat_b, importance）。
+    """
+    from sklearn.preprocessing import LabelEncoder
+    n = len(feature_names)
+    if n < 2 or top_n < 2:
+        return pd.DataFrame(columns=["feat_a", "feat_b", "importance"])
+    # 先跑一次得到排序後的前 top_n 名索引（用全特徵 importance 排序）
+    model0 = lgb.LGBMClassifier(
+        n_estimators=200,
+        max_depth=6,
+        learning_rate=0.05,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=RANDOM_STATE,
+        verbosity=-1,
+        n_jobs=1,
+    )
+    df_train = pd.DataFrame(X_train, columns=feature_names)
+    if task == "3class":
+        le = LabelEncoder()
+        y_train_enc = le.fit_transform(y_train)
+        model0.fit(df_train, y_train_enc)
+    else:
+        model0.fit(df_train, y_train)
+    imp0 = model0.feature_importances_
+    order = np.argsort(-imp0)[:top_n]
+    # 建交互特徵：X_i * X_j for i < j in order
+    pairs: List[Tuple[int, int]] = []
+    for i in range(len(order)):
+        for j in range(i + 1, len(order)):
+            pairs.append((int(order[i]), int(order[j])))
+    X_tr_ia = np.column_stack(
+        [X_train[:, i] * X_train[:, j] for i, j in pairs]
+    )
+    X_te_ia = np.column_stack(
+        [X_test[:, i] * X_test[:, j] for i, j in pairs]
+    )
+    ia_names = [f"ia__{feature_names[i]}__{feature_names[j]}" for i, j in pairs]
+    X_tr_full = np.hstack([X_train, X_tr_ia])
+    X_te_full = np.hstack([X_test, X_te_ia])
+    all_names = list(feature_names) + ia_names
+    model_ia = lgb.LGBMClassifier(
+        n_estimators=200,
+        max_depth=6,
+        learning_rate=0.05,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=RANDOM_STATE,
+        verbosity=-1,
+        n_jobs=1,
+    )
+    df_tr = pd.DataFrame(X_tr_full, columns=all_names)
+    if task == "3class":
+        model_ia.fit(df_tr, y_train_enc)
+    else:
+        model_ia.fit(df_tr, y_train)
+    imp_full = model_ia.feature_importances_
+    n_orig = len(feature_names)
+    ia_imp = imp_full[n_orig:]
+    rows = [
+        {"feat_a": feature_names[i], "feat_b": feature_names[j], "importance": float(ia_imp[k])}
+        for k, (i, j) in enumerate(pairs)
+    ]
+    df_ia = pd.DataFrame(rows).sort_values("importance", ascending=False)
+    return df_ia
 
 
 def run_importance(
@@ -139,8 +263,25 @@ def main() -> None:
     parser.add_argument("--k", type=int, default=HORIZON_K)
     parser.add_argument("--max_steps", type=int, default=None)
     parser.add_argument("--task", type=str, choices=("binary", "3class"), default="binary")
+    parser.add_argument(
+        "--summary_mode",
+        type=str,
+        choices=("temporal", "three_segment", "five_stats"),
+        default="temporal",
+        help="temporal=近期+全窗(7*F), three_segment=早/中/晚(6*F), five_stats=5*F",
+    )
     parser.add_argument("--out_dir", type=str, default="logs")
     args = parser.parse_args()
+
+    if args.summary_mode == "temporal":
+        stats_tuple = SUMMARY_STATS_TEMPORAL
+        stats_per_channel = STATS_PER_CHANNEL_TEMPORAL
+    elif args.summary_mode == "three_segment":
+        stats_tuple = SUMMARY_STATS_THREE_SEGMENT
+        stats_per_channel = STATS_PER_CHANNEL_THREE_SEGMENT
+    else:
+        stats_tuple = SUMMARY_STATS_FIVE
+        stats_per_channel = STATS_PER_CHANNEL_FIVE
 
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -170,15 +311,18 @@ def main() -> None:
 
     for cnn_key in CNN_KEYS:
         print(f"--- CNN: {cnn_key} ---")
-        X_list = [obs_to_summary_features_one_cnn(o, cnn_key) for o in obs_list]
+        X_list = [
+            obs_to_summary_features_one_cnn(o, cnn_key, summary_mode=args.summary_mode)
+            for o in obs_list
+        ]
         X = np.stack(X_list, axis=0)
-        F = X.shape[1] // STATS_PER_CHANNEL_TEMPORAL
+        F = X.shape[1] // stats_per_channel
         if F == 0:
             print(f"  Skip (F=0).")
             continue
         channel_names = list(cnn_cols[cnn_key])
         assert len(channel_names) == F, f"cnn_cols[{cnn_key!r}] len {len(channel_names)} != F {F}"
-        feature_names = get_summary_feature_names(channel_names)
+        feature_names = get_summary_feature_names(channel_names, stats=stats_tuple)
         X_train, X_test = X[train_idx], X[test_idx]
 
         # ---------- (1) LightGBM feature importance ----------
@@ -198,13 +342,37 @@ def main() -> None:
         df_imp.to_csv(csv_imp, index=False)
         print(f"  Saved {csv_imp}")
 
+        # ---------- (1b) 時間維度彙總：依時段前綴加總 importance ----------
+        df_temporal = temporal_importance_breakdown(
+            feature_names, imp, args.summary_mode
+        )
+        csv_temporal = os.path.join(
+            args.out_dir, f"e2_temporal_importance_{cnn_key}_{args.task}.csv"
+        )
+        df_temporal.to_csv(csv_temporal, index=False)
+        print(f"  Saved {csv_temporal}")
+
+        # ---------- (1c) 交互項重要性：top 15 兩兩乘積再訓，輸出交互 importance ----------
+        y_train_task = y_train_bin if args.task == "binary" else y_train_3
+        y_test_task = y_test_bin if args.task == "binary" else y_test_3
+        df_ia = run_interaction_importance(
+            X_train, y_train_task, X_test, y_test_task,
+            args.task, feature_names, top_n=15,
+        )
+        csv_ia = os.path.join(
+            args.out_dir, f"e2_interaction_importance_{cnn_key}_{args.task}.csv"
+        )
+        df_ia.to_csv(csv_ia, index=False)
+        print(f"  Saved {csv_ia} (top {len(df_ia)} interactions)")
+
         top_n = min(60, len(df_imp))
         plot_df = df_imp.head(top_n)
         plot_imp.append((cnn_key, plot_df, top_n))
 
         # ---------- (2) Per-channel univariate metric ----------
         ch_names, ch_metrics = run_per_channel(
-            X, y_binary, y_3class, train_idx, test_idx, args.task, F, channel_names
+            X, y_binary, y_3class, train_idx, test_idx, args.task, F, channel_names,
+            stats_per_channel=stats_per_channel,
         )
         df_ch = pd.DataFrame({
             "channel": ch_names,
