@@ -11,10 +11,46 @@ import argparse
 import gc
 import os
 import sys
+import time
+from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import product
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+try:
+    from tqdm import tqdm
+    _TQDM_AVAILABLE = True
+except ImportError:
+    _TQDM_AVAILABLE = False
+
+    class _SimpleProgress:
+        """無 tqdm 時：顯示 進度 X/Y (Z%) 與已用/預估時間。"""
+
+        def __init__(self, total: int, desc: str = "E2"):
+            self.total = total
+            self.desc = desc
+            self.done = 0
+            self.start = time.perf_counter()
+
+        def update(self, n: int = 1) -> None:
+            self.done += n
+            elapsed = time.perf_counter() - self.start
+            pct = 100.0 * self.done / self.total if self.total else 0
+            eta_min = (elapsed / self.done * (self.total - self.done) / 60) if self.done else 0
+            print(
+                f"\r>>> {self.desc}: {self.done}/{self.total} ({pct:.0f}%)  "
+                f"已用 {elapsed / 60:.1f} 分  預估剩餘 {eta_min:.1f} 分  ",
+                end="",
+                flush=True,
+            )
+
+        def set_postfix_str(self, s: str) -> None:
+            pass
+
+        def close(self) -> None:
+            print()
 
 # 專案根目錄加入 path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,15 +58,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 從單一 window 版本複用邏輯
 from Train.e2_direction_proxy import (
     CNN_KEYS,
-    DELTA_COEF,
     HORIZON_K,
+    KEEP_RATE_DEFAULT,
     RANDOM_STATE,
     TEST_RATIO,
     TRAIN_RATIO,
     VALID_RATIO,
-    build_labels,
-    collect_obs_and_indices,
-    obs_to_summary_features_one_cnn,
+    build_labels_binary_quantile,
+    build_labels_3class_quantile,
+    collect_obs_and_features_one_cnn,
     run_sanity_label_shuffle,
     run_sanity_market_shuffle,
     train_valid_test_split_time_ordered,
@@ -60,20 +96,18 @@ def _compute_keep_rate(
     k: int = KEEP_RATE_HORIZON_K,
     delta: float = KEEP_RATE_DELTA,
 ) -> float:
-    """keep_rate = mean(|r_{t,k}| > delta * atr_ratio[t])，r_{t,k} = log(close[t+k]/close[t])。"""
-    keeps = []
-    for t in valid_indices:
-        if t + k >= len(close_arr):
-            continue
-        close_t = close_arr[t]
-        close_tk = close_arr[t + k]
-        if close_t <= 0:
-            log_ret = 0.0
-        else:
-            log_ret = np.log(close_tk / close_t)
-        thresh = delta * float(atr_ratio_arr[t])
-        keeps.append(np.abs(log_ret) > thresh)
-    return float(np.mean(keeps)) if keeps else float("nan")
+    """keep_rate = mean(|r_{t,k}| > delta * atr_ratio[t])，r_{t,k} = log(close[t+k]/close[t])。向量化實作。"""
+    n = len(close_arr)
+    mask = (valid_indices >= 0) & (valid_indices + k < n)
+    t_valid = valid_indices[mask]
+    if t_valid.size == 0:
+        return float("nan")
+    close_t = close_arr[t_valid]
+    close_tk = close_arr[t_valid + k]
+    log_ret = np.where(close_t <= 0, 0.0, np.log(close_tk / close_t))
+    thresh = delta * atr_ratio_arr[t_valid]
+    keeps = np.abs(log_ret) > thresh
+    return float(np.mean(keeps))
 
 
 def _keep_rate_judge(keep_rate: float) -> str:
@@ -143,6 +177,15 @@ def _regime_auc_per_bucket(
     return auc_low, auc_mid, auc_high
 
 
+def _run_one_combo(pack: tuple) -> tuple:
+    """ProcessPoolExecutor 用：可 pickle 的模組級函式。pack = (idx, kwargs)。"""
+    idx, kwargs = pack
+    try:
+        return (idx, run_one_combination(**kwargs))
+    except Exception as e:
+        return (idx, {"_error": str(e), **{k: v for k, v in kwargs.items() if k != "use_gpu"}})
+
+
 def run_one_combination(
     window_size_5m: int,
     window_size_1d: int,
@@ -151,33 +194,25 @@ def run_one_combination(
     k: int = HORIZON_K,
     max_steps: Optional[int] = None,
     random_state: Optional[int] = None,
-    delta_coef: Optional[float] = None,
     return_regime_data: bool = False,
+    use_gpu: bool = False,
+    keep_rate: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     對單一 (window_size_5m, window_size_1d, cnn_key, task) 跑完整 E2 pipeline（單路 CNN 摘要特徵）。
-    task: "binary" | "3class"
-    cnn_key: 其一 CNN_KEYS（5m_target, 5m_others, 1d_target, 1d_others）
-    return_regime_data: 若 True 且 task==binary，out 內含 "regime_data"（atr_ratio_test, y_test_bin, proba_test）。
+    二分類與三分類皆用分位數門檻（定保留率 keep_rate）；不依賴 atr_ratio。
     """
+    device = "gpu" if use_gpu else "cpu"
     rs = RANDOM_STATE if random_state is None else random_state
-    dc = DELTA_COEF if delta_coef is None else delta_coef
-    obs_list, valid_indices, close_arr, atr_ratio_arr = collect_obs_and_indices(
+    keep_rate_val = KEEP_RATE_DEFAULT if keep_rate is None else keep_rate
+    valid_indices, X, close_arr, atr_ratio_arr = collect_obs_and_features_one_cnn(
         window_size=window_size_5m,
         window_size_1d=window_size_1d,
         horizon_k=k,
         max_steps=max_steps,
+        cnn_key=cnn_key,
     )
     n_valid = len(valid_indices)
-    keep_rate = _compute_keep_rate(close_arr, atr_ratio_arr, valid_indices, k=KEEP_RATE_HORIZON_K, delta=KEEP_RATE_DELTA)
-    y_binary, y_3class = build_labels(
-        close_arr, atr_ratio_arr, valid_indices, k=k, delta_coef=dc
-    )
-    X_list = [obs_to_summary_features_one_cnn(o, cnn_key) for o in obs_list]
-    X = np.stack(X_list, axis=0)
-    del X_list
-    del obs_list
-    gc.collect()
     n_features_market = X.shape[1]
     if n_features_market == 0:
         nan = float("nan")
@@ -189,8 +224,8 @@ def run_one_combination(
             "n_samples": n_valid,
             "n_feat": 0,
             "n_feat_market": 0,
-            "keep_rate": keep_rate,
-            "keep_rate_judge": _keep_rate_judge(keep_rate),
+            "keep_rate": keep_rate_val,
+            "keep_rate_judge": _keep_rate_judge(keep_rate_val),
             "auc_lr": nan,
             "auc_lgb": nan,
             "auc_label_shuf": nan,
@@ -200,6 +235,73 @@ def run_one_combination(
             "bal_acc_lgb": nan,
         }
 
+    if task == "binary":
+        keep_mask, y_binary = build_labels_binary_quantile(
+            close_arr, valid_indices, k=k, keep_rate=keep_rate_val
+        )
+        X_kept = X[keep_mask]
+        y_kept = y_binary[keep_mask]
+        n_kept = int(keep_mask.sum())
+        reported_keep_rate = float(keep_mask.mean())
+        train_idx, valid_idx, test_idx = train_valid_test_split_time_ordered(
+            n_kept, TRAIN_RATIO, VALID_RATIO, TEST_RATIO
+        )
+        X_train, X_test = X_kept[train_idx], X_kept[test_idx]
+        y_train_bin = y_kept[train_idx]
+        y_test_bin = y_kept[test_idx]
+        out: Dict[str, Any] = {
+            "window_size_5m": window_size_5m,
+            "window_size_1d": window_size_1d,
+            "cnn_key": cnn_key,
+            "task": task,
+            "n_samples": n_kept,
+            "n_feat": X.shape[1],
+            "n_feat_market": n_features_market,
+            "keep_rate": reported_keep_rate,
+            "keep_rate_judge": _keep_rate_judge(reported_keep_rate),
+        }
+        _, auc_lr, _ = fit_predict_binary(
+            X_train, y_train_bin, X_test, y_test_bin,
+            use_lightgbm=False, random_state=rs, device=device,
+        )
+        if return_regime_data:
+            _, auc_lgb, _, proba_test = fit_predict_binary_return_proba(
+                X_train, y_train_bin, X_test, y_test_bin,
+                use_lightgbm=True, random_state=rs, device=device,
+            )
+            atr_ratio_kept = atr_ratio_arr[valid_indices][keep_mask]
+            atr_ratio_test = atr_ratio_kept[test_idx]
+            out["regime_data"] = {
+                "atr_ratio_test": atr_ratio_test,
+                "y_test_bin": y_test_bin,
+                "proba_test": proba_test,
+            }
+        else:
+            _, auc_lgb, _ = fit_predict_binary(
+                X_train, y_train_bin, X_test, y_test_bin,
+                use_lightgbm=True, random_state=rs, device=device,
+            )
+        auc_label_shuf = run_sanity_label_shuffle(
+            X_train, y_train_bin, X_test, y_test_bin,
+            use_lightgbm=True, random_state=rs, device=device,
+        )
+        if n_features_market > 0:
+            auc_market_shuf = run_sanity_market_shuffle(
+                X_kept, y_kept, train_idx, test_idx, n_features_market,
+                use_lightgbm=True, random_state=rs, device=device,
+            )
+        else:
+            auc_market_shuf = None
+        out["auc_lr"] = auc_lr
+        out["auc_lgb"] = auc_lgb
+        out["auc_label_shuf"] = auc_label_shuf
+        out["auc_market_shuf"] = auc_market_shuf
+        return out
+
+    # task == "3class"
+    y_3class, y_binary = build_labels_3class_quantile(
+        close_arr, valid_indices, k=k, keep_rate=keep_rate_val
+    )
     train_idx, valid_idx, test_idx = train_valid_test_split_time_ordered(
         n_valid, TRAIN_RATIO, VALID_RATIO, TEST_RATIO
     )
@@ -208,8 +310,7 @@ def run_one_combination(
     y_test_bin = y_binary[test_idx]
     y_train_3 = y_3class[train_idx]
     y_test_3 = y_3class[test_idx]
-
-    out: Dict[str, Any] = {
+    out = {
         "window_size_5m": window_size_5m,
         "window_size_1d": window_size_1d,
         "cnn_key": cnn_key,
@@ -217,64 +318,34 @@ def run_one_combination(
         "n_samples": n_valid,
         "n_feat": X.shape[1],
         "n_feat_market": n_features_market,
-        "keep_rate": keep_rate,
-        "keep_rate_judge": _keep_rate_judge(keep_rate),
+        "keep_rate": keep_rate_val,
+        "keep_rate_judge": _keep_rate_judge(keep_rate_val),
     }
-
-    if task == "binary":
-        _, auc_lr, _ = fit_predict_binary(
-            X_train, y_train_bin, X_test, y_test_bin, use_lightgbm=False, random_state=rs
+    _, macro_f1_lr, bal_acc_lr, _ = fit_predict_3class(
+        X_train, y_train_3, X_test, y_test_3,
+        use_lightgbm=False, random_state=rs, device=device,
+    )
+    _, macro_f1_lgb, bal_acc_lgb, _ = fit_predict_3class(
+        X_train, y_train_3, X_test, y_test_3,
+        use_lightgbm=True, random_state=rs, device=device,
+    )
+    auc_label_shuf = run_sanity_label_shuffle(
+        X_train, y_train_bin, X_test, y_test_bin,
+        use_lightgbm=True, random_state=rs, device=device,
+    )
+    if n_features_market > 0:
+        auc_market_shuf = run_sanity_market_shuffle(
+            X, y_binary, train_idx, test_idx, n_features_market,
+            use_lightgbm=True, random_state=rs, device=device,
         )
-        if return_regime_data:
-            _, auc_lgb, _, proba_test = fit_predict_binary_return_proba(
-                X_train, y_train_bin, X_test, y_test_bin, use_lightgbm=True, random_state=rs
-            )
-            atr_ratio_at_valid = np.array([atr_ratio_arr[t] for t in valid_indices], dtype=np.float64)
-            atr_ratio_test = atr_ratio_at_valid[test_idx]
-            out["regime_data"] = {
-                "atr_ratio_test": atr_ratio_test,
-                "y_test_bin": y_test_bin,
-                "proba_test": proba_test,
-            }
-        else:
-            _, auc_lgb, _ = fit_predict_binary(
-                X_train, y_train_bin, X_test, y_test_bin, use_lightgbm=True, random_state=rs
-            )
-        auc_label_shuf = run_sanity_label_shuffle(
-            X_train, y_train_bin, X_test, y_test_bin, use_lightgbm=True, random_state=rs
-        )
-        if n_features_market > 0:
-            auc_market_shuf = run_sanity_market_shuffle(
-                X, y_binary, train_idx, test_idx, n_features_market, use_lightgbm=True, random_state=rs
-            )
-        else:
-            auc_market_shuf = None  # N/A for account_s_only
-        out["auc_lr"] = auc_lr
-        out["auc_lgb"] = auc_lgb
-        out["auc_label_shuf"] = auc_label_shuf
-        out["auc_market_shuf"] = auc_market_shuf
     else:
-        _, macro_f1_lr, bal_acc_lr, _ = fit_predict_3class(
-            X_train, y_train_3, X_test, y_test_3, use_lightgbm=False, random_state=rs
-        )
-        _, macro_f1_lgb, bal_acc_lgb, _ = fit_predict_3class(
-            X_train, y_train_3, X_test, y_test_3, use_lightgbm=True, random_state=rs
-        )
-        auc_label_shuf = run_sanity_label_shuffle(
-            X_train, y_train_bin, X_test, y_test_bin, use_lightgbm=True, random_state=rs
-        )
-        if n_features_market > 0:
-            auc_market_shuf = run_sanity_market_shuffle(
-                X, y_binary, train_idx, test_idx, n_features_market, use_lightgbm=True, random_state=rs
-            )
-        else:
-            auc_market_shuf = None
-        out["macro_f1_lr"] = macro_f1_lr
-        out["macro_f1_lgb"] = macro_f1_lgb
-        out["bal_acc_lr"] = bal_acc_lr
-        out["bal_acc_lgb"] = bal_acc_lgb
-        out["auc_label_shuf"] = auc_label_shuf
-        out["auc_market_shuf"] = auc_market_shuf
+        auc_market_shuf = None
+    out["macro_f1_lr"] = macro_f1_lr
+    out["macro_f1_lgb"] = macro_f1_lgb
+    out["bal_acc_lr"] = bal_acc_lr
+    out["bal_acc_lgb"] = bal_acc_lgb
+    out["auc_label_shuf"] = auc_label_shuf
+    out["auc_market_shuf"] = auc_market_shuf
     return out
 
 
@@ -283,7 +354,7 @@ def _build_2d_grid(
     key_5m: str = "window_size_5m",
     key_1d: str = "window_size_1d",
     value_key: str = "auc_lgb",
-) -> tuple:
+) -> Tuple[List[int], List[int], np.ndarray]:
     """從 results 建出 (ws_5m 排序, ws_1d 排序, 矩陣)。"""
     ws_5m = sorted({r[key_5m] for r in results})
     ws_1d = sorted({r[key_1d] for r in results})
@@ -295,6 +366,26 @@ def _build_2d_grid(
         j = idx_1d[r[key_1d]]
         mat[j, i] = r[value_key]
     return ws_5m, ws_1d, mat
+
+
+def _build_2d_grids(
+    results: List[Dict[str, Any]],
+    key_main: str,
+    key_label: str = "auc_label_shuf",
+) -> Tuple[List[int], List[int], np.ndarray, np.ndarray]:
+    """一次遍歷 results 建出主指標與 Label shuffle 兩張矩陣。"""
+    ws_5m = sorted({r["window_size_5m"] for r in results})
+    ws_1d = sorted({r["window_size_1d"] for r in results})
+    idx_5m = {w: i for i, w in enumerate(ws_5m)}
+    idx_1d = {w: j for j, w in enumerate(ws_1d)}
+    mat_main = np.full((len(ws_1d), len(ws_5m)), np.nan)
+    mat_label = np.full((len(ws_1d), len(ws_5m)), np.nan)
+    for r in results:
+        i = idx_5m[r["window_size_5m"]]
+        j = idx_1d[r["window_size_1d"]]
+        mat_main[j, i] = r[key_main]
+        mat_label[j, i] = r[key_label]
+    return ws_5m, ws_1d, mat_main, mat_label
 
 
 def plot_results(
@@ -314,8 +405,7 @@ def plot_results(
     two_d = len(ws_5m_vals) > 1 and len(ws_1d_vals) > 1
 
     if two_d:
-        ws_5m, ws_1d, mat_main = _build_2d_grid(results, value_key=main_key)
-        _, _, mat_label = _build_2d_grid(results, value_key="auc_label_shuf")
+        ws_5m, ws_1d, mat_main, mat_label = _build_2d_grids(results, main_key)
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
         vmin, vmax = (0.4, 1.0) if task == "binary" else (0.0, 1.0)
         im1 = ax1.imshow(mat_main, aspect="auto", vmin=vmin, vmax=vmax, cmap="RdYlGn")
@@ -410,6 +500,90 @@ def plot_results(
     plt.close()
 
 
+def _fmt_report(v: Any) -> str:
+    """報告用數值格式化，None/nan → N/A。"""
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return "N/A"
+    return f"{v:.4f}"
+
+
+def _write_main_report_chunk(
+    report_path: str,
+    results: List[Dict[str, Any]],
+    cnn_keys: List[str],
+    tasks: List[str],
+    window_sizes_5m: List[int],
+    window_sizes_1d: List[int],
+    args: Any,
+    regime_rows: List[Dict[str, Any]],
+) -> str:
+    """寫入報告檔：標題、主迴圈表格、保留樣本比例、Regime 分桶。回傳已寫入內容供印出。"""
+    lines = [
+        "=" * 100,
+        "E2 Direction Proxy by (window_size_5m, window_size_1d, cnn_key, task)",
+        "=" * 100,
+        f"window_sizes_5m: {window_sizes_5m}, window_sizes_1d: {window_sizes_1d}",
+        f"tasks: {tasks}, cnn_keys: {cnn_keys}, feature_mode={args.feature_mode}, use_1d={args.use_1d}, k={args.k}, max_steps={args.max_steps}",
+        "",
+    ]
+    for (cnn_key, t) in product(cnn_keys, tasks):
+        subset = [r for r in results if r["cnn_key"] == cnn_key and r["task"] == t]
+        if not subset:
+            continue
+        lines.append(f"--- cnn_key={cnn_key}, task={t} ---")
+        if t == "binary":
+            lines.append(f"{'ws_5m':>6} {'ws_1d':>6} {'n':>8} {'feat':>6} {'AUC_LR':>8} {'AUC_LGB':>8} {'LblShuf':>8} {'MktShuf':>8}")
+        else:
+            lines.append(f"{'ws_5m':>6} {'ws_1d':>6} {'n':>8} {'feat':>6} {'F1_LR':>8} {'F1_LGB':>8} {'BalAcc':>8} {'LblShuf':>8} {'MktShuf':>8}")
+        lines.append("-" * 80)
+        for r in subset:
+            mkt_str = _fmt_report(r.get("auc_market_shuf"))
+            if t == "binary":
+                lines.append(
+                    f"{r['window_size_5m']:>6} {r['window_size_1d']:>6} {r['n_samples']:>8} {r['n_feat']:>6} "
+                    f"{_fmt_report(r.get('auc_lr')):>8} {_fmt_report(r.get('auc_lgb')):>8} "
+                    f"{_fmt_report(r.get('auc_label_shuf')):>8} {mkt_str:>8}"
+                )
+            else:
+                lines.append(
+                    f"{r['window_size_5m']:>6} {r['window_size_1d']:>6} {r['n_samples']:>8} {r['n_feat']:>6} "
+                    f"{_fmt_report(r.get('macro_f1_lr')):>8} {_fmt_report(r.get('macro_f1_lgb')):>8} {_fmt_report(r.get('bal_acc_lgb')):>8} "
+                    f"{_fmt_report(r.get('auc_label_shuf')):>8} {mkt_str:>8}"
+                )
+        lines.append("")
+
+    lines.append("")
+    lines.append("--- 報告保留樣本比例 ---")
+    lines.append(f"{'ws_5m':>6} {'ws_1d':>6} {'cnn_key':>12} {'keep_rate':>10} {'判斷':>12}")
+    lines.append("-" * 60)
+    seen = set()
+    for r in results:
+        key = (r["window_size_5m"], r["window_size_1d"], r["cnn_key"])
+        if key in seen:
+            continue
+        seen.add(key)
+        kr = r.get("keep_rate", float("nan"))
+        j = r.get("keep_rate_judge", "N/A")
+        kr_str = f"{kr:.2%}" if not np.isnan(kr) else "N/A"
+        lines.append(f"{r['window_size_5m']:>6} {r['window_size_1d']:>6} {r['cnn_key']:>12} {kr_str:>10} {j:>12}")
+
+    if regime_rows:
+        lines.append("")
+        lines.append("--- Regime 分桶 ---")
+        lines.append(f"{'ws_5m':>6} {'ws_1d':>6} {'cnn_key':>12} {'bucket':>6} {'AUC':>8} {'判斷':>42}")
+        lines.append("-" * 90)
+        for row in regime_rows:
+            auc_s = _fmt_report(row["auc"])
+            lines.append(
+                f"{row['window_size_5m']:>6} {row['window_size_1d']:>6} {row['cnn_key']:>12} {row['bucket']:>6} "
+                f"{auc_s:>8} {row['judge']:>42}"
+            )
+    text = "\n".join(lines)
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return text
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="E2 direction proxy: sweep (window_size_5m, window_size_1d), cnn_key, task"
@@ -474,6 +648,23 @@ def main() -> None:
         action="store_true",
         help="跑 Regime 分桶（test 依 atr_ratio 三分桶算 AUC）並輸出表格",
     )
+    parser.add_argument(
+        "--n_jobs",
+        type=int,
+        default=1,
+        help="並行數（ProcessPoolExecutor），1 為單行程序執行",
+    )
+    parser.add_argument(
+        "--use_gpu",
+        action="store_true",
+        help="LightGBM 使用 GPU（device='gpu'）；未指定則用 CPU",
+    )
+    parser.add_argument(
+        "--keep_rate",
+        type=float,
+        default=KEEP_RATE_DEFAULT,
+        help="分位數門檻之保留率 p（二分類：保留 |r|>q 的樣本；三分類：非 0 比例）。預設 0.3",
+    )
     args = parser.parse_args()
 
     cnn_keys = list(CNN_KEYS) if args.use_1d else [k for k in CNN_KEYS if k.startswith("5m_")]
@@ -490,40 +681,155 @@ def main() -> None:
     os.makedirs(args.out_dir, exist_ok=True)
     report_path = os.path.join(args.out_dir, args.out_report)
 
-    results: List[Dict[str, Any]] = []
-    for idx, ((ws_5m, ws_1d), cnn_key, task) in enumerate(run_combos):
-        print(f"[{idx+1}/{len(run_combos)}] ws_5m={ws_5m}, ws_1d={ws_1d}, cnn={cnn_key}, task={task} ...")
-        try:
-            r = run_one_combination(
-                window_size_5m=ws_5m,
-                window_size_1d=ws_1d,
-                task=task,
-                cnn_key=cnn_key,
-                k=args.k,
-                max_steps=args.max_steps,
-                return_regime_data=(args.run_regime_bucket and task == "binary"),
-            )
-            results.append(r)
+    use_gpu = getattr(args, "use_gpu", False)
+    n_jobs = max(1, int(getattr(args, "n_jobs", 1)))
+    keep_rate_arg = args.keep_rate
+    combo_kwargs_list = [
+        {
+            "window_size_5m": ws_5m,
+            "window_size_1d": ws_1d,
+            "task": task,
+            "cnn_key": cnn_key,
+            "k": args.k,
+            "max_steps": args.max_steps,
+            "return_regime_data": (args.run_regime_bucket and task == "binary"),
+            "use_gpu": use_gpu,
+            "keep_rate": keep_rate_arg,
+        }
+        for (ws_5m, ws_1d), cnn_key, task in run_combos
+    ]
+
+    total_tasks = len(run_combos)
+    start_wall = time.perf_counter()
+    print("")
+    print("=" * 60)
+    print(f"  E2 by window: 共 {total_tasks} 個組合  n_jobs={n_jobs}  use_gpu={use_gpu}")
+    print("=" * 60)
+
+    results_order: List[Optional[Dict[str, Any]]] = [None] * len(run_combos)
+    if n_jobs <= 1:
+        if _TQDM_AVAILABLE:
+            it = tqdm(enumerate(combo_kwargs_list), total=total_tasks, desc="E2 主迴圈", unit="組合")
+        else:
+            pbar = _SimpleProgress(total_tasks, desc="E2 主迴圈")
+            it = enumerate(combo_kwargs_list)
+        for idx, kwargs in it:
+            (ws_5m, ws_1d), cnn_key, task = run_combos[idx]
+            try:
+                r = run_one_combination(**kwargs)
+                results_order[idx] = r
+                if not _TQDM_AVAILABLE:
+                    pbar.update(1)
+                if "_error" in r:
+                    print(f"  [{idx+1}/{total_tasks}] Error: {r['_error']}")
+                elif task == "binary":
+                    print(f"  [{idx+1}/{total_tasks}] ws_5m={ws_5m} ws_1d={ws_1d} {cnn_key} AUC_LGB={r['auc_lgb']:.4f}")
+                else:
+                    print(f"  [{idx+1}/{total_tasks}] ws_5m={ws_5m} ws_1d={ws_1d} {cnn_key} F1_LGB={r['macro_f1_lgb']:.4f}")
+            except Exception as e:
+                if not _TQDM_AVAILABLE:
+                    pbar.update(1)
+                print(f"  [{idx+1}/{total_tasks}] Error: {e}")
             gc.collect()
-            if task == "binary":
-                mkt = r["auc_market_shuf"] if r["auc_market_shuf"] is not None else float("nan")
-                print(f"  n={r['n_samples']}, feat={r['n_feat']}, AUC_LGB={r['auc_lgb']:.4f}, "
-                      f"LblShuf={r['auc_label_shuf']:.4f}, MktShuf={mkt if not np.isnan(mkt) else 'N/A'}")
-            else:
-                mkt = r["auc_market_shuf"] if r["auc_market_shuf"] is not None else float("nan")
-                print(f"  n={r['n_samples']}, feat={r['n_feat']}, MacroF1_LGB={r['macro_f1_lgb']:.4f}, "
-                      f"LblShuf={r['auc_label_shuf']:.4f}, MktShuf={mkt if not np.isnan(mkt) else 'N/A'}")
-        except Exception as e:
-            print(f"  Error: {e}")
-            continue
+        if not _TQDM_AVAILABLE:
+            pbar.close()
+        results = [r for r in results_order if r is not None and "_error" not in r]
+    else:
+        if _TQDM_AVAILABLE:
+            pbar = tqdm(total=total_tasks, desc="E2 主迴圈", unit="組合")
+        else:
+            pbar = _SimpleProgress(total_tasks, desc="E2 主迴圈")
+        inputs = [(i, combo_kwargs_list[i]) for i in range(len(run_combos))]
+        executor = ProcessPoolExecutor(max_workers=n_jobs)
+        try:
+            futures = {executor.submit(_run_one_combo, inp): inp[0] for inp in inputs}
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                (ws_5m, ws_1d), cnn_key, task = run_combos[idx]
+                pbar.update(1)
+                pbar.set_postfix_str(f"ws_5m={ws_5m} {cnn_key}")
+                try:
+                    i, r = fut.result()
+                    results_order[i] = r
+                    if r.get("_error"):
+                        print(f"\n  [{idx+1}/{total_tasks}] Error: {r['_error']}")
+                    elif task == "binary":
+                        print(f"\n  [{idx+1}/{total_tasks}] ws_5m={ws_5m} ws_1d={ws_1d} {cnn_key} AUC_LGB={r['auc_lgb']:.4f}")
+                    else:
+                        print(f"\n  [{idx+1}/{total_tasks}] ws_5m={ws_5m} ws_1d={ws_1d} {cnn_key} F1_LGB={r['macro_f1_lgb']:.4f}")
+                except Exception as e:
+                    print(f"\n  [{idx+1}/{total_tasks}] Error: {e}")
+        finally:
+            pbar.close()
+            print("\n正在等待 worker 行程結束（若卡在此處請用 --n_jobs 1）...", flush=True)
+            executor.shutdown(wait=True)
+            print("Worker 已結束.", flush=True)
+        results = [r for r in results_order if r is not None and r.get("_error") is None]
+
+    elapsed_min = (time.perf_counter() - start_wall) / 60
+    print("")
+    print("=" * 60)
+    print(f"  主迴圈完成: {len(results)}/{total_tasks} 成功  總耗時 {elapsed_min:.1f} 分")
+    print("=" * 60)
 
     if not results:
         print("No results to report or plot.")
         return
 
-    # 穩定性（3 seeds）：同設定跑 3 個 seed，收集 AUC list 與 std
+    # Regime 分桶（從 results 計算，供主報告使用）
+    regime_rows: List[Dict[str, Any]] = []
+    if args.run_regime_bucket:
+        for r in results:
+            if r.get("task") != "binary" or "regime_data" not in r:
+                continue
+            rd = r["regime_data"]
+            auc_low, auc_mid, auc_high = _regime_auc_per_bucket(
+                rd["atr_ratio_test"], rd["y_test_bin"], rd["proba_test"]
+            )
+            judge = _regime_bucket_judge(auc_low, auc_mid, auc_high)
+            for bucket_name, auc in [("low", auc_low), ("mid", auc_mid), ("high", auc_high)]:
+                regime_rows.append({
+                    "window_size_5m": r["window_size_5m"],
+                    "window_size_1d": r["window_size_1d"],
+                    "cnn_key": r["cnn_key"],
+                    "bucket": bucket_name,
+                    "auc": auc,
+                    "judge": judge if bucket_name == "high" else "",
+                })
+
+    # 主迴圈結束後立即寫報告並畫圖，釋放記憶體
+    print("正在寫報告（主迴圈）...", flush=True)
+    main_report_text = _write_main_report_chunk(
+        report_path, results, cnn_keys, tasks,
+        window_sizes_5m, window_sizes_1d, args, regime_rows,
+    )
+    print("\n" + main_report_text)
+    print(f"報告已寫入: {report_path}", flush=True)
+    del regime_rows
+    gc.collect()
+
+    # 先產生圖，再跑後續階段（依 (cnn_key, task) 分組，只掃 results 一次）
+    by_cnn_task: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for r in results:
+        by_cnn_task[(r["cnn_key"], r["task"])].append(r)
+    fig_combos = [(ck, t) for (ck, t) in product(cnn_keys, tasks) if (ck, t) in by_cnn_task]
+    for fig_idx, (cnn_key, t) in enumerate(fig_combos, 1):
+        print(f"正在畫圖 ({fig_idx}/{len(fig_combos)}): {cnn_key} {t}...", flush=True)
+        subset = by_cnn_task[(cnn_key, t)]
+        fig_name = f"e2_by_window_{cnn_key}_{t}.png"
+        fig_path = os.path.join(args.out_dir, fig_name)
+        plot_results(subset, fig_path, task=t)
+        print(f"  已存: {fig_path}", flush=True)
+    gc.collect()
+
+    # 穩定性（3 seeds）：跑完即追加寫入報告並釋放
     stability_results: List[Dict[str, Any]] = []
     if args.run_stability:
+        total_stab = len(run_combos) * len(STABILITY_SEEDS)
+        if _TQDM_AVAILABLE:
+            pbar_stab = tqdm(total=total_stab, desc="穩定性 (3 seeds)", unit="run")
+        else:
+            pbar_stab = _SimpleProgress(total_stab, desc="穩定性 (3 seeds)")
         for (ws_5m, ws_1d), cnn_key, task in run_combos:
             auc_list: List[float] = []
             for seed in STABILITY_SEEDS:
@@ -536,11 +842,15 @@ def main() -> None:
                         k=args.k,
                         max_steps=args.max_steps,
                         random_state=seed,
+                        use_gpu=use_gpu,
+                        keep_rate=keep_rate_arg,
                     )
                     main_metric = r["auc_lgb"] if task == "binary" else r["macro_f1_lgb"]
                     auc_list.append(main_metric)
                 except Exception:
                     auc_list.append(float("nan"))
+                pbar_stab.update(1)
+                pbar_stab.set_postfix_str(f"ws_5m={ws_5m} {cnn_key}")
             if len(auc_list) == 3:
                 arr = np.array(auc_list)
                 std_auc = float(np.nanstd(arr))
@@ -556,182 +866,104 @@ def main() -> None:
                 "judge": _stability_judge(std_auc),
             })
             gc.collect()
-
-    # Horizon sweep：task=binary，k ∈ {12, 36, 72}，delta_coef=0.2
-    horizon_sweep_results: List[Dict[str, Any]] = []
-    if args.run_horizon_sweep:
-        for (ws_5m, ws_1d), cnn_key in product(window_combos, cnn_keys):
-            for k in HORIZON_SWEEP_KS:
-                try:
-                    r = run_one_combination(
-                        window_size_5m=ws_5m,
-                        window_size_1d=ws_1d,
-                        task="binary",
-                        cnn_key=cnn_key,
-                        k=k,
-                        max_steps=args.max_steps,
-                        delta_coef=0.2,
-                    )
-                    judge = _horizon_sweep_judge(
-                        k, r["auc_lgb"], r["auc_label_shuf"]
-                    )
-                    horizon_sweep_results.append({
-                        "window_size_5m": ws_5m,
-                        "window_size_1d": ws_1d,
-                        "cnn_key": cnn_key,
-                        "k": k,
-                        "auc_lgb": r["auc_lgb"],
-                        "auc_label_shuf": r["auc_label_shuf"],
-                        "judge": judge,
-                    })
-                except Exception:
-                    horizon_sweep_results.append({
-                        "window_size_5m": ws_5m,
-                        "window_size_1d": ws_1d,
-                        "cnn_key": cnn_key,
-                        "k": k,
-                        "auc_lgb": float("nan"),
-                        "auc_label_shuf": float("nan"),
-                        "judge": "N/A",
-                    })
-                gc.collect()
-
-    # 文字報告（依 cnn_key, task 分組列出）
-    lines = [
-        "=" * 100,
-        "E2 Direction Proxy by (window_size_5m, window_size_1d, cnn_key, task)",
-        "=" * 100,
-        f"window_sizes_5m: {window_sizes_5m}, window_sizes_1d: {window_sizes_1d}",
-        f"tasks: {tasks}, cnn_keys: {cnn_keys}, feature_mode={args.feature_mode}, use_1d={args.use_1d}, k={args.k}, max_steps={args.max_steps}",
-        "",
-    ]
-    for (cnn_key, t) in product(cnn_keys, tasks):
-        subset = [r for r in results if r["cnn_key"] == cnn_key and r["task"] == t]
-        if not subset:
-            continue
-        lines.append(f"--- cnn_key={cnn_key}, task={t} ---")
-        if t == "binary":
-            lines.append(f"{'ws_5m':>6} {'ws_1d':>6} {'n':>8} {'feat':>6} {'AUC_LR':>8} {'AUC_LGB':>8} {'LblShuf':>8} {'MktShuf':>8}")
-        else:
-            lines.append(f"{'ws_5m':>6} {'ws_1d':>6} {'n':>8} {'feat':>6} {'F1_LR':>8} {'F1_LGB':>8} {'BalAcc':>8} {'LblShuf':>8} {'MktShuf':>8}")
-        lines.append("-" * 80)
-        def _fmt(v: Any) -> str:
-            if v is None or (isinstance(v, float) and np.isnan(v)):
-                return "N/A"
-            return f"{v:.4f}"
-        for r in subset:
-            mkt_str = _fmt(r.get("auc_market_shuf"))
-            if t == "binary":
-                lines.append(
-                    f"{r['window_size_5m']:>6} {r['window_size_1d']:>6} {r['n_samples']:>8} {r['n_feat']:>6} "
-                    f"{_fmt(r.get('auc_lr')):>8} {_fmt(r.get('auc_lgb')):>8} "
-                    f"{_fmt(r.get('auc_label_shuf')):>8} {mkt_str:>8}"
-                )
-            else:
-                lines.append(
-                    f"{r['window_size_5m']:>6} {r['window_size_1d']:>6} {r['n_samples']:>8} {r['n_feat']:>6} "
-                    f"{_fmt(r.get('macro_f1_lr')):>8} {_fmt(r.get('macro_f1_lgb')):>8} {_fmt(r.get('bal_acc_lgb')):>8} "
-                    f"{_fmt(r.get('auc_label_shuf')):>8} {mkt_str:>8}"
-                )
-        lines.append("")
-
-    # 報告保留樣本比例（k=12, δ=0.2）
-    lines.append("")
-    lines.append("--- 報告保留樣本比例 ---")
-    lines.append(f"{'ws_5m':>6} {'ws_1d':>6} {'cnn_key':>12} {'keep_rate':>10} {'判斷':>12}")
-    lines.append("-" * 60)
-    seen = set()
-    for r in results:
-        key = (r["window_size_5m"], r["window_size_1d"], r["cnn_key"])
-        if key in seen:
-            continue
-        seen.add(key)
-        kr = r.get("keep_rate", float("nan"))
-        j = r.get("keep_rate_judge", "N/A")
-        kr_str = f"{kr:.2%}" if not np.isnan(kr) else "N/A"
-        lines.append(f"{r['window_size_5m']:>6} {r['window_size_1d']:>6} {r['cnn_key']:>12} {kr_str:>10} {j:>12}")
-
-    # 穩定性（3 seeds）
-    if stability_results:
-        lines.append("")
-        lines.append("--- 穩定性（3 seeds） ---")
-        lines.append(f"{'ws_5m':>6} {'ws_1d':>6} {'cnn_key':>12} {'task':>8} {'AUC_s1':>8} {'AUC_s2':>8} {'AUC_s3':>8} {'std':>8} {'判斷':>28}")
-        lines.append("-" * 100)
+        pbar_stab.close()
+        # 穩定性跑完即寫入報告並釋放
+        stab_lines = [
+            "",
+            "--- 穩定性（3 seeds） ---",
+            f"{'ws_5m':>6} {'ws_1d':>6} {'cnn_key':>12} {'task':>8} {'AUC_s1':>8} {'AUC_s2':>8} {'AUC_s3':>8} {'std':>8} {'判斷':>28}",
+            "-" * 100,
+        ]
         for r in stability_results:
             a = r["auc_list"]
-            a1 = f"{a[0]:.4f}" if not np.isnan(a[0]) else "N/A"
-            a2 = f"{a[1]:.4f}" if not np.isnan(a[1]) else "N/A"
-            a3 = f"{a[2]:.4f}" if not np.isnan(a[2]) else "N/A"
-            s = r["std_auc"]
-            s_str = f"{s:.4f}" if not np.isnan(s) else "N/A"
-            lines.append(
+            stab_lines.append(
                 f"{r['window_size_5m']:>6} {r['window_size_1d']:>6} {r['cnn_key']:>12} {r['task']:>8} "
-                f"{a1:>8} {a2:>8} {a3:>8} {s_str:>8} {r['judge']:>28}"
+                f"{_fmt_report(a[0]):>8} {_fmt_report(a[1]):>8} {_fmt_report(a[2]):>8} {_fmt_report(r['std_auc']):>8} {r['judge']:>28}"
             )
+        stab_text = "\n".join(stab_lines)
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write(stab_text)
+        print(stab_text)
+        del stability_results
+        gc.collect()
 
-    # Horizon sweep
-    if horizon_sweep_results:
-        lines.append("")
-        lines.append("--- Horizon sweep ---")
-        lines.append(f"{'ws_5m':>6} {'ws_1d':>6} {'cnn_key':>12} {'k':>4} {'AUC_LGB':>8} {'LblShuf':>8} {'判斷':>36}")
-        lines.append("-" * 90)
-        for r in horizon_sweep_results:
-            auc_s = f"{r['auc_lgb']:.4f}" if not np.isnan(r["auc_lgb"]) else "N/A"
-            shuf_s = f"{r['auc_label_shuf']:.4f}" if not np.isnan(r["auc_label_shuf"]) else "N/A"
-            lines.append(
-                f"{r['window_size_5m']:>6} {r['window_size_1d']:>6} {r['cnn_key']:>12} {r['k']:>4} "
-                f"{auc_s:>8} {shuf_s:>8} {r['judge']:>36}"
-            )
-
-    # Regime 分桶（從 results 中 binary 且含 regime_data 者計算）
-    regime_rows: List[Dict[str, Any]] = []
-    if args.run_regime_bucket:
-        for r in results:
-            if r.get("task") != "binary" or "regime_data" not in r:
-                continue
-            rd = r["regime_data"]
-            atr_test = rd["atr_ratio_test"]
-            y_test = rd["y_test_bin"]
-            proba = rd["proba_test"]
-            auc_low, auc_mid, auc_high = _regime_auc_per_bucket(atr_test, y_test, proba)
-            judge = _regime_bucket_judge(auc_low, auc_mid, auc_high)
-            for bucket_name, auc in [("low", auc_low), ("mid", auc_mid), ("high", auc_high)]:
-                regime_rows.append({
-                    "window_size_5m": r["window_size_5m"],
-                    "window_size_1d": r["window_size_1d"],
-                    "cnn_key": r["cnn_key"],
-                    "bucket": bucket_name,
-                    "auc": auc,
-                    "judge": judge if bucket_name == "high" else "",
+    # Horizon sweep：task=binary，k ∈ {12, 36, 72}，keep_rate 同主迴圈
+    horizon_sweep_results: List[Dict[str, Any]] = []
+    if args.run_horizon_sweep:
+        horizon_tasks = [
+            ((ws_5m, ws_1d), cnn_key, k)
+            for (ws_5m, ws_1d), cnn_key in product(window_combos, cnn_keys)
+            for k in HORIZON_SWEEP_KS
+        ]
+        total_hor = len(horizon_tasks)
+        if _TQDM_AVAILABLE:
+            it_hor = tqdm(horizon_tasks, desc="Horizon sweep", unit="run")
+        else:
+            pbar_hor = _SimpleProgress(total_hor, desc="Horizon sweep")
+            it_hor = horizon_tasks
+        for ((ws_5m, ws_1d), cnn_key, k) in it_hor:
+            if not _TQDM_AVAILABLE:
+                pbar_hor.update(1)
+                pbar_hor.set_postfix_str(f"ws_5m={ws_5m} {cnn_key} k={k}")
+            try:
+                r = run_one_combination(
+                    window_size_5m=ws_5m,
+                    window_size_1d=ws_1d,
+                    task="binary",
+                    cnn_key=cnn_key,
+                    k=k,
+                    max_steps=args.max_steps,
+                    use_gpu=use_gpu,
+                    keep_rate=keep_rate_arg,
+                )
+                judge = _horizon_sweep_judge(
+                    k, r["auc_lgb"], r["auc_label_shuf"]
+                )
+                horizon_sweep_results.append({
+                    "window_size_5m": ws_5m,
+                    "window_size_1d": ws_1d,
+                    "cnn_key": cnn_key,
+                    "k": k,
+                    "auc_lgb": r["auc_lgb"],
+                    "auc_label_shuf": r["auc_label_shuf"],
+                    "judge": judge,
                 })
-    if regime_rows:
-        lines.append("")
-        lines.append("--- Regime 分桶 ---")
-        lines.append(f"{'ws_5m':>6} {'ws_1d':>6} {'cnn_key':>12} {'bucket':>6} {'AUC':>8} {'判斷':>42}")
-        lines.append("-" * 90)
-        for row in regime_rows:
-            auc_s = f"{row['auc']:.4f}" if not np.isnan(row["auc"]) else "N/A"
-            lines.append(
-                f"{row['window_size_5m']:>6} {row['window_size_1d']:>6} {row['cnn_key']:>12} {row['bucket']:>6} "
-                f"{auc_s:>8} {row['judge']:>42}"
+            except Exception:
+                horizon_sweep_results.append({
+                    "window_size_5m": ws_5m,
+                    "window_size_1d": ws_1d,
+                    "cnn_key": cnn_key,
+                    "k": k,
+                    "auc_lgb": float("nan"),
+                    "auc_label_shuf": float("nan"),
+                    "judge": "N/A",
+                })
+            gc.collect()
+        if not _TQDM_AVAILABLE:
+            pbar_hor.close()
+        # Horizon 跑完即追加寫入報告並釋放
+        hor_lines = [
+            "",
+            "--- Horizon sweep ---",
+            f"{'ws_5m':>6} {'ws_1d':>6} {'cnn_key':>12} {'k':>4} {'AUC_LGB':>8} {'LblShuf':>8} {'判斷':>36}",
+            "-" * 90,
+        ]
+        for r in horizon_sweep_results:
+            hor_lines.append(
+                f"{r['window_size_5m']:>6} {r['window_size_1d']:>6} {r['cnn_key']:>12} {r['k']:>4} "
+                f"{_fmt_report(r.get('auc_lgb')):>8} {_fmt_report(r.get('auc_label_shuf')):>8} {r['judge']:>36}"
             )
+        hor_text = "\n".join(hor_lines)
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write(hor_text)
+        print(hor_text)
+        del horizon_sweep_results
+        gc.collect()
 
-    lines.append("")
-    lines.append("=" * 100)
-    report = "\n".join(lines)
-    print("\n" + report)
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(report)
-
-    # 多張圖：每張對應一個 (cnn_key, task)
-    for (cnn_key, t) in product(cnn_keys, tasks):
-        subset = [r for r in results if r["cnn_key"] == cnn_key and r["task"] == t]
-        if not subset:
-            continue
-        fig_name = f"e2_by_window_{cnn_key}_{t}.png"
-        fig_path = os.path.join(args.out_dir, fig_name)
-        plot_results(subset, fig_path, task=t)
-        print(f"Figure: {fig_path}")
+    # 報告結尾
+    with open(report_path, "a", encoding="utf-8") as f:
+        f.write("\n")
+        f.write("=" * 100)
     print(f"Report: {report_path}")
 
 

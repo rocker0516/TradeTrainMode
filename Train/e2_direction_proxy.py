@@ -37,8 +37,9 @@ import lightgbm as lgb
 
 
 # ---------- 常數 ----------
-HORIZON_K = 12
-DELTA_COEF = 0.2
+HORIZON_K = 6
+DELTA_COEF = 10
+KEEP_RATE_DEFAULT = 0.3  # 分位數門檻之預設保留率 p
 TRAIN_RATIO = 0.7
 VALID_RATIO = 0.15
 TEST_RATIO = 0.15
@@ -137,6 +138,54 @@ def build_labels(
             y_3class[i] = 0
 
     return y_binary, y_3class
+
+
+def _log_returns_for_valid(
+    close_arr: np.ndarray, valid_indices: np.ndarray, k: int
+) -> np.ndarray:
+    """向量化計算 valid_indices 對應的 r_{t,k} = log(close[t+k]/close[t])。長度 n_valid。"""
+    n = len(close_arr)
+    close_t = close_arr[valid_indices]
+    close_tk = close_arr[valid_indices + k]
+    r = np.where(close_t <= 0, 0.0, np.log(close_tk / close_t))
+    return r.astype(np.float64)
+
+
+def build_labels_binary_quantile(
+    close_arr: np.ndarray,
+    valid_indices: np.ndarray,
+    k: int = HORIZON_K,
+    keep_rate: float = KEEP_RATE_DEFAULT,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    分位數門檻二分類：q = quantile(|r|, 1-p)，只保留 |r| > q 的樣本，label = sign(r)。
+    回傳 (keep_mask, y_binary)，長度皆 n_valid；caller 以 X[keep_mask], y_binary[keep_mask] 得 X_kept, y_kept。
+    """
+    r = _log_returns_for_valid(close_arr, valid_indices, k)
+    abs_r = np.abs(r)
+    q = np.nanpercentile(abs_r, (1.0 - keep_rate) * 100.0)
+    keep_mask = abs_r > q
+    y_binary = (r > 0).astype(np.int32)
+    return keep_mask, y_binary
+
+
+def build_labels_3class_quantile(
+    close_arr: np.ndarray,
+    valid_indices: np.ndarray,
+    k: int = HORIZON_K,
+    keep_rate: float = KEEP_RATE_DEFAULT,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    分位數門檻三分類（定保留率）：q_high = quantile(r, 1-p/2)，q_low = quantile(r, p/2)；
+    y_3class = 1 if r > q_high, -1 if r < q_low, else 0。不刪樣本，全體 n_valid 參與。
+    回傳 (y_3class, y_binary)，y_binary 供 sanity 用。
+    """
+    r = _log_returns_for_valid(close_arr, valid_indices, k)
+    q_high = np.nanpercentile(r, (1.0 - keep_rate / 2.0) * 100.0)
+    q_low = np.nanpercentile(r, (keep_rate / 2.0) * 100.0)
+    y_3class = np.where(r > q_high, 1, np.where(r < q_low, -1, 0)).astype(np.int32)
+    y_binary = (r > 0).astype(np.int32)
+    return y_3class, y_binary
 
 
 def _seq_to_five_stats(seq: np.ndarray) -> np.ndarray:
@@ -412,6 +461,68 @@ def collect_obs_and_indices(
     return obs_list, valid_indices, close_arr, atr_ratio_arr
 
 
+def collect_obs_and_features_one_cnn(
+    window_size: int = 288,
+    window_size_1d: Optional[int] = None,
+    horizon_k: int = HORIZON_K,
+    max_steps: Optional[int] = None,
+    cnn_key: str = "5m_target",
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    串流收集：沿時間軸 step 時只計算單路 CNN 的彙總特徵並累積，不保留 obs，降低大 window 時的記憶體。
+
+    Returns:
+        valid_indices, X, close_arr, atr_ratio_arr。X 為 (n_valid, n_feat) float32。
+    """
+    if cnn_key not in CNN_KEYS:
+        raise ValueError(f"cnn_key must be in {CNN_KEYS}, got {cnn_key!r}")
+    kwargs = {
+        "env_id": 0,
+        "window_size": window_size,
+        "data_split_enabled": False,
+        "random_start": False,
+        "max_episode_steps": 500000,
+        "target_symbol": TrainConfig.SYMBOL,
+        "feature_symbols": list(TrainConfig.FEATURE_SYMBOLS),
+    }
+    if window_size_1d is not None:
+        kwargs["window_size_1d"] = window_size_1d
+    env = TradingEnvironment(**kwargs)
+    close_arr = np.array(env.market_data.close_arr, copy=True)
+    atr_ratio_arr = np.array(env.market_data.atr_ratio_arr, copy=True)
+    N = len(close_arr)
+    last_valid_step = N - 1 - horizon_k
+    if last_valid_step < window_size:
+        env.close()
+        raise ValueError(
+            f"Data too short: need at least window_size + k = {window_size + horizon_k}, got N={N}"
+        )
+
+    obs, _ = env.reset()
+    done = False
+    truncated = False
+    steps = 0
+    step_indices: List[int] = []
+    feature_list: List[np.ndarray] = []
+    limit = (N - 1) if max_steps is None else min(N - 1, max_steps)
+
+    while not (done or truncated) and env.current_step <= last_valid_step and steps < limit:
+        step_idx = int(env.get_current_step())
+        if step_idx >= window_size and step_idx <= last_valid_step:
+            step_indices.append(step_idx)
+            feat = obs_to_summary_features_one_cnn(obs, cnn_key)
+            feature_list.append(feat)
+        action = np.array([0.0], dtype=np.float32)
+        obs, _, terminated, truncated, _ = env.step(action)
+        done = bool(terminated or truncated)
+        steps += 1
+
+    env.close()
+    valid_indices = np.array(step_indices, dtype=np.int64)
+    X = np.stack(feature_list, axis=0) if feature_list else np.empty((0, 0), dtype=np.float32)
+    return valid_indices, X, close_arr, atr_ratio_arr
+
+
 def _to_lgb_df(X: np.ndarray) -> pd.DataFrame:
     """將 numpy 特徵矩陣轉成具欄位名的 DataFrame，供 LightGBM 使用以消除 feature names 警告。"""
     n_cols = X.shape[1]
@@ -425,12 +536,13 @@ def fit_predict_binary(
     y_test: np.ndarray,
     use_lightgbm: bool,
     random_state: int = RANDOM_STATE,
+    device: str = "cpu",
 ) -> Tuple[np.ndarray, float, Dict[str, float]]:
-    """訓練二分類並回傳 test 預測、AUC、與 precision/recall。"""
+    """訓練二分類並回傳 test 預測、AUC、與 precision/recall。device: 'cpu' | 'gpu'（LightGBM 用）。"""
     if use_lightgbm:
         df_train = _to_lgb_df(X_train)
         df_test = _to_lgb_df(X_test)
-        model = lgb.LGBMClassifier(
+        lgb_kw: Dict[str, Any] = dict(
             n_estimators=200,
             max_depth=6,
             learning_rate=0.05,
@@ -440,6 +552,9 @@ def fit_predict_binary(
             verbosity=-1,
             n_jobs=1,
         )
+        if device in ("gpu", "cuda"):
+            lgb_kw["device"] = "gpu"
+        model = lgb.LGBMClassifier(**lgb_kw)
         model.fit(df_train, y_train)
         proba = model.predict_proba(df_test)[:, 1]
         pred = model.predict(df_test)
@@ -467,12 +582,13 @@ def fit_predict_binary_return_proba(
     y_test: np.ndarray,
     use_lightgbm: bool,
     random_state: int = RANDOM_STATE,
+    device: str = "cpu",
 ) -> Tuple[np.ndarray, float, Dict[str, float], np.ndarray]:
     """訓練二分類並回傳 test 預測、AUC、輔助指標與 test 預測機率（供 Regime 分桶用）。"""
     if use_lightgbm:
         df_train = _to_lgb_df(X_train)
         df_test = _to_lgb_df(X_test)
-        model = lgb.LGBMClassifier(
+        lgb_kw = dict(
             n_estimators=200,
             max_depth=6,
             learning_rate=0.05,
@@ -482,6 +598,9 @@ def fit_predict_binary_return_proba(
             verbosity=-1,
             n_jobs=1,
         )
+        if device in ("gpu", "cuda"):
+            lgb_kw["device"] = "gpu"
+        model = lgb.LGBMClassifier(**lgb_kw)
         model.fit(df_train, y_train)
         proba = model.predict_proba(df_test)[:, 1]
         pred = model.predict(df_test)
@@ -509,6 +628,7 @@ def fit_predict_3class(
     y_test: np.ndarray,
     use_lightgbm: bool,
     random_state: int = RANDOM_STATE,
+    device: str = "cpu",
 ) -> Tuple[np.ndarray, float, float, Dict[str, float]]:
     """三分類：y in {-1,0,1}。回傳 test 預測、macro_f1、balanced_accuracy、輔助指標。"""
     le = LabelEncoder()
@@ -518,7 +638,7 @@ def fit_predict_3class(
     if use_lightgbm:
         df_train = _to_lgb_df(X_train)
         df_test = _to_lgb_df(X_test)
-        model = lgb.LGBMClassifier(
+        lgb_kw = dict(
             n_estimators=200,
             max_depth=6,
             learning_rate=0.05,
@@ -528,6 +648,9 @@ def fit_predict_3class(
             verbosity=-1,
             n_jobs=1,
         )
+        if device in ("gpu", "cuda"):
+            lgb_kw["device"] = "gpu"
+        model = lgb.LGBMClassifier(**lgb_kw)
         model.fit(df_train, y_train_enc)
         pred_enc = model.predict(df_test)
     else:
@@ -557,12 +680,14 @@ def run_sanity_label_shuffle(
     y_test: np.ndarray,
     use_lightgbm: bool,
     random_state: int = RANDOM_STATE,
+    device: str = "cpu",
 ) -> float:
     """破壞測試 A：打亂 y_train，再訓練二分類，回傳 Test AUC（預期 ~0.5）。"""
     rng = np.random.default_rng(random_state)
     y_train_shuf = rng.permutation(y_train)
     _, auc, _ = fit_predict_binary(
-        X_train, y_train_shuf, X_test, y_test, use_lightgbm=use_lightgbm, random_state=random_state
+        X_train, y_train_shuf, X_test, y_test,
+        use_lightgbm=use_lightgbm, random_state=random_state, device=device,
     )
     return auc
 
@@ -575,6 +700,7 @@ def run_sanity_market_shuffle(
     n_features_market: int,
     use_lightgbm: bool,
     random_state: int = RANDOM_STATE,
+    device: str = "cpu",
 ) -> float:
     """
     破壞測試 B：對每個樣本的「市場特徵」（前 n_features_market 維）用隨機 permutation 打亂樣本間對應
@@ -585,7 +711,6 @@ def run_sanity_market_shuffle(
     rng = np.random.default_rng(random_state)
     n = X_full.shape[0]
     X_shuf = X_full.copy()
-    # 為每行隨機選一行，取其市場部分覆蓋本行市場部分
     perm = rng.permutation(n)
     X_shuf[:, :n_features_market] = X_full[perm, :n_features_market]
 
@@ -593,7 +718,10 @@ def run_sanity_market_shuffle(
     y_tr = y_full[train_idx]
     X_te = X_shuf[test_idx]
     y_te = y_full[test_idx]
-    _, auc, _ = fit_predict_binary(X_tr, y_tr, X_te, y_te, use_lightgbm=use_lightgbm, random_state=random_state)
+    _, auc, _ = fit_predict_binary(
+        X_tr, y_tr, X_te, y_te,
+        use_lightgbm=use_lightgbm, random_state=random_state, device=device,
+    )
     return auc
 
 

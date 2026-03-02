@@ -29,7 +29,6 @@ def test_env_config_importable_and_has_required_attributes() -> None:
         "STEP_LOG_ENABLED",
         "STEP_LOG_DIR",
         "STEP_LOG_EVERY_N",
-        "MARKET_STATE_COLS",
         "MAINTENANCE_MARGIN_RATE",
         "MAX_EPISODE_STEPS",
         "STOP_LOSS_LIQ_BUFFER_PCT",
@@ -46,7 +45,6 @@ def test_env_config_importable_and_has_required_attributes() -> None:
     assert isinstance(Config.WINDOW_SIZE_1D, int)
     assert isinstance(Config.LEVERAGE, float)
     assert isinstance(Config.STEP_LOG_DIR, str)
-    assert isinstance(Config.MARKET_STATE_COLS, list)
 
 
 def test_train_config_is_compatible_shim() -> None:
