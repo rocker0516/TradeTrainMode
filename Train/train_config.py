@@ -254,10 +254,10 @@ class TrainConfig:
     # - 5m 視窗：L 大（如 288）→ 歷史長，可維持或略增 EMB_5M_* / OUT_DIM；L 小（如 36）→ 可維持或略減以防過擬合。
     # - 1d 視窗：L 小（7~14）→ 輕量即可；L 大（如 30）→ 可略增 EMB_1D_*，或保持不變先觀察。
     # - 經驗式比例（僅供參考）：OUT_DIM ≈ 1~2x(EMB_5M_TARGET+EMB_5M_OTHERS)；PI_ARCH 首層 ≥ OUT_DIM。
-    WINDOW_SIZE_5M: int = 288 // 8  # 36（約 3 小時）；288 = 1 天
+    WINDOW_SIZE_5M: int = 12  # 36（約 3 小時）；288 = 1 天
     """5 分鐘 K 線視窗大小（根數）。288 = 1 天。"""
     
-    WINDOW_SIZE_1D: int = 15
+    WINDOW_SIZE_1D: int = 14
     """1 日 K 線視窗大小（天數）。"""
 
     # ==================== 資料切分（Train/Eval 分離）====================

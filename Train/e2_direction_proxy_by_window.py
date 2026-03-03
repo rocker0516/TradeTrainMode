@@ -649,6 +649,11 @@ def main() -> None:
         help="跑 Regime 分桶（test 依 atr_ratio 三分桶算 AUC）並輸出表格",
     )
     parser.add_argument(
+        "--run_regime_gated",
+        action="store_true",
+        help="跑 Regime-gated（僅用 low/high bucket 樣本 train+test）並輸出表格",
+    )
+    parser.add_argument(
         "--n_jobs",
         type=int,
         default=1,
@@ -926,6 +931,7 @@ def main() -> None:
                     "k": k,
                     "auc_lgb": r["auc_lgb"],
                     "auc_label_shuf": r["auc_label_shuf"],
+                    "auc_market_shuf": r.get("auc_market_shuf"),
                     "judge": judge,
                 })
             except Exception:
@@ -936,6 +942,7 @@ def main() -> None:
                     "k": k,
                     "auc_lgb": float("nan"),
                     "auc_label_shuf": float("nan"),
+                    "auc_market_shuf": float("nan"),
                     "judge": "N/A",
                 })
             gc.collect()
@@ -945,13 +952,13 @@ def main() -> None:
         hor_lines = [
             "",
             "--- Horizon sweep ---",
-            f"{'ws_5m':>6} {'ws_1d':>6} {'cnn_key':>12} {'k':>4} {'AUC_LGB':>8} {'LblShuf':>8} {'判斷':>36}",
-            "-" * 90,
+            f"{'ws_5m':>6} {'ws_1d':>6} {'cnn_key':>12} {'k':>4} {'AUC_LGB':>8} {'LblShuf':>8} {'MktShuf':>8} {'判斷':>36}",
+            "-" * 110,
         ]
         for r in horizon_sweep_results:
             hor_lines.append(
                 f"{r['window_size_5m']:>6} {r['window_size_1d']:>6} {r['cnn_key']:>12} {r['k']:>4} "
-                f"{_fmt_report(r.get('auc_lgb')):>8} {_fmt_report(r.get('auc_label_shuf')):>8} {r['judge']:>36}"
+                f"{_fmt_report(r.get('auc_lgb')):>8} {_fmt_report(r.get('auc_label_shuf')):>8} {_fmt_report(r.get('auc_market_shuf')):>8} {r['judge']:>36}"
             )
         hor_text = "\n".join(hor_lines)
         with open(report_path, "a", encoding="utf-8") as f:
@@ -959,6 +966,89 @@ def main() -> None:
         print(hor_text)
         del horizon_sweep_results
         gc.collect()
+
+    # Regime-gated：僅用 low/high bucket 樣本 train+test（僅 binary）
+    if args.run_regime_gated:
+        print("正在跑 Regime-gated（二分類，low/high bucket train+test）...", flush=True)
+        regime_gated_lines = [
+            "",
+            "--- Regime-gated (binary, train+test within bucket) ---",
+            f"{'ws_5m':>6} {'ws_1d':>6} {'cnn_key':>12} {'bucket':>6} {'n':>8} {'AUC_LGB':>8} {'LblShuf':>8} {'MktShuf':>8}",
+            "-" * 110,
+        ]
+        for (ws_5m, ws_1d), cnn_key, task in run_combos:
+            if task != "binary":
+                continue
+            # 重新收集特徵與 ATR，用於 bucket gating
+            valid_indices, X, close_arr, atr_ratio_arr = collect_obs_and_features_one_cnn(
+                window_size=ws_5m,
+                window_size_1d=ws_1d,
+                horizon_k=args.k,
+                max_steps=args.max_steps,
+                cnn_key=cnn_key,
+            )
+            if X.shape[1] == 0:
+                continue
+            keep_mask, y_binary = build_labels_binary_quantile(
+                close_arr, valid_indices, k=args.k, keep_rate=keep_rate_arg,
+            )
+            if not np.any(keep_mask):
+                continue
+            X_kept = X[keep_mask]
+            y_kept = y_binary[keep_mask]
+            atr_valid = atr_ratio_arr[valid_indices]
+            atr_kept = atr_valid[keep_mask]
+            q33 = np.percentile(atr_kept, 33.33)
+            q66 = np.percentile(atr_kept, 66.67)
+            bucket_specs = [
+                ("low", atr_kept <= q33),
+                ("high", atr_kept > q66),
+            ]
+            for bucket_name, bucket_mask in bucket_specs:
+                if not np.any(bucket_mask):
+                    continue
+                X_reg = X_kept[bucket_mask]
+                y_reg = y_kept[bucket_mask]
+                n_reg = X_reg.shape[0]
+                train_idx, valid_idx, test_idx = train_valid_test_split_time_ordered(
+                    n_reg, TRAIN_RATIO, VALID_RATIO, TEST_RATIO
+                )
+                X_train, X_test = X_reg[train_idx], X_reg[test_idx]
+                y_train_bin = y_reg[train_idx]
+                y_test_bin = y_reg[test_idx]
+                try:
+                    _, auc_lr, _ = fit_predict_binary(
+                        X_train, y_train_bin, X_test, y_test_bin,
+                        use_lightgbm=False, random_state=RANDOM_STATE, device=("gpu" if use_gpu else "cpu"),
+                    )
+                    _, auc_lgb, _ = fit_predict_binary(
+                        X_train, y_train_bin, X_test, y_test_bin,
+                        use_lightgbm=True, random_state=RANDOM_STATE, device=("gpu" if use_gpu else "cpu"),
+                    )
+                    auc_label_shuf = run_sanity_label_shuffle(
+                        X_train, y_train_bin, X_test, y_test_bin,
+                        use_lightgbm=True, random_state=RANDOM_STATE, device=("gpu" if use_gpu else "cpu"),
+                    )
+                    n_features_market = X_reg.shape[1]
+                    if n_features_market > 0:
+                        auc_market_shuf = run_sanity_market_shuffle(
+                            X_reg, y_reg, train_idx, test_idx, n_features_market,
+                            use_lightgbm=True, random_state=RANDOM_STATE, device=("gpu" if use_gpu else "cpu"),
+                        )
+                    else:
+                        auc_market_shuf = float("nan")
+                    regime_gated_lines.append(
+                        f"{ws_5m:>6} {ws_1d:>6} {cnn_key:>12} {bucket_name:>6} "
+                        f"{n_reg:>8} {_fmt_report(auc_lgb):>8} {_fmt_report(auc_label_shuf):>8} {_fmt_report(auc_market_shuf):>8}"
+                    )
+                except Exception:
+                    continue
+                finally:
+                    gc.collect()
+        regime_gated_text = "\n".join(regime_gated_lines)
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write(regime_gated_text)
+        print(regime_gated_text)
 
     # 報告結尾
     with open(report_path, "a", encoding="utf-8") as f:
