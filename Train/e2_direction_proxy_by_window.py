@@ -69,7 +69,9 @@ from Train.e2_direction_proxy import (
     collect_obs_and_features_one_cnn,
     run_sanity_label_shuffle,
     run_sanity_market_shuffle,
+    strided_sample_mask,
     train_valid_test_split_time_ordered,
+    walk_forward_purged_splits,
     fit_predict_binary,
     fit_predict_binary_return_proba,
     fit_predict_3class,
@@ -347,6 +349,228 @@ def run_one_combination(
     out["auc_label_shuf"] = auc_label_shuf
     out["auc_market_shuf"] = auc_market_shuf
     return out
+
+
+# Purged Walk-forward + Embargo：固定 1d_target、window 12×14，k ∈ {36, 72}
+PURGED_EMBARGO_WS_5M = 12
+PURGED_EMBARGO_WS_1D = 14
+PURGED_EMBARGO_KS = (36, 72)
+PURGED_EMBARGO_N_FOLDS = 3
+
+
+def run_purged_embargo_one_k(
+    k: int,
+    ws_5m: int = PURGED_EMBARGO_WS_5M,
+    ws_1d: int = PURGED_EMBARGO_WS_1D,
+    cnn_key: str = "1d_target",
+    n_folds: int = PURGED_EMBARGO_N_FOLDS,
+    keep_rate: Optional[float] = None,
+    max_steps: Optional[int] = None,
+    random_state: Optional[int] = None,
+    use_gpu: bool = False,
+) -> Dict[str, Any]:
+    """
+    對單一 k 跑 Purged Walk-forward + Embargo（3 折）。
+    embargo_bars = max(ws_5m, k)。回傳各折平均 AUC、LblShuf、MktShuf。
+    """
+    rs = RANDOM_STATE if random_state is None else random_state
+    keep_rate_val = KEEP_RATE_DEFAULT if keep_rate is None else keep_rate
+    embargo_bars = max(ws_5m, k)
+    device = "gpu" if use_gpu else "cpu"
+
+    valid_indices, X, close_arr, atr_ratio_arr = collect_obs_and_features_one_cnn(
+        window_size=ws_5m,
+        window_size_1d=ws_1d,
+        horizon_k=k,
+        max_steps=max_steps,
+        cnn_key=cnn_key,
+    )
+    n_valid = len(valid_indices)
+    if n_valid == 0 or X.shape[1] == 0:
+        return {
+            "k": k,
+            "auc_lgb": float("nan"),
+            "auc_label_shuf": float("nan"),
+            "auc_market_shuf": float("nan"),
+            "n_folds": n_folds,
+            "judge": "N/A (no data)",
+        }
+
+    keep_mask, y_binary = build_labels_binary_quantile(
+        close_arr, valid_indices, k=k, keep_rate=keep_rate_val
+    )
+    X_kept = X[keep_mask]
+    y_kept = y_binary[keep_mask]
+    valid_kept = valid_indices[keep_mask]
+    n_kept = len(valid_kept)
+    n_feat = X_kept.shape[1]
+
+    splits = walk_forward_purged_splits(valid_kept, k, embargo_bars, n_folds=n_folds)
+    if not splits:
+        return {
+            "k": k,
+            "auc_lgb": float("nan"),
+            "auc_label_shuf": float("nan"),
+            "auc_market_shuf": float("nan"),
+            "n_folds": 0,
+            "judge": "N/A (no splits)",
+        }
+
+    aucs: List[float] = []
+    lbl_shufs: List[float] = []
+    mkt_shufs: List[float] = []
+    for train_idx, test_idx in splits:
+        if len(train_idx) < 10 or len(test_idx) < 5:
+            continue
+        X_tr = X_kept[train_idx]
+        y_tr = y_kept[train_idx]
+        X_te = X_kept[test_idx]
+        y_te = y_kept[test_idx]
+        _, auc, _ = fit_predict_binary(
+            X_tr, y_tr, X_te, y_te,
+            use_lightgbm=True, random_state=rs, device=device,
+        )
+        aucs.append(auc)
+        lbl_shufs.append(
+            run_sanity_label_shuffle(
+                X_tr, y_tr, X_te, y_te,
+                use_lightgbm=True, random_state=rs, device=device,
+            )
+        )
+        mkt_shufs.append(
+            run_sanity_market_shuffle(
+                X_kept, y_kept, train_idx, test_idx, n_feat,
+                use_lightgbm=True, random_state=rs, device=device,
+            )
+        )
+
+    if not aucs:
+        return {
+            "k": k,
+            "auc_lgb": float("nan"),
+            "auc_label_shuf": float("nan"),
+            "auc_market_shuf": float("nan"),
+            "n_folds": len(splits),
+            "judge": "N/A (no valid fold)",
+        }
+    auc_mean = float(np.mean(aucs))
+    lbl_mean = float(np.mean(lbl_shufs))
+    mkt_mean = float(np.mean(mkt_shufs))
+    judge = (
+        "可能重疊洩漏（加 embargo 後 AUC 掉至 0.55–0.60）"
+        if 0.55 <= auc_mean <= 0.65 and lbl_mean <= 0.6
+        else ("OK" if auc_mean > 0.6 and lbl_mean <= 0.6 else "—")
+    )
+    return {
+        "k": k,
+        "ws_5m": ws_5m,
+        "ws_1d": ws_1d,
+        "cnn_key": cnn_key,
+        "auc_lgb": auc_mean,
+        "auc_label_shuf": lbl_mean,
+        "auc_market_shuf": mkt_mean,
+        "n_folds": len(aucs),
+        "embargo_bars": embargo_bars,
+        "n_kept": n_kept,
+        "judge": judge,
+    }
+
+
+def run_non_overlapping_one_k(
+    k: int,
+    ws_5m: int = PURGED_EMBARGO_WS_5M,
+    ws_1d: int = PURGED_EMBARGO_WS_1D,
+    cnn_key: str = "1d_target",
+    T_stride: Optional[int] = None,
+    keep_rate: Optional[float] = None,
+    max_steps: Optional[int] = None,
+    random_state: Optional[int] = None,
+    use_gpu: bool = False,
+) -> Dict[str, Any]:
+    """
+    MVE-2 不重疊取樣：每隔 T_stride 根 bar 取一筆樣本（T_stride = ws_5m 或 k）。
+    再以時間序 70/15/15 切分，跑二分類並回傳 AUC、LblShuf、MktShuf。
+    """
+    rs = RANDOM_STATE if random_state is None else random_state
+    keep_rate_val = KEEP_RATE_DEFAULT if keep_rate is None else keep_rate
+    stride = T_stride if T_stride is not None else max(ws_5m, k)
+    device = "gpu" if use_gpu else "cpu"
+
+    valid_indices, X, close_arr, atr_ratio_arr = collect_obs_and_features_one_cnn(
+        window_size=ws_5m,
+        window_size_1d=ws_1d,
+        horizon_k=k,
+        max_steps=max_steps,
+        cnn_key=cnn_key,
+    )
+    n_valid = len(valid_indices)
+    if n_valid == 0 or X.shape[1] == 0:
+        return {
+            "k": k,
+            "auc_lgb": float("nan"),
+            "auc_label_shuf": float("nan"),
+            "auc_market_shuf": float("nan"),
+            "T_stride": stride,
+            "judge": "N/A (no data)",
+        }
+
+    keep_mask, y_binary = build_labels_binary_quantile(
+        close_arr, valid_indices, k=k, keep_rate=keep_rate_val
+    )
+    X_kept = X[keep_mask]
+    y_kept = y_binary[keep_mask]
+    valid_kept = valid_indices[keep_mask]
+
+    stride_mask = strided_sample_mask(valid_kept, stride)
+    n_stride = int(stride_mask.sum())
+    if n_stride < 50:
+        return {
+            "k": k,
+            "auc_lgb": float("nan"),
+            "auc_label_shuf": float("nan"),
+            "auc_market_shuf": float("nan"),
+            "T_stride": stride,
+            "n_stride": n_stride,
+            "judge": "N/A (too few after stride)",
+        }
+
+    X_s = X_kept[stride_mask]
+    y_s = y_kept[stride_mask]
+    n_s = len(y_s)
+    n_feat = X_s.shape[1]
+    train_idx, valid_idx, test_idx = train_valid_test_split_time_ordered(
+        n_s, TRAIN_RATIO, VALID_RATIO, TEST_RATIO
+    )
+    X_train = X_s[train_idx]
+    y_train = y_s[train_idx]
+    X_test = X_s[test_idx]
+    y_test = y_s[test_idx]
+
+    _, auc_lgb, _ = fit_predict_binary(
+        X_train, y_train, X_test, y_test,
+        use_lightgbm=True, random_state=rs, device=device,
+    )
+    auc_label_shuf = run_sanity_label_shuffle(
+        X_train, y_train, X_test, y_test,
+        use_lightgbm=True, random_state=rs, device=device,
+    )
+    auc_market_shuf = run_sanity_market_shuffle(
+        X_s, y_s, train_idx, test_idx, n_feat,
+        use_lightgbm=True, random_state=rs, device=device,
+    )
+    judge = "OK" if auc_lgb > 0.6 and auc_label_shuf <= 0.6 else "—"
+    return {
+        "k": k,
+        "ws_5m": ws_5m,
+        "ws_1d": ws_1d,
+        "cnn_key": cnn_key,
+        "auc_lgb": auc_lgb,
+        "auc_label_shuf": auc_label_shuf,
+        "auc_market_shuf": auc_market_shuf,
+        "T_stride": stride,
+        "n_stride": n_stride,
+        "judge": judge,
+    }
 
 
 def _build_2d_grid(
@@ -652,6 +876,16 @@ def main() -> None:
         "--run_regime_gated",
         action="store_true",
         help="跑 Regime-gated（僅用 low/high bucket 樣本 train+test）並輸出表格",
+    )
+    parser.add_argument(
+        "--run_purged_embargo",
+        action="store_true",
+        help="跑 Purged Walk-forward + Embargo（1d_target, 12×14, k=36/72, 3 折）並輸出 AUC/LblShuf/MktShuf",
+    )
+    parser.add_argument(
+        "--run_non_overlapping",
+        action="store_true",
+        help="跑 MVE-2 不重疊取樣（每隔 T_stride 取樣，1d_target, 12×14, k=36/72）並輸出 AUC/LblShuf/MktShuf",
     )
     parser.add_argument(
         "--n_jobs",
@@ -1049,6 +1283,68 @@ def main() -> None:
         with open(report_path, "a", encoding="utf-8") as f:
             f.write(regime_gated_text)
         print(regime_gated_text)
+
+    # Purged Walk-forward + Embargo：1d_target，12×14，k=36/72，3 折，embargo = max(ws_5m, k)
+    if getattr(args, "run_purged_embargo", False):
+        print("正在跑 Purged Walk-forward + Embargo（1d_target, 12×14, k=36/72）...", flush=True)
+        purged_lines = [
+            "",
+            "--- Purged Walk-forward + Embargo (1d_target, ws_5m=12, ws_1d=14, 3-fold) ---",
+            "推翻條件：若加 embargo 後 AUC 從 ~0.75 掉至 0.55–0.60，則原本高 AUC 主要為重疊洩漏。",
+            f"{'k':>4} {'embargo':>8} {'n_kept':>8} {'AUC_LGB':>8} {'LblShuf':>8} {'MktShuf':>8} {'判斷':>42}",
+            "-" * 110,
+        ]
+        for k in PURGED_EMBARGO_KS:
+            try:
+                r = run_purged_embargo_one_k(
+                    k=k,
+                    keep_rate=keep_rate_arg,
+                    max_steps=args.max_steps,
+                    use_gpu=use_gpu,
+                )
+                purged_lines.append(
+                    f"{r['k']:>4} {r.get('embargo_bars', 0):>8} {r.get('n_kept', 0):>8} "
+                    f"{_fmt_report(r.get('auc_lgb')):>8} {_fmt_report(r.get('auc_label_shuf')):>8} "
+                    f"{_fmt_report(r.get('auc_market_shuf')):>8} {str(r.get('judge', '')):>42}"
+                )
+            except Exception as e:
+                purged_lines.append(f"{k:>4} {'—':>8} {'—':>8} {'N/A':>8} {'N/A':>8} {'N/A':>8} Error: {e}")
+            gc.collect()
+        purged_text = "\n".join(purged_lines)
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write(purged_text)
+        print(purged_text)
+
+    # MVE-2 不重疊取樣：每隔 T_stride 取一筆，1d_target，12×14，k=36/72
+    if getattr(args, "run_non_overlapping", False):
+        print("正在跑 MVE-2 不重疊取樣（1d_target, 12×14, k=36/72）...", flush=True)
+        nonov_lines = [
+            "",
+            "--- MVE-2 不重疊取樣 (1d_target, ws_5m=12, ws_1d=14, T_stride=max(ws_5m,k)) ---",
+            "僅在無重疊/低重疊下 AUC 仍高時，訊號才較可信。",
+            f"{'k':>4} {'T_stride':>8} {'n_stride':>8} {'AUC_LGB':>8} {'LblShuf':>8} {'MktShuf':>8} {'判斷':>8}",
+            "-" * 80,
+        ]
+        for k in PURGED_EMBARGO_KS:
+            try:
+                r = run_non_overlapping_one_k(
+                    k=k,
+                    keep_rate=keep_rate_arg,
+                    max_steps=args.max_steps,
+                    use_gpu=use_gpu,
+                )
+                nonov_lines.append(
+                    f"{r['k']:>4} {r.get('T_stride', 0):>8} {r.get('n_stride', 0):>8} "
+                    f"{_fmt_report(r.get('auc_lgb')):>8} {_fmt_report(r.get('auc_label_shuf')):>8} "
+                    f"{_fmt_report(r.get('auc_market_shuf')):>8} {str(r.get('judge', '')):>8}"
+                )
+            except Exception as e:
+                nonov_lines.append(f"{k:>4} {'-':>8} {'-':>8} {'N/A':>8} {'N/A':>8} {'N/A':>8} Error: {e}")
+            gc.collect()
+        nonov_text = "\n".join(nonov_lines)
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write(nonov_text)
+        print(nonov_text)
 
     # 報告結尾
     with open(report_path, "a", encoding="utf-8") as f:

@@ -377,6 +377,68 @@ def train_valid_test_split_time_ordered(
     return train_idx, valid_idx, test_idx
 
 
+def walk_forward_purged_splits(
+    valid_indices: np.ndarray,
+    k: int,
+    embargo_bars: int,
+    n_folds: int = 3,
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """
+    Walk-forward 切分並在 train/test 邊界做 purge + embargo。
+
+    - valid_indices: (n,) 已排序的 bar 時間索引，對應每筆樣本的 t。
+    - 標籤使用 [t, t+k]，故樣本 i 的「影響區間」到 valid_indices[i] + k。
+    - embargo_bars:  train 端最後一筆的 t+k 與 test 端第一筆的 t 之間至少間隔 bar 數。
+    - 每折：test = 第 f 段時間區間；train = 其前所有樣本，但 purge 掉
+      valid_indices[i] + k >= test_start - embargo_bars 的樣本。
+
+    Returns:
+        List of (train_idx, test_idx)，長度 n_folds；索引皆為 0..n-1。
+    """
+    n = len(valid_indices)
+    if n < 2 or n_folds < 1:
+        return []
+    out: List[Tuple[np.ndarray, np.ndarray]] = []
+    for f in range(n_folds):
+        test_start_idx = n * f // n_folds
+        test_end_idx = n * (f + 1) // n_folds
+        if test_start_idx >= test_end_idx:
+            continue
+        test_start_bar = int(valid_indices[test_start_idx])
+        purge_threshold = test_start_bar - embargo_bars
+        train_candidates = np.arange(0, test_start_idx, dtype=np.int64)
+        if len(train_candidates) == 0:
+            out.append((np.array([], dtype=np.int64), np.arange(test_start_idx, test_end_idx)))
+            continue
+        last_bar_plus_k = valid_indices[train_candidates] + k
+        keep = last_bar_plus_k < purge_threshold
+        train_idx = train_candidates[keep]
+        test_idx = np.arange(test_start_idx, test_end_idx, dtype=np.int64)
+        out.append((train_idx, test_idx))
+    return out
+
+
+def strided_sample_mask(
+    valid_indices: np.ndarray,
+    T_stride: int,
+) -> np.ndarray:
+    """
+    不重疊取樣：僅保留「與上一筆取樣至少相隔 T_stride 根 bar」的樣本。
+
+    valid_indices 假設已排序（時間序）。回傳 (n,) bool mask，True 表示保留。
+    """
+    n = len(valid_indices)
+    if n == 0:
+        return np.array([], dtype=bool)
+    mask = np.zeros(n, dtype=bool)
+    last_t = -1 - T_stride
+    for i in range(n):
+        if int(valid_indices[i]) - last_t >= T_stride:
+            mask[i] = True
+            last_t = int(valid_indices[i])
+    return mask
+
+
 def collect_obs_and_indices(
     window_size: int = 288,
     window_size_1d: Optional[int] = None,
