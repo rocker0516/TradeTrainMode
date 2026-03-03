@@ -439,6 +439,90 @@ def strided_sample_mask(
     return mask
 
 
+def get_gate_arrays(
+    window_size_5m: int = 288,
+    window_size_1d: Optional[int] = None,
+    target_symbol: Optional[str] = None,
+    feature_symbols: Optional[List[str]] = None,
+    max_steps: Optional[int] = None,
+    liquidity_vol_quantile: float = 0.5,
+    liquidity_amihud_quantile: float = 0.5,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    取得 Gate A（1d trend）與 Gate B（5m 流動性）的 per-bar 陣列，供 gated horizon sweep 使用。
+
+    - trend_1d_5m: 長度 N_5m，值 1=up / -1=down / 0=無效（1d 尚未有資料）。由 sign(EMA12_1d - EMA48_1d) 對齊到 5m。
+    - liquidity_5m: 長度 N_5m，bool。True = 高流動性（quote_volume_log_z > q_vol 分位）且 amihud_z < q_amihud 分位。
+
+    Args:
+        window_size_5m: 5m 視窗長度（bar 數）
+        window_size_1d: 1d 視窗長度（日數）；None 時使用 Env 預設
+        target_symbol: 目標符號，None 時用 TrainConfig.SYMBOL
+        feature_symbols: 特徵符號列表，None 時用 TrainConfig.FEATURE_SYMBOLS
+        max_steps: 最多步數，None 不限制（仍回傳全長陣列）
+        liquidity_vol_quantile: Gate B 中 quote_volume_log_z 的分位數門檻（> 此值視為高量）
+        liquidity_amihud_quantile: Gate B 中 amihud_z 的分位數門檻（< 此值視為低 amihud）
+
+    Returns:
+        (trend_1d_5m, liquidity_5m)，皆為長度 len(close_arr) 的陣列。
+    """
+    sym = target_symbol if target_symbol is not None else TrainConfig.SYMBOL
+    feats = list(feature_symbols) if feature_symbols is not None else list(TrainConfig.FEATURE_SYMBOLS)
+    kwargs: Dict[str, Any] = {
+        "env_id": 0,
+        "window_size": window_size_5m,
+        "data_split_enabled": False,
+        "random_start": False,
+        "max_episode_steps": 500000,
+        "target_symbol": sym,
+        "feature_symbols": feats,
+    }
+    if window_size_1d is not None:
+        kwargs["window_size_1d"] = window_size_1d
+    env = TradingEnvironment(**kwargs)
+    md = env.market_data
+    N = len(md.close_arr)
+
+    # ---- Gate A: 1d trend (sign(EMA12_1d - EMA48_1d)) 對齊到 5m ----
+    df_1d = md.df_1d
+    col_close = f"{sym}_close"
+    if col_close not in df_1d.columns:
+        col_close = "close"
+    close_1d = df_1d[col_close].astype(float) if col_close in df_1d.columns else pd.Series(dtype=float)
+    if len(close_1d) == 0:
+        trend_1d_5m = np.zeros(N, dtype=np.int8)
+    else:
+        ema12 = close_1d.ewm(span=12, adjust=False).mean()
+        ema48 = close_1d.ewm(span=48, adjust=False).mean()
+        diff = ema12 - ema48
+        trend_1d_arr = np.sign(diff).replace(0.0, np.nan).fillna(0.0).astype(np.int8).values
+        map_5m_to_1d = md.map_5m_to_1d
+        trend_1d_5m = np.zeros(N, dtype=np.int8)
+        for i in range(N):
+            j = int(map_5m_to_1d[i])
+            if j >= 0 and j < len(trend_1d_arr):
+                trend_1d_5m[i] = trend_1d_arr[j]
+            # else 保持 0（不進 gate）
+
+    # ---- Gate B: 5m 流動性（quote_volume_log_z 高、amihud_z 低）----
+    cols = list(md.cols_5m_target) if hasattr(md, "cols_5m_target") and md.cols_5m_target else []
+    feat_arr = md.features_5m_target_arr  # (N, F)
+    idx_vol = cols.index("quote_volume_log_z") if "quote_volume_log_z" in cols else None
+    idx_amihud = cols.index("amihud_z") if "amihud_z" in cols else None
+    if idx_vol is not None and idx_amihud is not None:
+        vol = feat_arr[:, idx_vol].astype(np.float64)
+        amihud = feat_arr[:, idx_amihud].astype(np.float64)
+        q_vol = np.nanpercentile(vol, liquidity_vol_quantile * 100.0)
+        q_amihud = np.nanpercentile(amihud, liquidity_amihud_quantile * 100.0)
+        liquidity_5m = (vol > q_vol) & (amihud < q_amihud)
+        liquidity_5m = np.asarray(liquidity_5m, dtype=bool)
+    else:
+        liquidity_5m = np.ones(N, dtype=bool)  # 無欄位時不篩
+
+    env.close()
+    return trend_1d_5m, liquidity_5m
+
+
 def collect_obs_and_indices(
     window_size: int = 288,
     window_size_1d: Optional[int] = None,
@@ -583,6 +667,121 @@ def collect_obs_and_features_one_cnn(
     valid_indices = np.array(step_indices, dtype=np.int64)
     X = np.stack(feature_list, axis=0) if feature_list else np.empty((0, 0), dtype=np.float32)
     return valid_indices, X, close_arr, atr_ratio_arr
+
+
+# 最小樣本數：gated 後若低於此值則回傳 nan 並標註樣本不足
+GATED_MIN_SAMPLES = 500
+
+
+def run_one_combination_gated(
+    window_size_5m: int,
+    window_size_1d: Optional[int],
+    cnn_key: str,
+    gate_type: str,
+    trend_1d_5m: np.ndarray,
+    liquidity_5m: np.ndarray,
+    k: int = HORIZON_K,
+    keep_rate: float = KEEP_RATE_DEFAULT,
+    max_steps: Optional[int] = None,
+    random_state: Optional[int] = None,
+    use_gpu: bool = False,
+    min_samples: int = GATED_MIN_SAMPLES,
+) -> Dict[str, Any]:
+    """
+    對單一 (window_size_5m, window_size_1d, cnn_key, k) 在 Gate A 或 Gate B 下跑二分類 pipeline。
+
+    Gate A：僅保留 trend_1d_5m[valid_indices] == 1（trend up）。
+    Gate B：僅保留 liquidity_5m[valid_indices] 為 True 的樣本。
+
+    Returns:
+        與 run_one_combination 類似的 dict（auc_lgb, auc_label_shuf, auc_market_shuf, n_samples 等）；
+        若 gated 後樣本數 < min_samples 則 auc_* 為 nan、n_samples 為實際數。
+    """
+    if gate_type not in ("A", "B"):
+        raise ValueError(f"gate_type must be 'A' or 'B', got {gate_type!r}")
+    device = "gpu" if use_gpu else "cpu"
+    rs = RANDOM_STATE if random_state is None else random_state
+    nan = float("nan")
+
+    valid_indices, X, close_arr, atr_ratio_arr = collect_obs_and_features_one_cnn(
+        window_size=window_size_5m,
+        window_size_1d=window_size_1d,
+        horizon_k=k,
+        max_steps=max_steps,
+        cnn_key=cnn_key,
+    )
+    n_valid = len(valid_indices)
+    n_features_market = X.shape[1] if X.size else 0
+    if n_valid == 0 or (X.size and X.shape[1] == 0):
+        return {
+            "gate_type": gate_type,
+            "cnn_key": cnn_key,
+            "k": k,
+            "n_samples": 0,
+            "n_feat": n_features_market,
+            "auc_lr": nan,
+            "auc_lgb": nan,
+            "auc_label_shuf": nan,
+            "auc_market_shuf": None,
+        }
+
+    keep_mask, y_binary = build_labels_binary_quantile(
+        close_arr, valid_indices, k=k, keep_rate=keep_rate
+    )
+    if gate_type == "A":
+        gate_mask = (trend_1d_5m[valid_indices] == 1)
+    else:
+        gate_mask = liquidity_5m[valid_indices]
+    kept = keep_mask & gate_mask
+    n_kept = int(kept.sum())
+
+    out: Dict[str, Any] = {
+        "gate_type": gate_type,
+        "cnn_key": cnn_key,
+        "k": k,
+        "n_samples": n_kept,
+        "n_feat": n_features_market,
+    }
+    if n_kept < min_samples:
+        out["auc_lr"] = nan
+        out["auc_lgb"] = nan
+        out["auc_label_shuf"] = nan
+        out["auc_market_shuf"] = None
+        return out
+
+    X_kept = X[kept]
+    y_kept = y_binary[kept]
+    train_idx, valid_idx, test_idx = train_valid_test_split_time_ordered(
+        n_kept, TRAIN_RATIO, VALID_RATIO, TEST_RATIO
+    )
+    X_train, X_test = X_kept[train_idx], X_kept[test_idx]
+    y_train_bin = y_kept[train_idx]
+    y_test_bin = y_kept[test_idx]
+
+    _, auc_lr, _ = fit_predict_binary(
+        X_train, y_train_bin, X_test, y_test_bin,
+        use_lightgbm=False, random_state=rs, device=device,
+    )
+    _, auc_lgb, _ = fit_predict_binary(
+        X_train, y_train_bin, X_test, y_test_bin,
+        use_lightgbm=True, random_state=rs, device=device,
+    )
+    auc_label_shuf = run_sanity_label_shuffle(
+        X_train, y_train_bin, X_test, y_test_bin,
+        use_lightgbm=True, random_state=rs, device=device,
+    )
+    if n_features_market > 0:
+        auc_market_shuf = run_sanity_market_shuffle(
+            X_kept, y_kept, train_idx, test_idx, n_features_market,
+            use_lightgbm=True, random_state=rs, device=device,
+        )
+    else:
+        auc_market_shuf = None
+    out["auc_lr"] = auc_lr
+    out["auc_lgb"] = auc_lgb
+    out["auc_label_shuf"] = auc_label_shuf
+    out["auc_market_shuf"] = auc_market_shuf
+    return out
 
 
 def _to_lgb_df(X: np.ndarray) -> pd.DataFrame:

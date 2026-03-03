@@ -67,6 +67,8 @@ from Train.e2_direction_proxy import (
     build_labels_binary_quantile,
     build_labels_3class_quantile,
     collect_obs_and_features_one_cnn,
+    get_gate_arrays,
+    run_one_combination_gated,
     run_sanity_label_shuffle,
     run_sanity_market_shuffle,
     strided_sample_mask,
@@ -89,6 +91,8 @@ KEEP_RATE_DELTA = 0.2
 STABILITY_SEEDS = [42, 43, 44]
 # Horizon sweep 的 k 候選
 HORIZON_SWEEP_KS = (12, 36, 72)
+# Gated 5m horizon sweep：僅在 gate 下掃的 k（15m/30m/1h/2h）
+GATED_HORIZON_KS = (3, 6, 12, 24)
 
 
 def _compute_keep_rate(
@@ -878,6 +882,11 @@ def main() -> None:
         help="跑 Regime-gated（僅用 low/high bucket 樣本 train+test）並輸出表格",
     )
     parser.add_argument(
+        "--run_gated_horizon_sweep",
+        action="store_true",
+        help="跑 Gated 5m horizon sweep（Gate A=1d trend up, Gate B=5m 流動性；k=3,6,12,24；僅 5m_target/5m_others）",
+    )
+    parser.add_argument(
         "--run_purged_embargo",
         action="store_true",
         help="跑 Purged Walk-forward + Embargo（1d_target, 12×14, k=36/72, 3 折）並輸出 AUC/LblShuf/MktShuf",
@@ -1200,6 +1209,65 @@ def main() -> None:
         print(hor_text)
         del horizon_sweep_results
         gc.collect()
+
+    # Gated 5m horizon sweep：僅在 Gate A（1d trend up）/ Gate B（5m 流動性）下掃 k=3,6,12,24，僅 5m CNN
+    if args.run_gated_horizon_sweep:
+        print("正在跑 Gated 5m horizon sweep（Gate A=1d trend up, Gate B=5m 流動性；k=3,6,12,24）...", flush=True)
+        cnn_keys_5m = [k for k in CNN_KEYS if k.startswith("5m_")]
+        gated_lines = [
+            "",
+            "--- Gated 5m horizon sweep (Gate A=1d trend up, Gate B=liquidity; k=3,6,12,24) ---",
+            "Pass: gated AUC >= 0.53 and LblShuf~0.5 -> conditional signal, suggest hierarchical policy (1d regime, 5m timing)",
+            f"{'gate':>6} {'ws_5m':>6} {'ws_1d':>6} {'cnn_key':>12} {'k':>4} {'n_kept':>8} {'AUC_LGB':>8} {'LblShuf':>8} {'MktShuf':>8} {'判斷':>50}",
+            "-" * 130,
+        ]
+        for (ws_5m, ws_1d) in window_combos:
+            try:
+                trend_1d_5m, liquidity_5m = get_gate_arrays(
+                    window_size_5m=ws_5m,
+                    window_size_1d=ws_1d,
+                    max_steps=args.max_steps,
+                )
+            except Exception as e:
+                gated_lines.append(f"get_gate_arrays ws_5m={ws_5m} ws_1d={ws_1d} Error: {e}")
+                continue
+            for cnn_key in cnn_keys_5m:
+                for k in GATED_HORIZON_KS:
+                    for gate_type in ("A", "B"):
+                        try:
+                            r = run_one_combination_gated(
+                                window_size_5m=ws_5m,
+                                window_size_1d=ws_1d,
+                                cnn_key=cnn_key,
+                                gate_type=gate_type,
+                                trend_1d_5m=trend_1d_5m,
+                                liquidity_5m=liquidity_5m,
+                                k=k,
+                                keep_rate=keep_rate_arg,
+                                max_steps=args.max_steps,
+                                use_gpu=use_gpu,
+                            )
+                        except Exception as e:
+                            gated_lines.append(
+                                f"{'Gate_' + gate_type:>6} {ws_5m:>6} {ws_1d:>6} {cnn_key:>12} {k:>4} {'—':>8} {'N/A':>8} {'N/A':>8} {'N/A':>8} Error: {e}"
+                            )
+                            continue
+                        auc_lgb = r.get("auc_lgb", float("nan"))
+                        auc_lbl = r.get("auc_label_shuf", float("nan"))
+                        n_kept = r.get("n_samples", 0)
+                        if auc_lgb >= 0.53 and (np.isnan(auc_lbl) or abs(auc_lbl - 0.5) < 0.06):
+                            judge = "conditional signal; suggest hierarchical policy (1d regime, 5m timing)"
+                        else:
+                            judge = ""
+                        gated_lines.append(
+                            f"{'Gate_' + gate_type:>6} {ws_5m:>6} {ws_1d:>6} {cnn_key:>12} {k:>4} {n_kept:>8} "
+                            f"{_fmt_report(auc_lgb):>8} {_fmt_report(auc_lbl):>8} {_fmt_report(r.get('auc_market_shuf')):>8} {judge:>50}"
+                        )
+                    gc.collect()
+        gated_text = "\n".join(gated_lines)
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write(gated_text)
+        print(gated_text)
 
     # Regime-gated：僅用 low/high bucket 樣本 train+test（僅 binary）
     if args.run_regime_gated:
