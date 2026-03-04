@@ -449,9 +449,9 @@ def get_gate_arrays(
     liquidity_amihud_quantile: float = 0.5,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    取得 Gate A（1d trend）與 Gate B（5m 流動性）的 per-bar 陣列，供 gated horizon sweep 使用。
+    取得 Gate A（1d up）/ B（5m 流動性）/ C（1d 有方向）/ D（1d down）用的 per-bar 陣列，供 gated horizon sweep 使用。
 
-    - trend_1d_5m: 長度 N_5m，值 1=up / -1=down / 0=無效（1d 尚未有資料）。由 sign(EMA12_1d - EMA48_1d) 對齊到 5m。
+    - trend_1d_5m: 長度 N_5m，值 1=up / -1=down / 0=無方向。由 sign(EMA12_1d - EMA48_1d) 對齊到 5m。Gate A==1, C!=0, D==-1。
     - liquidity_5m: 長度 N_5m，bool。True = 高流動性（quote_volume_log_z > q_vol 分位）且 amihud_z < q_amihud 分位。
 
     Args:
@@ -688,17 +688,19 @@ def run_one_combination_gated(
     min_samples: int = GATED_MIN_SAMPLES,
 ) -> Dict[str, Any]:
     """
-    對單一 (window_size_5m, window_size_1d, cnn_key, k) 在 Gate A 或 Gate B 下跑二分類 pipeline。
+    對單一 (window_size_5m, window_size_1d, cnn_key, k) 在 Gate A / B / C / D 下跑二分類 pipeline。
 
-    Gate A：僅保留 trend_1d_5m[valid_indices] == 1（trend up）。
-    Gate B：僅保留 liquidity_5m[valid_indices] 為 True 的樣本。
+    Gate A：僅保留 trend_1d_5m[valid_indices] == 1（1d trend up）。
+    Gate B：僅保留 liquidity_5m[valid_indices] 為 True 的樣本（5m 流動性高）。
+    Gate C：僅保留 trend_1d_5m[valid_indices] != 0（日線趨勢有方向，含 up/down）。
+    Gate D：僅保留 trend_1d_5m[valid_indices] == -1（1d trend down）。
 
     Returns:
         與 run_one_combination 類似的 dict（auc_lgb, auc_label_shuf, auc_market_shuf, n_samples 等）；
         若 gated 後樣本數 < min_samples 則 auc_* 為 nan、n_samples 為實際數。
     """
-    if gate_type not in ("A", "B"):
-        raise ValueError(f"gate_type must be 'A' or 'B', got {gate_type!r}")
+    if gate_type not in ("A", "B", "C", "D"):
+        raise ValueError(f"gate_type must be 'A', 'B', 'C' or 'D', got {gate_type!r}")
     device = "gpu" if use_gpu else "cpu"
     rs = RANDOM_STATE if random_state is None else random_state
     nan = float("nan")
@@ -723,6 +725,7 @@ def run_one_combination_gated(
             "auc_lgb": nan,
             "auc_label_shuf": nan,
             "auc_market_shuf": None,
+            "auc_lgb_neg_score": None,
         }
 
     keep_mask, y_binary = build_labels_binary_quantile(
@@ -730,8 +733,13 @@ def run_one_combination_gated(
     )
     if gate_type == "A":
         gate_mask = (trend_1d_5m[valid_indices] == 1)
-    else:
+    elif gate_type == "B":
         gate_mask = liquidity_5m[valid_indices]
+    elif gate_type == "C":
+        gate_mask = (trend_1d_5m[valid_indices] != 0)
+    else:
+        # Gate D：1d trend down
+        gate_mask = (trend_1d_5m[valid_indices] == -1)
     kept = keep_mask & gate_mask
     n_kept = int(kept.sum())
 
@@ -747,6 +755,7 @@ def run_one_combination_gated(
         out["auc_lgb"] = nan
         out["auc_label_shuf"] = nan
         out["auc_market_shuf"] = None
+        out["auc_lgb_neg_score"] = None
         return out
 
     X_kept = X[kept]
@@ -762,10 +771,19 @@ def run_one_combination_gated(
         X_train, y_train_bin, X_test, y_test_bin,
         use_lightgbm=False, random_state=rs, device=device,
     )
-    _, auc_lgb, _ = fit_predict_binary(
-        X_train, y_train_bin, X_test, y_test_bin,
-        use_lightgbm=True, random_state=rs, device=device,
-    )
+    if gate_type == "D":
+        # Gate D（down regime）：取得 test proba，並算 AUC(y, 1-proba) 判讀是否「反向可學」
+        _, auc_lgb, _, proba = fit_predict_binary_return_proba(
+            X_train, y_train_bin, X_test, y_test_bin,
+            use_lightgbm=True, random_state=rs, device=device,
+        )
+        auc_lgb_neg_score = roc_auc_score(y_test_bin, 1.0 - proba) if np.unique(y_test_bin).size > 1 else 0.5
+    else:
+        _, auc_lgb, _ = fit_predict_binary(
+            X_train, y_train_bin, X_test, y_test_bin,
+            use_lightgbm=True, random_state=rs, device=device,
+        )
+        auc_lgb_neg_score = None
     auc_label_shuf = run_sanity_label_shuffle(
         X_train, y_train_bin, X_test, y_test_bin,
         use_lightgbm=True, random_state=rs, device=device,
@@ -781,6 +799,7 @@ def run_one_combination_gated(
     out["auc_lgb"] = auc_lgb
     out["auc_label_shuf"] = auc_label_shuf
     out["auc_market_shuf"] = auc_market_shuf
+    out["auc_lgb_neg_score"] = auc_lgb_neg_score
     return out
 
 

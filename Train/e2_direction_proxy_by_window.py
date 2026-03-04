@@ -884,7 +884,7 @@ def main() -> None:
     parser.add_argument(
         "--run_gated_horizon_sweep",
         action="store_true",
-        help="跑 Gated 5m horizon sweep（Gate A=1d trend up, Gate B=5m 流動性；k=3,6,12,24；僅 5m_target/5m_others）",
+        help="跑 Gated 5m horizon sweep（Gate A=1d up, B=流動性, C=1d 有方向, D=1d down；k=3,6,12,24；僅 5m）",
     )
     parser.add_argument(
         "--run_purged_embargo",
@@ -1210,16 +1210,16 @@ def main() -> None:
         del horizon_sweep_results
         gc.collect()
 
-    # Gated 5m horizon sweep：僅在 Gate A（1d trend up）/ Gate B（5m 流動性）下掃 k=3,6,12,24，僅 5m CNN
+    # Gated 5m horizon sweep：Gate A（1d up）/ B（流動性）/ C（1d 有方向）/ D（1d down）下掃 k=3,6,12,24，僅 5m CNN
     if args.run_gated_horizon_sweep:
-        print("正在跑 Gated 5m horizon sweep（Gate A=1d trend up, Gate B=5m 流動性；k=3,6,12,24）...", flush=True)
+        print("正在跑 Gated 5m horizon sweep（Gate A=1d up, B=流動性, C=1d 有方向, D=1d down；k=3,6,12,24）...", flush=True)
         cnn_keys_5m = [k for k in CNN_KEYS if k.startswith("5m_")]
         gated_lines = [
             "",
-            "--- Gated 5m horizon sweep (Gate A=1d trend up, Gate B=liquidity; k=3,6,12,24) ---",
-            "Pass: gated AUC >= 0.53 and LblShuf~0.5 -> conditional signal, suggest hierarchical policy (1d regime, 5m timing)",
-            f"{'gate':>6} {'ws_5m':>6} {'ws_1d':>6} {'cnn_key':>12} {'k':>4} {'n_kept':>8} {'AUC_LGB':>8} {'LblShuf':>8} {'MktShuf':>8} {'判斷':>50}",
-            "-" * 130,
+            "--- Gated 5m horizon sweep (Gate A=up, B=liquidity, C=has direction, D=down; k=3,6,12,24) ---",
+            "Pass: gated AUC >= 0.53 and LblShuf~0.5 -> conditional signal. Gate D: AUC_neg = AUC(y, 1-score); AUC<0.5 and AUC_neg>0.5 -> 反向可學.",
+            f"{'gate':>6} {'ws_5m':>6} {'ws_1d':>6} {'cnn_key':>12} {'k':>4} {'n_kept':>8} {'AUC_LGB':>8} {'AUC_neg':>8} {'LblShuf':>8} {'MktShuf':>8} {'判斷':>50}",
+            "-" * 140,
         ]
         for (ws_5m, ws_1d) in window_combos:
             try:
@@ -1233,7 +1233,7 @@ def main() -> None:
                 continue
             for cnn_key in cnn_keys_5m:
                 for k in GATED_HORIZON_KS:
-                    for gate_type in ("A", "B"):
+                    for gate_type in ("A", "B", "C", "D"):
                         try:
                             r = run_one_combination_gated(
                                 window_size_5m=ws_5m,
@@ -1249,19 +1249,32 @@ def main() -> None:
                             )
                         except Exception as e:
                             gated_lines.append(
-                                f"{'Gate_' + gate_type:>6} {ws_5m:>6} {ws_1d:>6} {cnn_key:>12} {k:>4} {'—':>8} {'N/A':>8} {'N/A':>8} {'N/A':>8} Error: {e}"
+                                f"{'Gate_' + gate_type:>6} {ws_5m:>6} {ws_1d:>6} {cnn_key:>12} {k:>4} {'—':>8} {'N/A':>8} {'—':>8} {'N/A':>8} {'N/A':>8} Error: {e}"
                             )
                             continue
                         auc_lgb = r.get("auc_lgb", float("nan"))
                         auc_lbl = r.get("auc_label_shuf", float("nan"))
+                        auc_neg = r.get("auc_lgb_neg_score")
                         n_kept = r.get("n_samples", 0)
-                        if auc_lgb >= 0.53 and (np.isnan(auc_lbl) or abs(auc_lbl - 0.5) < 0.06):
-                            judge = "conditional signal; suggest hierarchical policy (1d regime, 5m timing)"
+                        if gate_type == "D":
+                            if not np.isnan(auc_lgb) and auc_lgb < 0.5 and auc_neg is not None and auc_neg > 0.5:
+                                judge = "反向可學 (down regime)"
+                            elif (np.isnan(auc_lgb) or auc_lgb < 0.55) and (auc_neg is None or auc_neg < 0.55):
+                                judge = "down 可能無訊號或對齊/切分/label 有問題"
+                            elif auc_lgb >= 0.53 and (np.isnan(auc_lbl) or abs(auc_lbl - 0.5) < 0.06):
+                                judge = "conditional signal; suggest hierarchical policy (1d regime, 5m timing)"
+                            else:
+                                judge = ""
+                            auc_neg_str = _fmt_report(auc_neg) if auc_neg is not None else "—"
                         else:
-                            judge = ""
+                            if auc_lgb >= 0.53 and (np.isnan(auc_lbl) or abs(auc_lbl - 0.5) < 0.06):
+                                judge = "conditional signal; suggest hierarchical policy (1d regime, 5m timing)"
+                            else:
+                                judge = ""
+                            auc_neg_str = "—"
                         gated_lines.append(
                             f"{'Gate_' + gate_type:>6} {ws_5m:>6} {ws_1d:>6} {cnn_key:>12} {k:>4} {n_kept:>8} "
-                            f"{_fmt_report(auc_lgb):>8} {_fmt_report(auc_lbl):>8} {_fmt_report(r.get('auc_market_shuf')):>8} {judge:>50}"
+                            f"{_fmt_report(auc_lgb):>8} {auc_neg_str:>8} {_fmt_report(auc_lbl):>8} {_fmt_report(r.get('auc_market_shuf')):>8} {judge:>50}"
                         )
                     gc.collect()
         gated_text = "\n".join(gated_lines)
