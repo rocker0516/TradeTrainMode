@@ -172,6 +172,7 @@ class TradingEnvironment(gym.Env):
             conviction_trend_min_strength=float(kwargs.get("conviction_trend_min_strength", Config.CONVICTION_TREND_MIN_STRENGTH)),
             conviction_min_abs_pos=float(kwargs.get("conviction_min_abs_pos", Config.CONVICTION_MIN_ABS_POS)),
             conviction_trend_score_scale=float(kwargs.get("conviction_trend_score_scale", getattr(Config, "CONVICTION_TREND_SCORE_SCALE", 10.0))),
+            regime_alignment_bonus_weight=float(kwargs.get("regime_alignment_bonus_weight", getattr(Config, "REGIME_ALIGNMENT_BONUS_WEIGHT", 0.0))),
         )
         
         # Tracker
@@ -253,6 +254,10 @@ class TradingEnvironment(gym.Env):
         self.episode_active_exit_count = 0
         # 順向交易獎勵本回合累計（主線 STATS 用）
         self.episode_conviction_bonus_sum = 0.0
+        # 純對數報酬本回合累計 = sum(log(E_t/E_{t-1})) = log(E_final/E_init)，供 STATS 與 Est. ROI 對齊實際盈虧
+        self.episode_log_return_sum = 0.0
+        # Regime 對齊 bonus 本回合累計（主線 STATS 分解用）
+        self.episode_regime_alignment_bonus_sum = 0.0
 
         # Action-conditioned effects cache (for next obs)
         self._last_action_effects = {}
@@ -467,6 +472,8 @@ class TradingEnvironment(gym.Env):
         self.episode_flat_steps = 0
         self.episode_active_exit_count = 0
         self.episode_conviction_bonus_sum = 0.0
+        self.episode_log_return_sum = 0.0
+        self.episode_regime_alignment_bonus_sum = 0.0
 
         self.last_trade_step = -999999
         self.position_entry_step = None
@@ -767,6 +774,8 @@ class TradingEnvironment(gym.Env):
         episode_trade_count: int,
         episode_flat_steps: int,
         episode_conviction_bonus_sum: float = 0.0,
+        episode_log_return_sum: float = 0.0,
+        episode_regime_alignment_bonus_sum: float = 0.0,
         terminated: bool = False,
         truncated: bool = False,
         termination_reason: Optional[str] = None,
@@ -787,6 +796,8 @@ class TradingEnvironment(gym.Env):
             episode_trade_count: 本回合發生交易的 step 數（position_change > threshold）
             episode_flat_steps: 本回合空倉步數（|final_pos_pct|<flat_threshold，與 cost_flat 同口徑）
             episode_conviction_bonus_sum: 本回合順向交易獎勵累計（主線 STATS 用）
+            episode_log_return_sum: 本回合純對數報酬累計 = log(E_final/E_init)（STATS Est. ROI 用）
+            episode_regime_alignment_bonus_sum: 本回合 regime 對齊 bonus 累計（STATS 分解用）
             terminated: Gymnasium terminated（自然終止）
             truncated: Gymnasium truncated（時間/資料截斷）
             termination_reason: 終止原因（若結束回合）
@@ -820,6 +831,8 @@ class TradingEnvironment(gym.Env):
             info["episode_trade_count"] = int(max(0, int(episode_trade_count)))
             info["episode_flat_steps"] = int(max(0, int(episode_flat_steps)))
             info["episode_conviction_bonus_sum"] = float(episode_conviction_bonus_sum)
+            info["episode_log_return_sum"] = float(episode_log_return_sum)
+            info["episode_regime_alignment_bonus_sum"] = float(episode_regime_alignment_bonus_sum)
             info["fees_to_equity_ratio"] = (
                 float(getattr(self.executor, "total_fees", 0.0)) / float(max(1e-8, new_equity))
             )
@@ -944,6 +957,25 @@ class TradingEnvironment(gym.Env):
             return np.zeros_like(action)
         return action
 
+    def _apply_regime_action_projection(self, action: np.ndarray) -> np.ndarray:
+        """
+        依當前 regime（gate A/C/neutral）對 action 做投影：
+        - Gate A（1d up）：clamp 到 [0, +1]（只允許多）
+        - Gate C（1d down）：clamp 到 [-1, 0]（只允許空）
+        - Neutral：clamp 到 [0, 0] 或極小範圍（實作為 0）
+        """
+        gate_flags = self.market_data.get_gate_flags(self.current_step)
+        gate_A = float(gate_flags[0])  # 1 when 1d up
+        gate_C = float(gate_flags[2])  # -1 when 1d down, else 0
+        a = float(action[0]) if hasattr(action, "__len__") and len(action) > 0 else float(action)
+        if gate_A >= 0.5:
+            a = np.clip(a, 0.0, 1.0)
+        elif gate_C <= -0.5:
+            a = np.clip(a, -1.0, 0.0)
+        else:
+            a = 0.0
+        return np.array([a], dtype=action.dtype)
+
     def _process_action_and_execute(
         self,
         *,
@@ -963,7 +995,8 @@ class TradingEnvironment(gym.Env):
             (final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, action_overridden_flag, trade_freq_blocked)
         """
         action_used = self._apply_stop_loss_cooldown(action, prices.current_price, last_equity)
-        # action 是否被 env 覆寫（目前主要是 cooldown）
+        action_used = self._apply_regime_action_projection(action_used)
+        # action 是否被 env 覆寫（cooldown 或 regime projection）
         try:
             action_overridden_flag = bool(abs(float(action_used[0]) - float(action[0])) > 1e-8)
         except (TypeError, ValueError, IndexError):
@@ -1208,6 +1241,15 @@ class TradingEnvironment(gym.Env):
         return stop_loss_triggered, liq_triggered
 
     def step(self, action):
+        """
+        Step 流程（regime 相關）：
+        1. 取得當前 regime（A/C/neutral）與分數（p_up/strength）：在 2 的 action projection 與 9 的 reward 時使用。
+        2. 從 policy 拿 action → 連續動作做 action projection（A:[0,1]、C:[-1,0]、neutral:0）。
+        3. 更新倉位、計算成本（cost）。
+        4. 計算 PnL（含在 reward 主線）。
+        5. 加上 regime 對齊 bonus（reward sign alignment：A 多加分、C 空加分，依 dir_strength 加權）。
+        6. 回傳 obs（含 gate_flags one-hot + regime_score [p_up, p_down, dir_strength]）。
+        """
         # 記錄本次 action 對應的 bar index（render/事件對齊用）
         step_idx = int(self.current_step)
 
@@ -1312,8 +1354,10 @@ class TradingEnvironment(gym.Env):
         )
         self.done = bool(terminated or truncated)
         
-        # 9. Reward Calculation
-        # Prepare params
+        # 9. Reward Calculation（含 regime 對齊 bonus：傳入本 step 的 gate_flags 與 regime_score）
+        # 本 step 執行的 bar 為 step_idx，regime 與分數以此為準
+        gate_flags_step = self.market_data.get_gate_flags(step_idx)
+        regime_score_step = self.market_data.get_regime_score(step_idx)
         pos_notional_reward = new_size * mark_price
         max_cap_reward = max(new_equity, 1e-12) * self.leverage
         pos_pct_reward = np.clip(pos_notional_reward / max_cap_reward, -1.0, 1.0)
@@ -1342,9 +1386,19 @@ class TradingEnvironment(gym.Env):
             fee_budget_ratio=1.0,
             position_pct=pos_pct_reward,
             abs_position_pct=abs(pos_pct_reward),
-            trend_score=metrics['trend_score']
+            trend_score=metrics['trend_score'],
+            gate_flags=gate_flags_step,
+            regime_score=regime_score_step,
         )
         self.episode_conviction_bonus_sum += getattr(self.reward_calculator, "last_conviction_bonus", 0.0)
+        # 純對數報酬與 regime bonus 累計（與 reward 分解一致，供 STATS 顯示真實 log return / Est. ROI）
+        safe_last = max(last_equity, 1e-8)
+        safe_new = max(new_equity, 1e-8)
+        self.episode_log_return_sum += float(np.log(safe_new / safe_last))
+        _reg = getattr(self.reward_calculator, "last_regime_alignment_bonus", 0.0)
+        self.episode_regime_alignment_bonus_sum += float(
+            np.nan_to_num(_reg, nan=0.0, posinf=0.0, neginf=0.0)
+        )
 
         # 9. Cost / Constraint（成本線）
         # 我們使用「當下價格」計算風險訊號（含 stop_loss_missing / 距離爆倉 / margin_ratio 等），
@@ -1402,6 +1456,8 @@ class TradingEnvironment(gym.Env):
             episode_trade_count=int(self.episode_trade_count),
             episode_flat_steps=int(self.episode_flat_steps),
             episode_conviction_bonus_sum=float(self.episode_conviction_bonus_sum),
+            episode_log_return_sum=float(self.episode_log_return_sum),
+            episode_regime_alignment_bonus_sum=float(self.episode_regime_alignment_bonus_sum),
             terminated=bool(terminated),
             truncated=bool(truncated),
             termination_reason=termination_reason,
@@ -1461,6 +1517,12 @@ class TradingEnvironment(gym.Env):
                     info["render_path"] = str(out_path)
                 self._rendered_this_episode = True
 
+        # 若 reward 非有限值則寫入 info 供診斷，再替換為 0 避免訓練崩潰（根本原因應在 reward/equity 計算處修復）
+        if not np.isfinite(reward):
+            info["reward_was_nan_or_inf"] = 1.0
+            reward = float(np.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0))
+        else:
+            reward = float(reward)
         # Gymnasium: (obs, reward, terminated, truncated, info)
         return self._get_observation(), reward, bool(terminated), bool(truncated), info
 

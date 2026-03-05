@@ -75,7 +75,7 @@ class TrainConfig:
     - 注意：目前 cost_fric 固定為 0.0，此參數供未來擴充使用
     """
 
-    TRADE_FREQ_COST_LIMIT: float = 0.4
+    TRADE_FREQ_COST_LIMIT: float = 0.6
     """
     交易頻率成本限制（交易比例通道）
     - 單位：最近 N 步內「交易步數 / N」的上限（比例，0~1）
@@ -88,7 +88,7 @@ class TrainConfig:
     - 交易比例 = 窗口內交易次數 / min(窗口寬度, 已收集步數)
     """
 
-    FLAT_COST_LIMIT: float = 0.4
+    FLAT_COST_LIMIT: float = 0.6
     """
     空倉成本限制（鼓勵持倉、允許避險）
     - 單位：最近 N 步內「空倉步數 / N」的上限（比例，0~1）
@@ -127,8 +127,11 @@ class TrainConfig:
     STATS_WINDOW_EPISODES: int = 100
     """統計視窗大小：最多取最近 M 個 episode（滾動視窗，建議：100）"""
     
-    REWARD_SCALE: float = 10.0
+    REWARD_SCALE: float = 1.0
     """獎勵尺度：1.0 代表獎勵不放大，>1.0 會放大獎勵信號"""
+
+    REGIME_ALIGNMENT_BONUS_WEIGHT: float = 0.0001
+    """Regime 對齊 bonus 權重：A 狀態多頭加分、C 狀態空頭加分，依 dir_strength 加權；0=不啟用。可經 CLI --regime_alignment_bonus_weight 覆寫。"""
 
     COST_PENALTY_NORMALIZE_FACTOR: float = 1.0
     """
@@ -142,7 +145,7 @@ class TrainConfig:
         "risk": 1.0,       # 死亡成本 0/1，除小一點讓懲罰有感
         "fric": 1.0,         # 手續費比例
         "trade_freq":1000.0,   # 交易步 0/1
-        "flat": 1000.0,         # 空倉比例 0~1
+        "flat": 5000.0,         # 空倉比例 0~1
     }
 
     # ==================== SB3 SAC 超參數 ====================
@@ -166,7 +169,7 @@ class TrainConfig:
     - 4 或 8：瓶頸在 GPU 時可提升 it/s，但更新變疏、對訓練未必有益，僅在需要衝高吞吐時使用
     """
     
-    GRADIENT_STEPS: int = 2
+    GRADIENT_STEPS: int = 1
     """梯度步數：每次更新時做的梯度步數；建議與 TRAIN_FREQ 同值。過大僅提升 it/s，不利學習效率"""
 
     # ==================== Policy / 網路結構（偏泛化：較小容量 + 正則）====================
@@ -314,7 +317,7 @@ class TrainConfig:
     EVAL_MAX_EPISODE_STEPS: int = 288 * 14
     """Eval episode 最大步數（避免回合過長拖慢訓練）"""
     
-    EVAL_PRINT_EACH_EPISODE: bool = True
+    EVAL_PRINT_EACH_EPISODE: bool = False
     """是否在每個 eval episode 結束時在 Terminal 顯示一行摘要（為 True 時會自動關閉進度條，避免 Windows 下與進度條衝突導致崩潰）"""
     
     EVAL_PRINT_PREFIX: str = "[EVAL]"

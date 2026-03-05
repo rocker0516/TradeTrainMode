@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 """
 SB3（stable-baselines3）用的多輸入觀測編碼器：雙分支 CNN + 向量 MLP
 
@@ -266,6 +268,26 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
         else:
             self.cost_state_dim = 0
 
+        # gate_flags / regime_score 為可選（regime 資訊：A/C/neutral + p_up, p_down, dir_strength）
+        self.has_gate_flags = "gate_flags" in observation_space.spaces
+        if self.has_gate_flags:
+            gate_shp = observation_space.spaces["gate_flags"].shape
+            if gate_shp is None or len(gate_shp) != 1:
+                raise ValueError("gate_flags 必須是 1D 向量 spaces.Box")
+            self.gate_flags_dim = int(gate_shp[0])
+            vdim += self.gate_flags_dim
+        else:
+            self.gate_flags_dim = 0
+        self.has_regime_score = "regime_score" in observation_space.spaces
+        if self.has_regime_score:
+            rs_shp = observation_space.spaces["regime_score"].shape
+            if rs_shp is None or len(rs_shp) != 1:
+                raise ValueError("regime_score 必須是 1D 向量 spaces.Box")
+            self.regime_score_dim = int(rs_shp[0])
+            vdim += self.regime_score_dim
+        else:
+            self.regime_score_dim = 0
+
         # ---- 双CNN架构 ----
         self.cnn_5m_target = Target5mCNN(in_channels=feat_5m_target, emb_dim=emb_5m_target)
         self.cnn_5m_others = Others5mCNN(in_channels=feat_5m_others, emb_dim=emb_5m_others)
@@ -320,6 +342,18 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
             obs = observations
         else:
             obs = {k: v.float() for k, v in observations.items()}
+        # 診斷：若 obs 含 nan/inf 則記錄後再替換，方便追查根本原因（應在 Env/Observer 修復）
+        bad_keys = [k for k, v in obs.items() if not torch.isfinite(v).all()]
+        if bad_keys:
+            if not hasattr(DualCnnFeatureExtractor, "_obs_nan_warn_count"):
+                DualCnnFeatureExtractor._obs_nan_warn_count = 0
+            DualCnnFeatureExtractor._obs_nan_warn_count += 1
+            if DualCnnFeatureExtractor._obs_nan_warn_count <= 10 or DualCnnFeatureExtractor._obs_nan_warn_count % 1000 == 0:
+                logging.warning(
+                    "[DualCnnFeatureExtractor] obs 含 nan/inf 的 key: %s（已替換為 0，請檢查 Env/Observer 或 reward 來源；出現次數=%d）",
+                    bad_keys, DualCnnFeatureExtractor._obs_nan_warn_count,
+                )
+            obs = {k: torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0) for k, v in obs.items()}
 
         # ---- 5m 分支（分离）----
         e5_target = self.cnn_5m_target(obs["price_seq_target"])
@@ -350,6 +384,18 @@ class DualCnnFeatureExtractor(BaseFeaturesExtractor):
             batch_size = obs["account_state"].shape[0]
             device = obs["account_state"].device
             vec_list.append(torch.zeros(batch_size, self.cost_state_dim, device=device, dtype=obs["account_state"].dtype))
+        if self.has_gate_flags:
+            vec_list.append(obs["gate_flags"])
+        else:
+            batch_size = obs["account_state"].shape[0]
+            device = obs["account_state"].device
+            vec_list.append(torch.zeros(batch_size, self.gate_flags_dim, device=device, dtype=obs["account_state"].dtype))
+        if self.has_regime_score:
+            vec_list.append(obs["regime_score"])
+        else:
+            batch_size = obs["account_state"].shape[0]
+            device = obs["account_state"].device
+            vec_list.append(torch.zeros(batch_size, self.regime_score_dim, device=device, dtype=obs["account_state"].dtype))
 
         v = torch.cat(vec_list, dim=1)
         ev = self.mlp_vec(v)

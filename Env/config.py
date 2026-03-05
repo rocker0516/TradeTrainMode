@@ -15,7 +15,7 @@ class Config:
     # -------------------------------------------------------------------------
     # 資金與交易成本
     # -------------------------------------------------------------------------
-    INITIAL_BALANCE: float = 500.0
+    INITIAL_BALANCE: float = 1000.0
     TRANSACTION_FEE: float = 0.01  # 手續費百分比（例：0.04 代表 0.04%）
 
     # -------------------------------------------------------------------------
@@ -23,15 +23,15 @@ class Config:
     # -------------------------------------------------------------------------
     WINDOW_SIZE: int = 288 * 1.5  # 5m 根數，432 ≈ 1.5 天
     WINDOW_SIZE_1D: int = 30
-    MIN_EPISODE_STEPS: int = 288 * 15 * 1
-    MAX_EPISODE_STEPS: int = 288 * 15 * 1
+    MIN_EPISODE_STEPS: int = 288 * 31 * 1
+    MAX_EPISODE_STEPS: int = 288 * 31 * 1
     RISK_BASE_UPDATE_STEPS: int = 288  # 每 N steps 更新 daily_risk_base（用於單步倉位變化上限）
 
     # -------------------------------------------------------------------------
     # 槓桿、餘額與倉位限制
     # -------------------------------------------------------------------------
     LEVERAGE: float = 10.0
-    MIN_BALANCE: float = INITIAL_BALANCE * 0.6  # 最小餘額比例（0.5 = 50%）
+    MIN_BALANCE: float = INITIAL_BALANCE * 0.2  # 最小餘額比例（0.5 = 50%）
     MIN_POSITION_CHANGE: float = 0.0  # 最小調倉幅度 deadband（0 = 不啟用）
     MAX_STEP_POS_CHANGE_PCT: float = 0.5  # 單步最大持倉比例變化（0.5 = 50%）
     MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（供 ActionClipWrapper 等使用）
@@ -52,6 +52,8 @@ class Config:
     CONVICTION_TREND_MIN_STRENGTH: float = 0.35
     # 最小曝險門檻 [0,1]，僅當 abs(position_pct) >= 此值才加分，避免小倉刷分
     CONVICTION_MIN_ABS_POS: float = 0.5
+    # Regime 對齊 bonus 權重：A 狀態多頭加分、C 狀態空頭加分，依 dir_strength 加權；0=不啟用
+    REGIME_ALIGNMENT_BONUS_WEIGHT: float = 0.5
 
     # -------------------------------------------------------------------------
     # 手續費與 Fee Limit
@@ -110,6 +112,8 @@ class Config:
         "price_seq_1d_others",   # 1d 其他標的序列
         "account_state",         # 帳戶狀態（22 維）
         "context_state",         # 情境狀態（8 維）
+        "gate_flags",            # Gate A/B/C multi-hot（1d up, 5m 流動性, 1d down）
+        "regime_score",          # [p_up, p_down, dir_strength] 強度分數（與 gate 同頻率）
     )
 
     # -------------------------------------------------------------------------

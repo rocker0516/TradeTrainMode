@@ -92,7 +92,9 @@ class TradingObserver:
         market_space = self._build_market_space()
         account_space = self._build_account_space()
         context_space = self._build_context_space()
-        all_space = {**market_space, **account_space, **context_space}
+        gate_space = self._build_gate_space()
+        regime_score_space = self._build_regime_score_space()
+        all_space = {**market_space, **account_space, **context_space, **gate_space, **regime_score_space}
 
         # 依 Config.OBS_STATE_KEYS 篩選納入 obs 的 state（預設全部）
         obs_state_keys = getattr(Config, "OBS_STATE_KEYS", None)
@@ -156,6 +158,34 @@ class TradingObserver:
                 high=np.inf,
                 shape=(self._eff_context_state_dim,),
                 dtype=self.obs_dtype,
+            )
+        }
+
+    def _build_gate_space(self) -> dict:
+        """
+        定義 Gate flags 觀察空間：gate_A, gate_B, gate_C。
+        Gate A: 1d up (0/1), B: 5m 高流動性 (0/1), C: 1d down 為 sign-flip (-1 或 0)。
+        """
+        return {
+            'gate_flags': spaces.Box(
+                low=-1.0,
+                high=1.0,
+                shape=(3,),
+                dtype=np.float32,
+            )
+        }
+
+    def _build_regime_score_space(self) -> dict:
+        """
+        定義 Regime score 觀察空間：[p_up, p_down, dir_strength]。
+        p_up/p_down 為上行/下行機率或分數 [0,1]，dir_strength 為方向強度 [0,1]（越遠離 0.5 越確定）。
+        """
+        return {
+            'regime_score': spaces.Box(
+                low=0.0,
+                high=1.0,
+                shape=(3,),
+                dtype=np.float32,
             )
         }
 
@@ -276,8 +306,10 @@ class TradingObserver:
             current_price=current_price,
             atr_ratio=atr_ratio,
         )
+        gate_obs = self._get_gate_obs(step_idx, market_data)
+        regime_score_obs = self._get_regime_score_obs(step_idx, market_data)
 
-        out = {**market_obs, **account_obs, **context_obs}
+        out = {**market_obs, **account_obs, **context_obs, **gate_obs, **regime_score_obs}
         # 僅保留 Config 啟用的 state keys（與 observation_space 一致）
         obs_keys = getattr(self, "_obs_state_keys", None)
         if obs_keys is not None:
@@ -535,3 +567,17 @@ class TradingObserver:
         context_state_full = np.nan_to_num(context_state_full, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         context_state = context_state_full[self._obs_context_state_idx]
         return {'context_state': context_state}
+
+    def _get_gate_obs(self, step_idx: int, market_data: MarketData) -> dict:
+        """
+        生成 Gate flags 觀察值：gate_A, gate_B, gate_C 的 multi-hot 向量。
+        """
+        gate_flags = market_data.get_gate_flags(step_idx)
+        return {'gate_flags': np.ascontiguousarray(gate_flags)}
+
+    def _get_regime_score_obs(self, step_idx: int, market_data: MarketData) -> dict:
+        """
+        生成 Regime score 觀察值：[p_up, p_down, dir_strength]，供 agent 知悉「在哪裡」與「有多確定」。
+        """
+        regime_score = market_data.get_regime_score(step_idx)
+        return {'regime_score': np.ascontiguousarray(regime_score)}

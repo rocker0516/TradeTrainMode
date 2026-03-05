@@ -257,14 +257,30 @@ class LagrangianCallback(BaseCallback):
             if isinstance(ep, dict):
                 ep_main_rewards.append(float(ep.get("r", 0.0)))
         
-        # 環境原生統計 (TradingEnv)
+        # 環境原生統計 (TradingEnv)：主線 reward 分解 = log_return + conviction_bonus + regime_alignment_bonus
         profits = [float(x.get("profit", 0.0)) for x in self.ep_infos]
         conviction_bonus_sums = [float(x.get("episode_conviction_bonus_sum", 0.0)) for x in self.ep_infos]
+        log_return_sums = [float(x.get("episode_log_return_sum", 0.0)) for x in self.ep_infos]
+        regime_alignment_bonus_sums = [float(x.get("episode_regime_alignment_bonus_sum", 0.0)) for x in self.ep_infos]
+        # 診斷：reward 曾被 nan/inf 而替換的步數（根本原因應在 Env reward/equity 計算處修復）
+        reward_sanitized_count = sum(1 for x in self.ep_infos if float(x.get("reward_was_nan_or_inf", 0.0)) > 0)
         trade_stats = compute_trade_stats(list(self.ep_infos))
 
         # --- 2. 計算平均 ---
         avg_ret_orig = np.mean(ep_ret_origs) if ep_ret_origs else 0.0
         avg_conviction_bonus_sum = np.mean(conviction_bonus_sums) if conviction_bonus_sums else 0.0
+        # 純對數報酬由 env 提供，與實際盈虧一致（log(E_final/E_init)），Est. ROI 據此計算
+        avg_log_ret_only = np.mean(log_return_sums) if log_return_sums else 0.0
+        avg_regime_alignment_bonus_sum = (
+            float(np.nanmean(regime_alignment_bonus_sums))
+            if regime_alignment_bonus_sums
+            else 0.0
+        )
+        if np.isnan(avg_regime_alignment_bonus_sum):
+            avg_regime_alignment_bonus_sum = 0.0
+        # 若 env 未提供 episode_log_return_sum（如舊版或 eval），用 return_orig 分解推估以保持向後相容
+        if log_return_sums and all(v == 0.0 for v in log_return_sums) and ep_ret_origs:
+            avg_log_ret_only = avg_ret_orig - avg_conviction_bonus_sum - avg_regime_alignment_bonus_sum
         avg_main_reward = np.mean(ep_main_rewards) if ep_main_rewards else 0.0
         avg_ret_orig_scaled = np.mean(ep_ret_orig_scaleds) if ep_ret_orig_scaleds else 0.0
         # 若 wrapper 有提供 return_total，優先用它（避免 VecMonitor 受其他 wrapper 影響）
@@ -353,8 +369,7 @@ class LagrangianCallback(BaseCallback):
         print("="*60)
         
         # Section 1: Main Reward (Training Objective)
-        # return_orig = 主線每步 reward 累加 = LogRet + ConvictionBonus；R_scaled = return_orig * scale；R_total 已含順向獎勵
-        avg_log_ret_only = avg_ret_orig - avg_conviction_bonus_sum
+        # return_orig = 主線每步 reward 累加 = LogRet + ConvictionBonus + RegimeBonus；純 Log Return 由 env 提供，與實際盈虧一致
         print(f"[{'MAIN REWARD':^20}]")
         print("  --- RL Training Signal (What Agent Sees) ---")
         print(f"  Total Reward (R_total)      : {avg_total_reward:8.4f}  [= R_scaled - penalty，已含順向獎勵]")
@@ -363,15 +378,18 @@ class LagrangianCallback(BaseCallback):
         
         print("  --- Original Market Performance (主線每步 reward 累加 = LogRet + Bonus) ---")
         print(f"  Original Return (LogRet+Bonus): {avg_ret_orig:8.4f}")
-        print(f"    ↳ Log Return (pure)       : {avg_log_ret_only:8.4f}")
+        print(f"    ↳ Log Return (pure)       : {avg_log_ret_only:8.4f}  [= log(E_final/E_init)，與 Simple Return 對應]")
         print(f"    ↳ Conviction Bonus Sum   : {avg_conviction_bonus_sum:8.4f}")
+        print(f"    ↳ Regime Alignment Bonus : {avg_regime_alignment_bonus_sum:8.4f}")
         roi_est = (np.exp(avg_log_ret_only) - 1.0) * 100.0
-        print(f"  Est. ROI (from LogRet)      : {roi_est:8.2f} %")
+        print(f"  Est. ROI (from LogRet)      : {roi_est:8.2f} %  [應與 Simple Return 同口徑]")
         avg_simple_ret = end_stats.get("avg_simple_return")
         if avg_simple_ret is not None:
             print(f"  Simple Return (同 Eval 口徑) : {avg_simple_ret * 100:8.2f} %  [= (final_bal/init_bal)-1]")
         print(f"  Avg Profit (USDT)           : {avg_profit:8.2f}")
         print(f"  Win Rate                    : {win_rate:8.1f} %")
+        if reward_sanitized_count > 0:
+            print(f"  [診斷] reward 曾為 nan/inf 而替換為 0 的步數: {reward_sanitized_count}（請檢查 Env reward/equity 計算）")
         print("-" * 60)
         
         # Section 2: Cost Line (Constraints)

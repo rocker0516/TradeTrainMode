@@ -91,6 +91,7 @@ class EnvironmentConfig:
     flat_window_steps: int = TrainConfig.FLAT_WINDOW_STEPS
     trade_freq_window_steps: int = TrainConfig.TRADE_FREQ_WINDOW_STEPS
     trade_freq_cost_limit: float = TrainConfig.TRADE_FREQ_COST_LIMIT
+    regime_alignment_bonus_weight: float = TrainConfig.REGIME_ALIGNMENT_BONUS_WEIGHT
 
     def to_dict(self) -> Dict[str, any]:
         """转换为字典（用于环境初始化）。訓練環境關閉 render，僅 eval 在 to_eval_dict 中開啟。"""
@@ -110,6 +111,7 @@ class EnvironmentConfig:
             "flat_window_steps": self.flat_window_steps,
             "trade_freq_window_steps": self.trade_freq_window_steps,
             "trade_freq_cost_limit": self.trade_freq_cost_limit,
+            "regime_alignment_bonus_weight": self.regime_alignment_bonus_weight,
             "render_enabled": False,
             "render_on_done": False,
         }
@@ -293,6 +295,7 @@ class TrainingConfigBuilder:
             holdout_months=TrainConfig.HOLDOUT_MONTHS,
             trade_freq_window_steps=int(getattr(args, "trade_freq_window_steps", TrainConfig.TRADE_FREQ_WINDOW_STEPS)),
             trade_freq_cost_limit=float(getattr(args, "trade_freq_cost_limit", TrainConfig.TRADE_FREQ_COST_LIMIT)),
+            regime_alignment_bonus_weight=float(getattr(args, "regime_alignment_bonus_weight", TrainConfig.REGIME_ALIGNMENT_BONUS_WEIGHT)),
         )
         
         # 构建模型配置（train_freq / gradient_steps / compile_policy 可由 CLI 覆寫）

@@ -25,7 +25,11 @@ class RewardCalculator:
     # --- Debug / diagnostics (set on every compute call) ---
     last_conviction_bonus: float = 0.0
     last_conviction_active: bool = False
-    
+    last_regime_alignment_bonus: float = 0.0
+
+    # Regime 對齊 bonus（A 多加分、C 空加分，依 dir_strength 加權）；0 表示不啟用
+    regime_alignment_bonus_weight: float = 0.0
+
     def compute(
         self,
         *,
@@ -38,18 +42,35 @@ class RewardCalculator:
         **kwargs
     ) -> float:
         """
-        計算主線獎勵：log return 乘以權重。
+        計算主線獎勵：log return 乘以權重；可選 regime 對齊 bonus（需 env 傳入 gate_flags、regime_score）。
         """
-        # Default (no shaping)
         self.last_conviction_bonus = 0.0
         self.last_conviction_active = False
+        self.last_regime_alignment_bonus = 0.0
 
         safe_last = max(last_equity, 1e-8)
         safe_new = max(new_equity, 1e-8)
-        
         log_ret = np.log(safe_new / safe_last)
-        
         reward = float(self.base_log_ret_weight * log_ret)
+
+        # Regime 對齊 bonus（reward sign alignment）：A 狀態多頭加分、C 狀態空頭加分，依 dir_strength 加權
+        w_reg = float(getattr(self, "regime_alignment_bonus_weight", 0.0))
+        if w_reg > 0.0 and "gate_flags" in kwargs and "regime_score" in kwargs:
+            gate_flags = kwargs["gate_flags"]
+            regime_score = kwargs["regime_score"]
+            if hasattr(gate_flags, "__len__") and len(gate_flags) >= 3 and hasattr(regime_score, "__len__") and len(regime_score) >= 3:
+                gate_A = float(gate_flags[0])
+                gate_C = float(gate_flags[2])
+                dir_strength = float(regime_score[2])
+                pos_pct = float(kwargs.get("position_pct", 0.0))
+                regime_dir = 1.0 if gate_A >= 0.5 else (-1.0 if gate_C <= -0.5 else 0.0)
+                align = pos_pct * regime_dir
+                regime_bonus = w_reg * dir_strength * np.clip(align, -1.0, 1.0)
+                self.last_regime_alignment_bonus = float(
+                    np.nan_to_num(regime_bonus, nan=0.0, posinf=0.0, neginf=0.0)
+                )
+                reward += float(regime_bonus)
+        reward = float(np.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0))
         return reward
     
     def get_info(self) -> dict:
@@ -68,24 +89,26 @@ def create_default_calculator(
     conviction_trend_min_strength: float = 0.8,
     conviction_min_abs_pos: float = 0.15,
     conviction_trend_score_scale: float = 10.0,
+    regime_alignment_bonus_weight: float = 0.0,
 ) -> RewardCalculator:
     """
     工廠函數：建立 reward calculator。
 
     Notes:
     - 預設仍是「純 log-return」(conviction_trend_bonus_weight=0) => 不改變現有行為。
-    - 若 conviction_trend_bonus_weight > 0，則啟用「強訊號 + 大倉 + 同向」的 conviction bonus：
-      只在 trend 訊號夠強且曝險夠大時才加分，避免小倉刷分。
-    - conviction_trend_score_scale：trend_score 為 (ma50-ma200)/ma200 小數比，乘上此倍數後再 tanh 算 strength。
+    - 若 conviction_trend_bonus_weight > 0，則啟用「強訊號 + 大倉 + 同向」的 conviction bonus。
+    - regime_alignment_bonus_weight > 0：啟用 regime 對齊 bonus（A 多加分、C 空加分，依 dir_strength 加權）。
     """
-    # 兼容舊接口，但默認不再使用終局懲罰；允許外部調整 log-return 權重
+    w_reg = float(regime_alignment_bonus_weight)
     if float(conviction_trend_bonus_weight) <= 0.0:
-        return RewardCalculator(
+        calc = RewardCalculator(
             c_liq=0.0,
             fee_limit_penalty=0.0,
-            base_log_ret_weight=base_log_ret_weight
+            base_log_ret_weight=base_log_ret_weight,
+            regime_alignment_bonus_weight=w_reg,
         )
-    return ConvictionTrendRewardCalculator(
+        return calc
+    calc = ConvictionTrendRewardCalculator(
         c_liq=0.0,
         fee_limit_penalty=0.0,
         base_log_ret_weight=base_log_ret_weight,
@@ -93,13 +116,16 @@ def create_default_calculator(
         conviction_trend_min_strength=float(conviction_trend_min_strength),
         conviction_min_abs_pos=float(conviction_min_abs_pos),
         conviction_trend_score_scale=float(conviction_trend_score_scale),
+        regime_alignment_bonus_weight=w_reg,
     )
+    return calc
 
 
 @dataclass
 class ConvictionTrendRewardCalculator(RewardCalculator):
     """
-    Conviction + Trend Alignment Reward (可選 shaping)
+    Conviction + Trend Alignment Reward (可選 shaping)；
+    若 env 傳入 gate_flags / regime_score，且 regime_alignment_bonus_weight > 0，會再加上 regime 對齊 bonus。
 
     目標：讓 agent 在「訊號明確」時，願意用「較大倉位」去承擔風險並賺取主線收益，
     而不是收斂到接近 0 的曝險。
@@ -172,4 +198,22 @@ class ConvictionTrendRewardCalculator(RewardCalculator):
         self.last_conviction_bonus = float(bonus)
         self.last_conviction_active = True
 
-        return float(base + bonus)
+        out = float(base + bonus)
+        # Regime 對齊 bonus（與 base RewardCalculator 相同邏輯，依 gate_flags + regime_score）
+        w_reg = float(getattr(self, "regime_alignment_bonus_weight", 0.0))
+        if w_reg > 0.0 and "gate_flags" in kwargs and "regime_score" in kwargs:
+            gate_flags = kwargs["gate_flags"]
+            regime_score = kwargs["regime_score"]
+            if hasattr(gate_flags, "__len__") and len(gate_flags) >= 3 and hasattr(regime_score, "__len__") and len(regime_score) >= 3:
+                gate_A = float(gate_flags[0])
+                gate_C = float(gate_flags[2])
+                dir_strength = float(regime_score[2])
+                pos_pct = float(kwargs.get("position_pct", 0.0))
+                regime_dir = 1.0 if gate_A >= 0.5 else (-1.0 if gate_C <= -0.5 else 0.0)
+                align = pos_pct * regime_dir
+                regime_bonus = w_reg * dir_strength * np.clip(align, -1.0, 1.0)
+                self.last_regime_alignment_bonus = float(
+                    np.nan_to_num(regime_bonus, nan=0.0, posinf=0.0, neginf=0.0)
+                )
+                out += float(regime_bonus)
+        return float(np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0))

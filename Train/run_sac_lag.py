@@ -124,6 +124,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trade_freq_window_steps", type=int, default=TrainConfig.TRADE_FREQ_WINDOW_STEPS, help="交易頻率約束的窗口步數 N")
     parser.add_argument("--flat_cost_limit", type=float, default=TrainConfig.FLAT_COST_LIMIT, help="空倉成本限制（最近 N 步內空倉比例上限，0~1；鼓勵持倉、允許避險）")
     parser.add_argument("--flat_window_steps", type=int, default=TrainConfig.FLAT_WINDOW_STEPS, help="空倉比例約束的窗口步數 N")
+    parser.add_argument("--regime_alignment_bonus_weight", type=float, default=TrainConfig.REGIME_ALIGNMENT_BONUS_WEIGHT, help="Regime 對齊 bonus 權重（A 多/C 空加分，依 dir_strength 加權；0=不啟用）")
     parser.add_argument("--device", type=str, default=TrainConfig.DEVICE, help="計算設備：'cuda' / 'cpu' / 'auto'")
     parser.add_argument("--log_every_episodes", type=int, default=TrainConfig.LOG_EVERY_EPISODES, help="每 N 回合輸出交易統計")
     parser.add_argument("--update_lambda_every_steps", type=int, default=TrainConfig.UPDATE_LAMBDA_EVERY_STEPS, help="每 N steps 更新一次 lambda")
