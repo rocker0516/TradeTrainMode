@@ -99,25 +99,23 @@ class OptimizedDictReplayBuffer(ReplayBuffer):
         done: np.ndarray,
         infos: list[dict[str, Any]],
     ) -> None:
-        # Copy to avoid modification by reference
+        # Copy to avoid modification by reference；用 copyto 寫入預分配 slot，避免 np.array 產生臨時大陣列（it/s 優化）
         for key in self.observations.keys():
-            # Reshape needed when using multiple envs with discrete observations
             if isinstance(self.observation_space.spaces[key], spaces.Discrete):
                 obs[key] = obs[key].reshape((self.n_envs,) + self.obs_shape[key])
-            self.observations[key][self.pos] = np.array(obs[key])
+            np.copyto(self.observations[key][self.pos], obs[key])
 
         if self.optimize_memory_usage:
-            # Store next obs in-place in the observations ring buffer
             next_pos = (self.pos + 1) % self.buffer_size
             for key in self.observations.keys():
                 if isinstance(self.observation_space.spaces[key], spaces.Discrete):
                     next_obs[key] = next_obs[key].reshape((self.n_envs,) + self.obs_shape[key])
-                self.observations[key][next_pos] = np.array(next_obs[key])
+                np.copyto(self.observations[key][next_pos], next_obs[key])
         else:
             for key in self.next_observations.keys():
                 if isinstance(self.observation_space.spaces[key], spaces.Discrete):
                     next_obs[key] = next_obs[key].reshape((self.n_envs,) + self.obs_shape[key])
-                self.next_observations[key][self.pos] = np.array(next_obs[key])
+                np.copyto(self.next_observations[key][self.pos], next_obs[key])
 
         # Reshape to handle multi-dim and discrete action spaces
         action = action.reshape((self.n_envs, self.action_dim))
@@ -133,6 +131,18 @@ class OptimizedDictReplayBuffer(ReplayBuffer):
         if self.pos == self.buffer_size:
             self.full = True
             self.pos = 0
+
+    def _to_torch_cuda_friendly(self, arr: np.ndarray):
+        """搬到 device，cuda 時使用 non_blocking=True 讓傳輸與後續計算有機會重疊。"""
+        if not isinstance(arr, np.ndarray):
+            return self.to_torch(arr)
+        if not arr.flags.c_contiguous:
+            arr = np.ascontiguousarray(arr)
+        t = th.from_numpy(arr)
+        dev = self.device
+        if str(dev).startswith("cuda"):
+            return t.to(dev, non_blocking=True)
+        return t.to(dev)
 
     def sample(self, batch_size: int, env: Optional[VecNormalize] = None) -> DictReplayBufferSamples:  # type: ignore[override]
         # Match SB3 ReplayBuffer behavior when optimize_memory_usage=True:
@@ -168,8 +178,9 @@ class OptimizedDictReplayBuffer(ReplayBuffer):
             )
         assert isinstance(next_obs_, dict)
 
-        observations = {key: self.to_torch(obs) for key, obs in obs_.items()}
-        next_observations = {key: self.to_torch(obs) for key, obs in next_obs_.items()}
+        # 大體積 obs 用 non_blocking 搬到 GPU，減少「卡在傳輸」的瓶頸（僅 cuda 時）
+        observations = {key: self._to_torch_cuda_friendly(obs) for key, obs in obs_.items()}
+        next_observations = {key: self._to_torch_cuda_friendly(obs) for key, obs in next_obs_.items()}
 
         return DictReplayBufferSamples(
             observations=observations,

@@ -3,139 +3,227 @@ Env 專用設定檔。
 
 目的：
 - 將 `Env/trading_env.py` 依賴的參數集中在 `Env/` 下，方便環境側調整與維護。
-- 同時保留與舊路徑 `Train.config.Config` 的相容性（由 `Train/config.py` 轉匯入）。
-
-注意：
-- 本專案其他模組仍可能透過 kwargs 覆寫設定（`TradingEnvironment(..., **kwargs)`）。
+- 其他模組可透過 kwargs 覆寫（例如 TradingEnvironment(..., **kwargs)）。
 """
 
 from __future__ import annotations
 
 
 class Config:
-    """交易環境的預設參數集合（類似常數容器）。"""
+    """交易環境的預設參數集合（常數容器）。"""
 
-    # ---- 基本資金與交易成本 ----
+    # -------------------------------------------------------------------------
+    # 資金與交易成本
+    # -------------------------------------------------------------------------
     INITIAL_BALANCE: float = 1000.0
-    TRANSACTION_FEE: float = 0.01  # (%) 手續費百分比（例如 0.04 代表 0.04%）
+    TRANSACTION_FEE: float = 0.01  # 手續費百分比（例：0.04 代表 0.04%）
 
-    # ---- 視窗大小 ----
-    WINDOW_SIZE: int = 288 * 3  # 5m * 288 = 1 day
+    # -------------------------------------------------------------------------
+    # 視窗與步數
+    # -------------------------------------------------------------------------
+    WINDOW_SIZE: int = 288 * 1.5  # 5m 根數，432 ≈ 1.5 天
     WINDOW_SIZE_1D: int = 30
+    MIN_EPISODE_STEPS: int = 288 * 31 * 1
+    MAX_EPISODE_STEPS: int = 288 * 31 * 1
+    RISK_BASE_UPDATE_STEPS: int = 288  # 每 N steps 更新 daily_risk_base（用於單步倉位變化上限）
 
-    # ---- 風險基準資金更新頻率 ----
-    # daily_risk_base：用於「單步最大倉位變化限制(max_step_pos_change_pct)」的基準金額。
-    # 你希望每 288 steps（以 5m K 計，一天）更新一次，避免 base 資金跟著每一步波動而造成過度調倉。
-    # 註：訓練入口 `Train/run_sac_lag.py` 會顯式傳入此值，以確保訓練與評估一致。
-    RISK_BASE_UPDATE_STEPS: int = 288
-
-    # ---- 交易參數 ----
+    # -------------------------------------------------------------------------
+    # 槓桿、餘額與倉位限制
+    # -------------------------------------------------------------------------
     LEVERAGE: float = 10.0
-    MIN_BALANCE: float = INITIAL_BALANCE * 0.5 # 最小餘額 0. 5 代表 50%
-    MIN_EPISODE_STEPS: int = 288 * 31* 3 # 最小步數 288 * 31 = 8928 步
-    MAX_EPISODE_STEPS: int = 288 * 31* 3  # 最大步數 288 * 31 = 8928 步
-    # 最小調倉幅度（Deadband, 0.0 ~ 1.0）
-    # 預設使用 0.0：讓「單步倉位變化限制(max_step_pos_change_pct)」可以逐步累積倉位，
-    # 需要抑制微小調倉刷手續費時，再由外部 kwargs 覆寫（例如 0.2 代表 20%）。
-    MIN_POSITION_CHANGE: float = 0.0 # 最小調倉幅度（預設不啟用 deadband）
-    MAX_STEP_POS_CHANGE_PCT: float = 0.5 # 最大單步持倉比例變化 0.5 代表 50%
+    MIN_BALANCE: float = INITIAL_BALANCE * 0.2  # 最小餘額比例（0.5 = 50%）
+    MIN_POSITION_CHANGE: float = 0.0  # 最小調倉幅度 deadband（0 = 不啟用）
+    MAX_STEP_POS_CHANGE_PCT: float = 0.5  # 單步最大持倉比例變化（0.5 = 50%）
+    MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（供 ActionClipWrapper 等使用）
 
-    # ---- No-trade hysteresis（方案2：雙門檻）----
-    # 目的：讓「空倉/不交易」更穩定，避免 SAC 在 0 附近的小噪音反覆觸發開/平倉。
-    #
-    # 語義（action 是目標倉位比例）：
-    # - 空倉時：|action| < NO_TRADE_ENTRY_THRESHOLD => 強制 action=0（不進場）
-    # - 有倉時：|action| < NO_TRADE_EXIT_THRESHOLD  => 強制 action=0（更容易回到空倉）
-    #
-    # 注意：
-    # - 單位是「目標倉位比例」（position pct），不是百分比(%)
-    # - 若你使用 ActionClipWrapper 限制最大持倉（TrainConfig.MAX_POSITION_PCT），建議 threshold 也隨之調整（下面會討論）
+    # No-trade 雙門檻（hysteresis）：空倉時 |action| < ENTRY 不進場；有倉時 |action| < EXIT 易回空倉
     NO_TRADE_ENTRY_THRESHOLD: float = 0.0
     NO_TRADE_EXIT_THRESHOLD: float = 0.0
 
-    # ---- 訓練/執行 Wrapper 參數（單一來源）----
-    # ActionClipWrapper：硬限制最大目標倉位（不做 action smoothing）
-    # 作用：提供「環境側/通用」的預設 clip 上限（-P~P）。
-    #
-    # 重要：
-    # - `TradingEnvironment` 本身不會自動使用這個值做 clip；只有你在外部建立 `ActionClipWrapper` 並把
-    #   `max_position_pct=Config.MAX_POSITION_PCT` 傳進去時才會生效。
-    # - 若你用 `Train/run_sac_lag.py` 訓練，實際生效的是 `TrainConfig.MAX_POSITION_PCT`
-    #   （訓練端建立 wrapper 時顯式傳參），因此訓練端優先。
-    MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（-P~P）0.8 代表 80%
-    # ActionRepeatWrapper：降低決策頻率（Frame Skip）
-    ACTION_REPEAT: int = 3
+    # -------------------------------------------------------------------------
+    # 主線獎勵：順向交易獎勵（Conviction Trend Bonus）
+    # -------------------------------------------------------------------------
+    # 順向獎勵權重；>0 啟用「強訊號 + 大倉 + 同向」時加分，建議從小值開始（如 0.1）
+    CONVICTION_TREND_BONUS_WEIGHT: float = 0.3
+    # trend_score 縮放倍數（(ma50-ma200)/ma200 為小數比，乘上此倍數後再 tanh 算 strength）
+    # 例如 scale=10：trend_score=0.05 → strength≈0.46，易通過 min_strength 0.25
+    CONVICTION_TREND_SCORE_SCALE: float = 10.0
+    # 趨勢強度門檻 [0,1]；strength = |tanh(scale * trend_score)|，達此值才加分
+    CONVICTION_TREND_MIN_STRENGTH: float = 0.35
+    # 最小曝險門檻 [0,1]，僅當 abs(position_pct) >= 此值才加分，避免小倉刷分
+    CONVICTION_MIN_ABS_POS: float = 0.5
+    # Regime 對齊 bonus 權重：A 狀態多頭加分、C 狀態空頭加分，依 dir_strength 加權；0=不啟用
+    REGIME_ALIGNMENT_BONUS_WEIGHT: float = 0.5
 
-    # ---- 手續費限制 ----
-    FEE_LIMIT_ENABLED: bool = False
-    FEE_LIMIT_RATIO: float = 0.05
+    # -------------------------------------------------------------------------
+    # 手續費與 Fee Limit
+    # -------------------------------------------------------------------------
     FEE_ROLLING_WINDOW: int = 288
 
-    # ---- 止損 / 清算提醒（供 Observer 或外部使用）----
-    # STOP_LOSS_ATR：止損距離的「ATR 倍數」。
-    # - Executor 設定止損時：stop_distance = ATR * STOP_LOSS_ATR
-    # - 直覺：越大 => 止損越遠（更不容易被洗出場；但單次虧損可能更大）
-    # - 建議範圍（5m 常見）：1.5 ~ 3.0；2.0 屬於中庸值
-    STOP_LOSS_ATR: float = 2
-    STOP_LOSS_LIQ_BUFFER_PCT: float = 0.2 # 止損相對強平價的安全緩衝（比例） 0.2 代表 20%
-    STOP_LOSS_COOLDOWN_STEPS: int = 30 / 5 # 止損冷卻步數
-    # 止損事件成本（事件型，非密集）：當本 step 觸發止損時，額外給一個固定成本（0~1）。
-    #
-    # 語義：
-    # - sl_buf：只罰「持倉時貼近止損卻不撤」（密集型）
-    # - stop_loss_event_cost：罰「真的被止損打掉」（事件型）
-    #
-    # 建議：
-    # - 先用小值（例如 0.01~0.05），避免其主導 reward；再看統計調整。
-    STOP_LOSS_EVENT_COST: float = 0.02 # 0.02 代表 2%
+    # -------------------------------------------------------------------------
+    # 止損與清算
+    # -------------------------------------------------------------------------
+    STOP_LOSS_ATR: float = 2  # 止損距離的 ATR 倍數
+    STOP_LOSS_LIQ_BUFFER_PCT: float = 0.2  # 止損相對強平價的安全緩衝（比例）
+    STOP_LOSS_COOLDOWN_STEPS: int = 6  # 止損後冷卻步數（30/5）
+    STOP_LOSS_EVENT_COST: float = 0.02  # 觸發止損時的額外事件成本（比例）
 
-    # ---- Stop-Buffer Cost（止損安全緩衝成本線）----
-    # 目標：不是罰虧損，而是罰「你把倉位放在快撞止損的地方還不撤」。
-    #
-    # 定義（ATR 正規化、無量綱）：
-    #   d_t = |P_t - SL_t| / ATR_t
-    #
-    # 成本（0~1，線性爬升 + clip）：
-    #   c_sl_buf = clip( max(0, d_min - d_t) / d_scale, 0, 1 )
-    #
-    # 怎麼選參數（不用猜）：
-    # - 先決定你想在距離止損多少 ATR 開始罰：d_min
-    # - 再決定你想在距離止損多少 ATR 視為「非常危險（cost=1）」：d_crit
-    #   則：d_scale = d_min - d_crit
-    #
-    # 你選擇「更近一點」的版本（更不干擾主線）：
-    # - d_min=0.3：只有當「距離止損 < 0.3 ATR」才開始被罰 
-    # - d_scale=0.3：罰得較溫和;越大代表 cost 變化越慢；理論上要到 d_t≈0（幾乎撞到止損）才會接近 cost=1 
-    STOP_BUFFER_D_MIN: float = 0.4
-    STOP_BUFFER_D_SCALE: float = 0.6
+    # Stop-Buffer Cost：罰「持倉接近止損卻不撤」（ATR 正規化）
+    STOP_BUFFER_D_MIN: float = 0.4   # 距離止損 < d_min ATR 開始罰
+    STOP_BUFFER_D_SCALE: float = 0.6 # 罰的尺度
+
+    # 觀察用閾值（near_liq / near_stop 特徵），不參與 Cost 計算
+    LIQUIDATION_WARN_PCT: float = 0.3
+    STOP_LOSS_WARN_PCT: float = 0.6
     
-    # 這些閾值保留供 Observation 特徵使用 (near_liq, near_stop)，但不參與 Cost 計算
-    LIQUIDATION_WARN_PCT: float = 0.3 # 清算警告比例  0.05 代表 5%
-    STOP_LOSS_WARN_PCT: float = 0.6 # 止損警告比例 0.1 代表 10%
 
-    # ---- Cost (Lagrangian Constraints) - REFACTORED ----
-    # 舊的固定權重已移除 (COST_W_LIQ_EVENT 等)。
-    # 新版 Cost 計算完全正規化 (Cost / Equity)，無須在此設定絕對值權重。
-    # 相關邏輯請見 Env/Costs/cost.py
 
-    # ---- 逐倉維持保證金 ----
+    # -------------------------------------------------------------------------
+    # 保證金與 Wrapper 預設
+    # -------------------------------------------------------------------------
     MAINTENANCE_MARGIN_RATE: float = 0.005
+    ACTION_REPEAT: int = 3  # ActionRepeatWrapper 預設（Frame Skip）
 
-    # ---- Log ----
+    # -------------------------------------------------------------------------
+    # Step Log
+    # -------------------------------------------------------------------------
     STEP_LOG_ENABLED: bool = False
     STEP_LOG_DIR: str = "step_logs"
     STEP_LOG_EVERY_N: int = 1
 
-    # ---- Market State（相容性用）----
-    # 舊版程式/測試可能會期待此屬性存在；目前 MarketData 會自行從 df 欄位推導 features。
-    MARKET_STATE_COLS: list[str] = []
+    # -------------------------------------------------------------------------
+    # Observation 與相容性
+    # -------------------------------------------------------------------------
+    OBS_DTYPE: str = "float16"  # "float16" | "float32"（訓練 RAM 優化）
+    # 取代 inf/neginf 的有限值，避免 nan_to_num(..., posinf=0, neginf=0) 把極端訊號壓成 0 而消失
+    OBS_INF_CLIP_HIGH: float = 10.0   # +inf → 此值（與 z-score ±5 略大，保留「極端」訊號）
+    OBS_INF_CLIP_LOW: float = -10.0   # -inf → 此值
 
-    # ---- Observation dtype（訓練 RAM 優化）----
-    # 注意：
-    # - Gym/SB3 需要 observation_space dtype 與實際 obs dtype 一致。
-    # - 為了降低 replay buffer RAM，我們允許輸出 float16 obs；
-    #   訓練端 feature extractor 會將 tensor cast 回 float32 做卷積/MLP，維持穩定。
-    OBS_DTYPE: str = "float16"  # "float16" | "float32"
+    # -------------------------------------------------------------------------
+    # Observation 使用特徵（obs state 開關）
+    # -------------------------------------------------------------------------
+    # 納入 observation 的 state 鍵名；預設為目前全部欄位。
+    # 預計收斂為 5 個 state：4 個市場序列 (5m/1d × target/others) + 1 個帳戶/情境；
+    # 可依實驗需求從此 list 關閉某幾項以縮減 obs 維度。
+    OBS_STATE_KEYS: tuple[str, ...] = (
+        "price_seq_target",      # 5m 目標標的序列
+        "price_seq_others",      # 5m 其他標的序列
+        "price_seq_1d_target",   # 1d 目標標的序列
+        "price_seq_1d_others",   # 1d 其他標的序列
+        "account_state",         # 帳戶狀態（22 維）
+        "context_state",         # 情境狀態（8 維）
+        "gate_flags",            # Gate A/B/C multi-hot（1d up, 5m 流動性, 1d down）
+        "regime_score",          # [p_up, p_down, dir_strength] 強度分數（與 gate 同頻率）
+    )
 
-    # ---- 其他（測試/相容性用）----
-    TURNOVER_NOTIONAL_SCALE: float = 1.0
+    # -------------------------------------------------------------------------
+    # 5 個 state 內部的詳細特徵欄位（空 tuple = 使用該 state 全部欄位）
+    # -------------------------------------------------------------------------
+    # 5m 目標（固定欄位）
+    OBS_PRICE_SEQ_TARGET_COLS: tuple[str, ...] = (
+        "ret_15m_scale",
+        "body_z",
+        "range_atr",
+        "ret_1_z_short",
+        "ret_15m_z_short",
+        "volume_log_z_short",
+        "volume_log_scale",
+        "quote_volume_log_z",
+        "amihud_z",
+        "long_short_ratio_z",
+        "trades_per_volume_z",
+        "volume_impact_scale",
+        "ema_48_slope_z",
+        "rv_ratio_scale",
+        "dist_to_support_96_atr",
+        "dist_to_resistance_96_atr_scale",
+        "price_jump_z",
+        "ob_depth_imbalance_scale",
+        "ob_slope_ask_z",
+        "alts_rel_ret_15m_abs_mean_scale",
+        "alts_trend_up_ratio",
+        "alts_volume_log_mean_scale",
+        "dist_to_long_liq_zone_atr",
+    )
+    # 5m 其他（每標的為 {SYMBOL}_xxx；此處列 base 名稱）
+    OBS_PRICE_SEQ_OTHERS_COLS: tuple[str, ...] = (
+        "ret_15m_scale",
+        "ret_1h_scale",
+        "ret_1_atr",
+        "volume_log_z",
+        "rsi_14",
+        "body_range_ratio",
+        "volume_impact_scale",
+        "ema_12_48_spread_raw",
+        "ret_12_raw",
+        "up_volume_ratio_12",
+        "dist_to_long_liq_zone_atr",
+        "dist_to_short_liq_zone_atr",
+    )
+    # 1d 目標（固定欄位）
+    OBS_PRICE_SEQ_1D_TARGET_COLS: tuple[str, ...] = (
+        "oi_close_scale",
+        "funding_close_scale",
+        "ls_account_ratio_z",
+        "liq_long_log_scale",
+        "liq_short_log_z",
+        "range_1d_z",
+        "dist_to_resistance_1d_atr",
+        "day_of_week_cos",
+        "liq_sweep_up",
+    )
+    # 1d 其他（每標的為 {SYMBOL}_xxx；最後為 macro 固定名）
+    OBS_PRICE_SEQ_1D_OTHERS_COLS: tuple[str, ...] = (
+        "oi_close_scale",
+        "funding_close_scale",
+        "ls_account_ratio_z",
+        "ob_imbalance_z",
+        "ret_1d_z",
+        "ret_1d_scale",
+        "close_over_ema_20_scale",
+        "dist_to_long_liq_zone_atr",
+        "dist_to_short_liq_zone_atr",
+        "liq_sweep_down",
+        "fear_greed_scale",
+        "sopr_z",
+    )
+
+    # 帳戶狀態：22 維的完整名稱（順序須與 observer 內建一致）；子集由 OBS_ACCOUNT_STATE_COLS 指定
+    OBS_ACCOUNT_STATE_NAMES: tuple[str, ...] = (
+        "position_side",
+        "position_size_norm",
+        "equity_ratio",
+        "realized_pnl_ratio",
+        "unrealized_pnl_atr",
+        "drawdown",
+        "liq_distance_atr",
+        "stop_loss_distance_atr",
+        "margin_usage_ratio",
+        "cooldown_remaining_norm",
+        "fee_rate",
+        "rolling_fee_ratio",
+        "trade_count_log",
+        "stop_loss_count_log",
+        "holding_time_log",
+        "buffer_to_min_balance_ratio",
+        "steps_since_trade_norm",
+        "trade_freq_remaining_ratio",
+        "trade_freq_blocked_last",
+        "entry_price_ratio",
+        "stop_loss_price_ratio",
+        "recent_flat_ratio",
+    )
+    OBS_ACCOUNT_STATE_COLS: tuple[str, ...] = ()  # 空 = 使用上列全部 22 欄
+
+    # 情境狀態：8 維的完整名稱；子集由 OBS_CONTEXT_STATE_COLS 指定
+    OBS_CONTEXT_STATE_NAMES: tuple[str, ...] = (
+        "action_overridden",
+        "last_action_raw",
+        "last_action_used",
+        "last_target_pos_pct",
+        "last_final_pos_pct",
+        "trade_executed_flag",
+        "predicted_liq_distance_after",
+        "available_balance_after_norm",
+    )
+    OBS_CONTEXT_STATE_COLS: tuple[str, ...] = ()  # 空 = 使用上列全部 8 欄

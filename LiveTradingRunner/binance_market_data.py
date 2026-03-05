@@ -145,8 +145,7 @@ def fetch_latest_multi_symbol_5m(
     # ---- VecEnv/Observer 相容的小技巧：追加一筆 dummy row ----
     # 訓練環境的 MarketData.get_price_seq(step_idx) 會取 [step_idx-window, step_idx)。
     # 若我們希望「最後一根已收盤 bar」能被包含進去，需要 step_idx = last_index+1。
-    # 但 step_idx 又會被 TradingObserver 拿來索引 hour_arr[step_idx]，因此我們追加一筆「下一步」row
-    # 讓 step_idx 可以安全指向最後一列。
+    # 因此我們追加一筆「下一步」row 讓 step_idx 可以安全指向最後一列。
     last_ts = merged["timestamp"].iloc[-1]
     dummy_ts = pd.Timestamp(last_ts) + pd.Timedelta(minutes=5)
     dummy = merged.iloc[[-1]].copy()

@@ -216,7 +216,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--print_obs_account_context",
         default=True,
         action="store_true",
-        help="Debug: print obs values for account_state/time_state/rhythm_state/cost_state each tick.",
+        help="Debug: print obs values for account_state/cost_state each tick.",
     )
     parser.add_argument("--default_min_notional_usdt", type=float, default=10.0)
     parser.add_argument(

@@ -1,0 +1,16 @@
+============================================================
+E2 Direction Proxy Report (LR + LightGBM)
+============================================================
+Train/Valid/Test: 152167 / 32607 / 32607
+Features: 5*F + 22 = 202 (F=36)
+
+[Binary] LogisticRegression (L2): Test AUC = 0.5180, Acc = 0.5181, P = 0.5216, R = 0.5843
+[Binary] LightGBM: Test AUC = 0.5267, Acc = 0.5184, P = 0.5213, R = 0.6006
+[3-class] LogisticRegression (L2): Macro-F1 = 0.3369, BalancedAcc = 0.3453, Acc = 0.4981
+[3-class] LightGBM: Macro-F1 = 0.3376, BalancedAcc = 0.3466, Acc = 0.5002
+
+--- Sanity Tests ---
+Label shuffle (LightGBM): Test AUC = 0.5084 (expect ~0.5)
+Market shuffle (LightGBM): Test AUC = 0.5018 (expect drop)
+
+============================================================

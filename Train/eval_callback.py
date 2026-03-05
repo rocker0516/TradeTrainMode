@@ -19,6 +19,8 @@ class EvalConstraints:
 
     max_dd_limit: float
     mean_cost_limit: float
+    min_mean_return: float = 0.20
+    """最低平均收益率門檻（例如 0.20 = +20%），未達標視為 eval 失敗"""
 
 
 @dataclass(frozen=True)
@@ -193,6 +195,10 @@ class ConstraintEvalCallback(BaseCallback):
         if results.mean_cost > float(self.eval_config.constraints.mean_cost_limit):
             return True
 
+        min_ret = float(getattr(self.eval_config.constraints, "min_mean_return", 0.0))
+        if results.mean_return is None or results.mean_return < min_ret:
+            return True
+
         # constraints_then_balance：在通過約束後，以 mean_final_balance 選 best
         if results.mean_final_balance > self._best_mean_final_balance:
             self._best_mean_final_balance = float(results.mean_final_balance)
@@ -246,8 +252,6 @@ class ConstraintEvalCallback(BaseCallback):
             # 累積成本分解
             cost_risk_sum = 0.0
             cost_fric_sum = 0.0
-            cost_sl_buf_sum = 0.0
-            cost_sl_event_sum = 0.0
 
             last_info: Dict[str, Any] = {}
             # episode 起始資訊：由 env 提供（避免 callback 自己猜）
@@ -288,8 +292,6 @@ class ConstraintEvalCallback(BaseCallback):
 
                 cost_risk_sum = _add_cost("cost_risk", cost_risk_sum)
                 cost_fric_sum = _add_cost("cost_fric", cost_fric_sum)
-                cost_sl_buf_sum = _add_cost("cost_sl_buf", cost_sl_buf_sum)
-                cost_sl_event_sum = _add_cost("cost_sl_event", cost_sl_event_sum)
 
                 done = bool(dones[0])
 
@@ -339,8 +341,6 @@ class ConstraintEvalCallback(BaseCallback):
                 cost_breakdown_sums={
                     "risk": cost_risk_sum,
                     "fric": cost_fric_sum,
-                    "sl_buf": cost_sl_buf_sum,
-                    "sl_event": cost_sl_event_sum,
                 },
                 initial_balance=float(initial_balance),
                 constraints=self.eval_config.constraints,
@@ -400,9 +400,7 @@ class ConstraintEvalCallback(BaseCallback):
         # 4. Cost Breakdown (Mean per step)
         c_risk = _fmt_float(results.mean_cost_risk, 6)
         c_fric = _fmt_float(results.mean_cost_fric, 6)
-        c_slb = _fmt_float(results.mean_cost_sl_buf, 6)
-        c_sle = _fmt_float(results.mean_cost_sl_event, 6)
-        print(f"{prefix} [Cost] Mean Breakdown: Risk={c_risk} Fric={c_fric} SL_Buf={c_slb} SL_Event={c_sle}", flush=True)
+        print(f"{prefix} [Cost] Mean Breakdown: Risk={c_risk} Fric={c_fric}", flush=True)
 
         # 5. Executability
         fees = _fmt_float(results.mean_total_fees_ratio, 4)
@@ -514,8 +512,6 @@ class ConstraintEvalCallback(BaseCallback):
         # 成本分解
         if results.mean_cost_risk is not None: self.logger.record("eval/mean_cost_risk", float(results.mean_cost_risk))
         if results.mean_cost_fric is not None: self.logger.record("eval/mean_cost_fric", float(results.mean_cost_fric))
-        if results.mean_cost_sl_buf is not None: self.logger.record("eval/mean_cost_sl_buf", float(results.mean_cost_sl_buf))
-        if results.mean_cost_sl_event is not None: self.logger.record("eval/mean_cost_sl_event", float(results.mean_cost_sl_event))
 
         # 交易統計
         if results.mean_stop_loss_count is not None:
@@ -630,8 +626,6 @@ class EpisodeEval:
         c_sums = cost_breakdown_sums or {}
         mean_cost_risk = float(c_sums.get("risk", 0.0)) / float(steps) if steps > 0 else 0.0
         mean_cost_fric = float(c_sums.get("fric", 0.0)) / float(steps) if steps > 0 else 0.0
-        mean_cost_sl_buf = float(c_sums.get("sl_buf", 0.0)) / float(steps) if steps > 0 else 0.0
-        mean_cost_sl_event = float(c_sums.get("sl_event", 0.0)) / float(steps) if steps > 0 else 0.0
 
         ret = None
         if (final_balance is not None) and (initial_balance > 0):
@@ -726,8 +720,6 @@ class EvalResults:
     # 新增：成本分解
     mean_cost_risk: Optional[float]
     mean_cost_fric: Optional[float]
-    mean_cost_sl_buf: Optional[float]
-    mean_cost_sl_event: Optional[float]
     
     # 用於顯示
     worst_episodes: List[EpisodeEval]

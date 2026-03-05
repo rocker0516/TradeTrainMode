@@ -158,8 +158,7 @@ class LiveObsBuilder:
             "holding_steps": 0.0,
             "last_step_fee": 0.0,
             "rolling_fee_sum": 0.0,
-            "fee_limit_ratio": float(getattr(Config, "FEE_LIMIT_RATIO", 0.05)),
-            "fee_limit_enabled": bool(getattr(Config, "FEE_LIMIT_ENABLED", False)),
+            "recent_flat_ratio": 0.5,  # 實盤可依滑窗自行計算後傳入
         }
 
         obs = observer.get_observation(

@@ -31,79 +31,35 @@ def _build_account_and_context_obs_named(obs: dict) -> Dict[str, Dict[str, float
     說明：
     - 欄位順序完全對齊 `Env/Components/observer.py`：
       - `TradingObserver._get_account_obs()` 的 `account_state = np.array([...])`
-      - `TradingObserver._get_context_obs()` 的 time/rhythm/cost index 定義
+      - `TradingObserver._get_context_obs()` 的 cost index 定義
     """
 
     account_state_names = [
-        "pos_size_norm",
-        "unreal_pnl_ratio",
-        "equity_ratio",
-        "max_equity_ratio",
-        "dd",
-        "maint_margin_ratio",
-        "profit_rate",
-        "long_entry_count_x0p01",
-        "short_entry_count_x0p01",
-        "episode_stop_loss_count_x0p1",
-        "episode_liq_count_x1p0",
-        "dist_to_sl_norm",
-        "risk_budget",
-        "pos_side_long_oh",
-        "pos_side_short_oh",
-        "pos_side_flat_oh",
-        "entry_gap_atr",
-        "breakeven_gap_atr",
-        "steps_since_trade_norm",
-        "holding_time_norm",
-        "wallet_balance_ratio",
-        "used_margin_ratio",
-        "available_balance_ratio",
-        "equity_to_position_notional",
-        "liq_distance_pct",
-        "stop_distance_pct",
-        "fee_rate_pct",
-    ]
-    time_state_names = [
-        "hour_sin",
-        "hour_cos",
-        "dow_sin",
-        "dow_cos",
-        "phase8_sin",
-        "phase8_cos",
-        "is_weekend",
-    ]
-    rhythm_state_names = [
-        "atr_ratio",
-        "rv_ratio",
+        "position_side",              # 0
+        "position_size_norm",         # 1
+        "equity_ratio",               # 2
+        "realized_pnl_ratio",         # 3
+        "unrealized_pnl_atr",         # 4
+        "drawdown",                   # 5
+        "liq_distance_atr",           # 6
+        "stop_loss_distance_atr",     # 7
+        "margin_usage_ratio",         # 8
+        "cooldown_remaining_norm",    # 9
+        "fee_rate",                   # 10
+        "rolling_fee_ratio",          # 11
+        "trade_count_log",            # 12
+        "stop_loss_count_log",        # 13
+        "holding_time_log",           # 14
+        "buffer_to_min_balance_ratio", # 15
+        "steps_since_trade_norm",     # 17
+        "trade_freq_remaining_ratio", # 18
+        "trade_freq_blocked_last",    # 19
+        "entry_price_ratio",          # 20
+        "stop_loss_price_ratio",      # 21
+        "recent_flat_ratio",          # 22（與 cost_flat 同口徑，實盤可算）
     ]
     cost_state_names = [
-        "step_fee_ratio_stable",
-        "rolling_fee_ratio",
-        "maint_margin_ratio",
-        "dd",
-        "leverage_ratio",
-        "remaining_fee_budget_ratio",
-        "gap_pct",
-        "abs_gap_pct",
-        "margin_ratio",
-        "sl_gap_atr",
-        "stop_loss_missing",
-        "near_liq",
-        "near_margin",
-        "near_stop",
-        "expected_fee_if_trade_ratio",
-        "predicted_used_margin_ratio",
-        "predicted_available_balance_ratio",
-        "predicted_liq_distance_after_action",
-        "predicted_stop_distance_after_action",
-        "cooldown_remaining_norm",
-        "action_overridden_flag",
-        "last_action_raw",
-        "last_action_used",
-        "last_target_pos_pct",
-        "last_final_pos_pct",
-        "executed_pos_pct",
-        "trade_executed_flag",
+        "placeholder",  # 佔位欄位（cost_state 已清空）
     ]
 
     def _named_values(x: Any, names: list[str]) -> dict[str, float]:
@@ -123,8 +79,6 @@ def _build_account_and_context_obs_named(obs: dict) -> Dict[str, Dict[str, float
 
     return {
         "account_state": _named_values(obs.get("account_state"), account_state_names),
-        "time_state": _named_values(obs.get("time_state"), time_state_names),
-        "rhythm_state": _named_values(obs.get("rhythm_state"), rhythm_state_names),
         "cost_state": _named_values(obs.get("cost_state"), cost_state_names),
     }
 

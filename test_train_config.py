@@ -20,8 +20,6 @@ def test_config_importable_and_has_required_attributes() -> None:
         "MIN_EPISODE_STEPS",
         "MIN_POSITION_CHANGE",
         "MAX_STEP_POS_CHANGE_PCT",
-        "FEE_LIMIT_ENABLED",
-        "FEE_LIMIT_RATIO",
         "FEE_ROLLING_WINDOW",
         "STOP_LOSS_ATR",
         "LIQUIDATION_WARN_PCT",
@@ -29,12 +27,10 @@ def test_config_importable_and_has_required_attributes() -> None:
         "STEP_LOG_ENABLED",
         "STEP_LOG_DIR",
         "STEP_LOG_EVERY_N",
-        "MARKET_STATE_COLS",
         "MAINTENANCE_MARGIN_RATE",
         "MAX_EPISODE_STEPS",
         "STOP_LOSS_LIQ_BUFFER_PCT",
         "STOP_LOSS_COOLDOWN_STEPS",
-        "TURNOVER_NOTIONAL_SCALE",
     ]
 
     for a in required_attrs:
@@ -46,6 +42,5 @@ def test_config_importable_and_has_required_attributes() -> None:
     assert isinstance(Config.WINDOW_SIZE, int)
     assert isinstance(Config.LEVERAGE, float)
     assert isinstance(Config.STEP_LOG_DIR, str)
-    assert isinstance(Config.MARKET_STATE_COLS, list)
 
 

@@ -1,3 +1,4 @@
+from typing import Tuple
 import numpy as np
 import pandas as pd
 from Env.config import Config
@@ -62,7 +63,9 @@ class MarketData:
         # 當 5m 時間點早於 df_1d 的第一筆 timestamp 時，idx_asof 會是 -1，退一根後會變成 -2。
         # 若不做下界保護，get_1d_seq 的 padding 會超過 window_size_1d，導致 VecEnv stack shape mismatch。
         self.map_5m_to_1d = np.maximum(idx_asof - 1, -1)
-        
+        # 頻率語義：同一「日」內所有 5m bar 的 map_5m_to_1d 相同 → regime 為 piecewise constant，
+        # 僅在「跨日」（第一個 5m bar 進入新日）時更新一次，其餘沿用上一個 1d regime。
+
         # 3. 基礎價格數據 (Numpy Access for Speed - 使用 5m 作為執行基準)
         # 根據 target_symbol 選擇價格欄位
         col_close = f"{self.target_symbol}_close"
@@ -93,13 +96,7 @@ class MarketData:
         else:
             raise ValueError(f"Price columns for '{self.target_symbol}' (e.g. {col_close}) not found in df_5m columns: {self.df_5m.columns.tolist()[:10]}...")
         
-        # 4. 時間特徵 (5m)
-        ts = self.df_5m['timestamp']
-        self.hour_arr = ts.dt.hour.values.astype(np.float32)
-        self.dow_arr = ts.dt.dayofweek.values.astype(np.float32)
-        self.is_weekend_arr = (ts.dt.dayofweek.values >= 5).astype(np.float32)# 0: Monday, 1: Tuesday, ..., 4: Friday, 5: Saturday, 6: Sunday
-
-        # 5. 計算 ATR Ratio (用於 ENV 內部的動態止損計算，非僅作為特徵)
+        # 4. 計算 ATR Ratio (用於 ENV 內部的動態止損計算，非僅作為特徵)
         prev_close = pd.Series(self.close_arr).shift(1)
         true_range = np.maximum.reduce([
             (self.high_arr - self.low_arr),
@@ -109,7 +106,7 @@ class MarketData:
         atr = pd.Series(true_range).rolling(14, min_periods=5).mean().fillna(0.0)
         self.atr_ratio_arr = (atr / np.maximum(self.close_arr, 1e-12)).astype(np.float32).values
 
-        # 6. 計算 Rhythm Feature (RV Ratio) - 維持原邏輯供 Env 使用
+        # 5. 計算 Rhythm Feature (RV Ratio) - 維持原邏輯供 Env 使用
         self.rv_ratio_arr = self._compute_rv_ratio()
         
         # 計算 Trend Score (簡單移動平均趨勢) - 補足缺失的屬性
@@ -117,9 +114,9 @@ class MarketData:
         ma_200 = pd.Series(self.close_arr).rolling(window=200, min_periods=1).mean()
         self.trend_score_arr = ((ma_50 - ma_200) / (ma_200 + 1e-8)).fillna(0.0).values.astype(np.float32)
         
-        # 7. 透過 FeatureTransformer 建立固定特徵（可解釋、固定 shape）
-        # 重要：只針對 target_symbol 產生特徵，避免把其他幣種的整套 OHLCV 混入 state。
-        self.features_5m_arr, self.cols_5m = self._transformer.build_5m_features(
+        # 6. 透過 FeatureTransformer 建立分离的特徵（target 和 others）
+        # 重要：使用新的分离特征提取方法
+        self.features_5m_target_arr, self.features_5m_others_arr, self.cols_5m_target, self.cols_5m_others = self._transformer.build_5m_features_split(
             self.df_5m,
             target_symbol=self.target_symbol,
             atr_ratio_arr=self.atr_ratio_arr,
@@ -127,16 +124,154 @@ class MarketData:
             z_window=self.feature_lookback,
             feature_symbols=self.feature_symbols,
         )
-        self.features_1d_arr, self.cols_1d = self._transformer.build_1d_features(
+        self.features_1d_target_arr, self.features_1d_others_arr, self.cols_1d_target, self.cols_1d_others = self._transformer.build_1d_features_split(
             self.df_1d,
+            self.df_5m,
             target_symbol=self.target_symbol,
             z_window_1d=max(60, self.feature_lookback_1d * 2),
+            feature_symbols=self.feature_symbols,
         )
 
-        # 8. 定義特徵維度供 Observer 使用（固定、可控）
-        self.price_seq_features_dim = int(self.features_5m_arr.shape[1])
-        self.features_1d_dim = int(self.features_1d_arr.shape[1])
-        self.market_state_cols = self.cols_5m  # 相容既有介面：提供 5m 特徵欄位名稱
+        # 7. 定義特徵維度供 Observer 使用（固定、可控）
+        self.price_seq_target_features_dim = int(self.features_5m_target_arr.shape[1])
+        self.price_seq_others_features_dim = int(self.features_5m_others_arr.shape[1])
+        self.price_seq_1d_target_features_dim = int(self.features_1d_target_arr.shape[1])
+        self.price_seq_1d_others_features_dim = int(self.features_1d_others_arr.shape[1])
+        
+        # 兼容性：保留旧接口
+        self.price_seq_features_dim = self.price_seq_target_features_dim
+        self.features_1d_dim = self.price_seq_1d_target_features_dim
+        self.cols_5m = self.cols_5m_target
+        self.cols_1d = self.cols_1d_target
+        self.market_state_cols = self.cols_5m_target  # 相容既有介面：提供 5m 特徵欄位名稱
+
+        # 8. Gate flags（Gate A/B/C）per-bar 陣列，供 obs 的 gate_flags 使用。
+        # 頻率：1d regime（trend_1d_5m）依 map_5m_to_1d 對齊，每根 5m bar 帶「當下對應的」regime；
+        # regime 只在跨日（1d 更新點）更新，其餘時間 piecewise constant。
+        self._trend_1d_5m, self._liquidity_5m = self._build_gate_arrays()
+        # 9. Regime score（p_up, p_down, dir_strength）per-bar，與 gate 同頻率，供 obs 的 regime_score 使用。
+        self._p_up_5m, self._p_down_5m, self._dir_strength_5m = self._build_regime_score_5m()
+
+    def _build_gate_arrays(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        建構 Gate A（1d up）/ B（5m 流動性）/ C（1d down）用的 per-bar 陣列。
+
+        Regime 更新頻率（1d vs 5m step）：
+        - 每根 5m bar 都帶著「當下對應的」regime（由 map_5m_to_1d 決定對應哪根已收盤 1d）。
+        - Regime 只在「跨日」時更新一次（即 step 走到新日的第一根 5m 時），其餘沿用上一個 regime（piecewise constant）。
+
+        Returns:
+            trend_1d_5m: (N,) int8，1=up / -1=down / 0=無方向
+            liquidity_5m: (N,) bool，高流動性為 True
+        """
+        N = len(self.close_arr)
+        # Gate A/C: 1d trend (sign(EMA12 - EMA48)) 對齊到 5m（經 map_5m_to_1d → piecewise constant  per day）
+        col_close = f"{self.target_symbol}_close"
+        if col_close not in self.df_1d.columns:
+            col_close = "close"
+        close_1d = self.df_1d[col_close].astype(float) if col_close in self.df_1d.columns else pd.Series(dtype=float)
+        if len(close_1d) == 0:
+            trend_1d_5m = np.zeros(N, dtype=np.int8)
+        else:
+            ema12 = close_1d.ewm(span=12, adjust=False).mean()
+            ema48 = close_1d.ewm(span=48, adjust=False).mean()
+            diff = ema12 - ema48
+            trend_1d_arr = np.sign(diff).replace(0.0, np.nan).fillna(0.0).astype(np.int8).values
+            trend_1d_5m = np.zeros(N, dtype=np.int8)
+            for i in range(N):
+                j = int(self.map_5m_to_1d[i])
+                if 0 <= j < len(trend_1d_arr):
+                    trend_1d_5m[i] = trend_1d_arr[j]
+
+        # Gate B: 5m 流動性（quote_volume_log_z 高、amihud_z 低）
+        cols = list(self.cols_5m_target) if self.cols_5m_target else []
+        idx_vol = cols.index("quote_volume_log_z") if "quote_volume_log_z" in cols else None
+        idx_amihud = cols.index("amihud_z") if "amihud_z" in cols else None
+        if idx_vol is not None and idx_amihud is not None:
+            vol = self.features_5m_target_arr[:, idx_vol].astype(np.float64)
+            amihud = self.features_5m_target_arr[:, idx_amihud].astype(np.float64)
+            q_vol = np.nanpercentile(vol, 50.0)
+            q_amihud = np.nanpercentile(amihud, 50.0)
+            liquidity_5m = ((vol > q_vol) & (amihud < q_amihud)).astype(bool)
+        else:
+            liquidity_5m = np.ones(N, dtype=bool)
+        return trend_1d_5m, liquidity_5m
+
+    def _build_regime_score_5m(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        建構 regime 強度分數（與 1d regime 同源、同頻率）：p_up, p_down, dir_strength。
+        目前用規則（EMA12/EMA48 連續化 + sigmoid）產出；可改為載入 1d LGB 的 precomputed 機率。
+        Returns:
+            p_up_5m: (N,) float32，上行機率/分數 [0,1]
+            p_down_5m: (N,) float32，下行機率/分數 [0,1]，= 1 - p_up
+            dir_strength_5m: (N,) float32，方向強度 [0,1]，= abs(p_up - 0.5)*2
+        """
+        N = len(self.close_arr)
+        col_close = f"{self.target_symbol}_close"
+        if col_close not in self.df_1d.columns:
+            col_close = "close"
+        close_1d = self.df_1d[col_close].astype(float) if col_close in self.df_1d.columns else pd.Series(dtype=float)
+        if len(close_1d) == 0:
+            p_up_5m = np.full(N, 0.5, dtype=np.float32)
+            p_down_5m = np.full(N, 0.5, dtype=np.float32)
+            dir_strength_5m = np.zeros(N, dtype=np.float32)
+            return p_up_5m, p_down_5m, dir_strength_5m
+
+        ema12 = close_1d.ewm(span=12, adjust=False).mean()
+        ema48 = close_1d.ewm(span=48, adjust=False).mean()
+        diff = ema12 - ema48
+        # 正規化：以 ema48 比例為尺度，避免絕對價差主導
+        denom = np.abs(ema48.values) * 0.01 + 1e-12
+        diff_norm = (diff.values / denom).astype(np.float64)
+        # sigmoid(scale * x)：scale 越大越陡，約 ±0.5 對應 p_up ~ [0.27, 0.73]
+        scale = 8.0
+        p_up_1d = 1.0 / (1.0 + np.exp(-scale * np.clip(diff_norm, -5.0, 5.0)))
+        p_up_1d = np.clip(p_up_1d, 1e-6, 1.0 - 1e-6).astype(np.float32)
+        p_down_1d = (1.0 - p_up_1d).astype(np.float32)
+        dir_strength_1d = (np.abs(p_up_1d - 0.5) * 2.0).astype(np.float32)
+        dir_strength_1d = np.clip(dir_strength_1d, 0.0, 1.0)
+
+        p_up_5m = np.full(N, 0.5, dtype=np.float32)
+        p_down_5m = np.full(N, 0.5, dtype=np.float32)
+        dir_strength_5m = np.zeros(N, dtype=np.float32)
+        for i in range(N):
+            j = int(self.map_5m_to_1d[i])
+            if 0 <= j < len(p_up_1d):
+                p_up_5m[i] = p_up_1d[j]
+                p_down_5m[i] = p_down_1d[j]
+                dir_strength_5m[i] = dir_strength_1d[j]
+        return p_up_5m, p_down_5m, dir_strength_5m
+
+    def get_regime_score(self, step_idx: int) -> np.ndarray:
+        """
+        取得當前步的 regime 強度分數，供 obs 使用。
+        [p_up, p_down, dir_strength]：上行機率、下行機率、方向強度（0~1，越遠離 0.5 越確定）。
+        更新頻率：與 1d regime 同，僅在跨日時變動（piecewise constant）。
+        Returns:
+            shape (3,) float32
+        """
+        idx = max(0, min(step_idx, len(self._p_up_5m) - 1))
+        return np.array(
+            [self._p_up_5m[idx], self._p_down_5m[idx], self._dir_strength_5m[idx]],
+            dtype=np.float32,
+        )
+
+    def get_gate_flags(self, step_idx: int) -> np.ndarray:
+        """
+        取得當前步的 Gate A/B/C 向量，供 obs 使用。
+        Gate A: 1d up (1), Gate B: 5m 高流動性 (0/1), Gate C: 1d down 用 -1 表示（sign-flip）。
+
+        更新頻率：1d regime（A/C）僅在跨日時變動（piecewise constant）；Gate B 為每 5m 更新。
+        Returns:
+            shape (3,) float32：[gate_A, gate_B, gate_C]，gate_A/gate_B 為 0/1，gate_C 為 0 或 -1
+        """
+        idx = max(0, min(step_idx, len(self._trend_1d_5m) - 1))
+        t = self._trend_1d_5m[idx]
+        liq = bool(self._liquidity_5m[idx])
+        gate_A = 1.0 if t == 1 else 0.0
+        gate_B = 1.0 if liq else 0.0
+        gate_C = -1.0 if t == -1 else 0.0  # sign-flip：1d down 用 -1
+        return np.array([gate_A, gate_B, gate_C], dtype=np.float32)
 
     def _ensure_datetime(self, df):
         # 確保存在 datetime 型態的「時間欄位」：若有 timestamp 或 time，統一轉成 timestamp 欄、且格式為 datetime
@@ -185,17 +320,52 @@ class MarketData:
             'trend_score': float(self.trend_score_arr[idx])
         }
 
-    def get_price_seq(self, step_idx: int) -> np.ndarray:
-        """取得 5m 序列輸入 [window_size, F_5m]"""
+    def get_target_scalars_at_step(self, step_idx: int) -> dict:
+        """
+        取得當前步的 5m target 特徵中的「可交易性」標量（供 obs 彙總，實盤可算）。
+        用於 agent 判斷當前是否適合交易、趨勢/震盪 regime。
+        Returns:
+            dict: 'trend_strength_atr', 'chop_48'（已 clip 至 [-1, 1]）
+        """
+        idx = max(0, min(step_idx, len(self.features_5m_target_arr) - 1))
+        cols = getattr(self, "cols_5m_target", [])
+        if not cols:
+            return {"trend_strength_atr": 0.0, "chop_48": 0.0}
+        row = self.features_5m_target_arr[idx]
+        trend_val = 0.0
+        chop_val = 0.0
+        if "trend_strength_atr" in cols:
+            i = cols.index("trend_strength_atr")
+            trend_val = float(np.clip(row[i], -1.0, 1.0))
+        if "chop_48" in cols:
+            i = cols.index("chop_48")
+            chop_val = float(np.clip(row[i], -1.0, 1.0))
+        return {"trend_strength_atr": trend_val, "chop_48": chop_val}
+
+    def get_price_seq(self, step_idx: int) -> Tuple[np.ndarray, np.ndarray]:
+        """取得分离的 5m 序列輸入 [window_size, F_target], [window_size, F_others]"""
         start = step_idx - self.window_size
         end = step_idx
+        
+        # Target 序列
         if start < 0:
-            pad = np.zeros((abs(start), self.features_5m_arr.shape[1]), dtype=np.float32)
-            data = self.features_5m_arr[0:end]
-            return np.vstack([pad, data])
-        return self.features_5m_arr[start:end]
+            pad_target = np.zeros((abs(start), self.features_5m_target_arr.shape[1]), dtype=np.float32)
+            data_target = self.features_5m_target_arr[0:end]
+            seq_target = np.vstack([pad_target, data_target])
+        else:
+            seq_target = self.features_5m_target_arr[start:end]
+        
+        # Others 序列
+        if start < 0:
+            pad_others = np.zeros((abs(start), self.features_5m_others_arr.shape[1]), dtype=np.float32)
+            data_others = self.features_5m_others_arr[0:end]
+            seq_others = np.vstack([pad_others, data_others])
+        else:
+            seq_others = self.features_5m_others_arr[start:end]
+        
+        return seq_target, seq_others
 
-    def get_1d_seq(self, step_idx: int, window_size_1d: int = 30) -> np.ndarray:
+    def get_1d_seq(self, step_idx: int, window_size_1d: int = 30) -> Tuple[np.ndarray, np.ndarray]:
         """
         取得 1d 序列輸入 [window_size_1d, F_1d]
         根據 step_idx (5m) 找到對應的 1d 索引，再往回取 window。
@@ -211,23 +381,30 @@ class MarketData:
         # 由 map_5m_to_1d 的構建邏輯決定。
         
         # 注意：為了支援 VecEnv（多環境堆疊），此函式必須「無論任何邊界狀況」都回傳固定 shape：
-        #   (window_size_1d, F_1d)
-        out = np.zeros((int(window_size_1d), self.features_1d_arr.shape[1]), dtype=np.float32)
+        #   (window_size_1d, F_target), (window_size_1d, F_others)
+        out_target = np.zeros((int(window_size_1d), self.features_1d_target_arr.shape[1]), dtype=np.float32)
+        out_others = np.zeros((int(window_size_1d), self.features_1d_others_arr.shape[1]), dtype=np.float32)
 
         idx_1d_current = int(idx_1d_current)
         if idx_1d_current < 0:
             # 沒有任何已收盤日線可用 -> 全 0
-            return out
+            return out_target, out_others
 
         end = idx_1d_current + 1  # slice end（不含）
         start = end - int(window_size_1d)
 
-        # 取可用區間並放到 out 尾端（不足前面補 0）
+        # Target 序列
         src_start = max(0, start)
-        src_end = min(end, len(self.features_1d_arr))
-        src = self.features_1d_arr[src_start:src_end]
-        if len(src) == 0:
-            return out
-
-        out[-len(src) :] = src
-        return out
+        src_end = min(end, len(self.features_1d_target_arr))
+        src_target = self.features_1d_target_arr[src_start:src_end]
+        if len(src_target) > 0:
+            out_target[-len(src_target) :] = src_target
+        
+        # Others 序列
+        src_start = max(0, start)
+        src_end = min(end, len(self.features_1d_others_arr))
+        src_others = self.features_1d_others_arr[src_start:src_end]
+        if len(src_others) > 0:
+            out_others[-len(src_others) :] = src_others
+        
+        return out_target, out_others

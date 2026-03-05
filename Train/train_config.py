@@ -4,7 +4,7 @@ from __future__ import annotations
 訓練端設定檔（TrainConfig）
 
 說明：
-- 你原本的 `Train/config.py` 是「相容性 shim」：只做 `from Env.config import Config`，不應塞訓練參數。
+- 原本的 `Train/config.py` 是「相容性 shim」：只做 `from Env.config import Config`，不應塞訓練參數。
 - 因此訓練腳本 `Train/run_sac_lag.py` 的參數預設值，集中放在此檔，避免 Env/Train 設定混雜。
 
 使用方式：
@@ -14,126 +14,413 @@ from __future__ import annotations
 
 
 class TrainConfig:
-    """SAC-Lagrangian 訓練參數預設值（可由 CLI 覆寫）。"""
-
-    # ---- 基本訓練參數 ----
-    SYMBOL: str = "BTCUSDT"
-    # 特徵 symbols（固定順序、固定維度）：
-    # - 用於 5m 跨市場摘要 +（後續可擴充）多幣 1d regime
-    # - 注意：Gym observation_space 必須固定 shape，因此這裡用「固定清單」，而不是隨 Data 目錄動態增減。
-    FEATURE_SYMBOLS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "1000PEPEUSDT")
-    TOTAL_TIMESTEPS: int = 100_000_000
-    N_ENVS: int = 64
-    DEVICE: str = "auto"  # "cuda" / "cpu" / "auto"
-
-    # ---- Lagrangian / 約束 ----
-    # 新版 Cost 已正規化為 Cost/Equity。
-    # 建議值 0.0005 (5bps) 代表容許每步平均損耗 0.05% 的權益 (含手續費與死亡風險攤提)
-    COST_LIMIT: float = 0.00008
-    # 新版：雙路徑成本限制（risk / friction）- 目前 Controller 尚未完全支援分開的 dual-lambda，
-    # 但保留參數供未來擴充。邏輯同上，Risk 應趨近於 0，Fric 容許少量。
-    RISK_COST_LIMIT: float = 0.001 # 0.000005 代表 0.0005% 死亡風險(容許極小風險)
-    FRIC_COST_LIMIT: float = 0.00005 # 0.002：代表允許每步平均手續費佔權益 0.2%
-    # Stop-Buffer Cost（0~1）：建議先設很小的平均步成本上限，因為「接近止損」應該是短暫狀態
-    SL_BUF_COST_LIMIT: float = 0.01 # 0.1：代表允許每步平均止損緩衝成本佔權益 10%
-    # Stop-Loss Event Cost（事件型）：當步觸發止損時才會出現的成本（獨立成本線，不歸類到 risk）。
-    SL_EVENT_COST_LIMIT: float = 0.002 # 0.01：代表允許每步平均止損事件成本佔權益 1%
+    """
+    SAC-Lagrangian 訓練參數預設值（可由 CLI 覆寫）。
     
-    UPDATE_LAMBDA_EVERY_STEPS: int = 1
-    # 交易統計輸出：
-    # - LOG_EVERY_EPISODES: 每 N 個 episode 刷新一次統計（建議：20）
-    # - STATS_WINDOW_EPISODES: 統計最多取最近 M 個 episode（滾動視窗，建議：100）
-    LOG_EVERY_EPISODES: int = 50
+    所有參數都可在 `Train/run_sac_lag.py` 中透過命令行參數覆寫。
+    """
+
+    # ==================== 基本訓練參數 ====================
+    SYMBOL: str = "BTCUSDT"
+    """交易標的符號"""
+    
+    FEATURE_SYMBOLS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "1000PEPEUSDT")
+    """
+    特徵 symbols（固定順序、固定維度）
+    - 用於 5m 跨市場摘要 +（後續可擴充）多幣 1d regime
+    - 注意：Gym observation_space 必須固定 shape，因此這裡用「固定清單」，
+      而不是隨 Data 目錄動態增減。
+    """
+    
+    TOTAL_TIMESTEPS: int = 100_000_000
+    """總訓練步數"""
+    
+    N_ENVS: int = 8*8
+    """
+    並行環境數量。
+    效能：SubprocVecEnv 下主進程會先 load_data() 一次並傳入各 worker，避免 N 次磁碟 I/O。
+    """
+    
+    DEVICE: str = "cuda"
+    """計算設備：'cuda' / 'cpu' / 'auto'"""
+
+    COMPILE_POLICY: bool = False
+    """
+    是否對 policy 的 features_extractor 做 torch.compile（PyTorch 2+）。
+    - True：可加速 predict/forward，首次會多編譯時間；瓶頸在主進程/GPU 時可試。
+    - False（預設）：不編譯，相容性最佳。
+    """
+
+    # ==================== Lagrangian / 約束 ====================
+    COST_LIMIT: float = 0.00008
+    """
+    總成本限制（單一 Lambda 模式，已棄用）
+    - 新版 Cost 已正規化為 Cost/Equity
+    - 建議值 0.00008 (0.8bps) 代表容許每步平均損耗 0.008% 的權益
+    - 注意：目前使用多通道模式（RISK_COST_LIMIT / FRIC_COST_LIMIT），此參數僅供相容性
+    """
+    
+    RISK_COST_LIMIT: float = 0.000
+    """
+    風險成本限制（死亡風險通道）
+    - 單位：每步平均死亡風險（正規化為 Cost/Equity）
+    - 0.001 代表容許 0.1% 的死亡風險（建議設為接近 0 的值）
+    """
+    
+    FRIC_COST_LIMIT: float = 0.00005
+    """
+    摩擦成本限制（手續費通道）
+    - 單位：每步平均手續費佔權益比例（正規化為 Cost/Equity）
+    - 0.00005 代表允許每步平均手續費佔權益 0.005%
+    - 注意：目前 cost_fric 固定為 0.0，此參數供未來擴充使用
+    """
+
+    TRADE_FREQ_COST_LIMIT: float = 0.6
+    """
+    交易頻率成本限制（交易比例通道）
+    - 單位：最近 N 步內「交易步數 / N」的上限（比例，0~1）
+    - 0.1 代表允許最多 10% 的步數發生持倉變化（交易）
+    """
+
+    TRADE_FREQ_WINDOW_STEPS: int = 288
+    """
+    交易頻率約束的窗口寬度（步數）
+    - 交易比例 = 窗口內交易次數 / min(窗口寬度, 已收集步數)
+    """
+
+    FLAT_COST_LIMIT: float = 0.6
+    """
+    空倉成本限制（鼓勵持倉、允許避險）
+    - 單位：最近 N 步內「空倉步數 / N」的上限（比例，0~1）
+    - 0.2 代表允許最多 20% 步數空倉；超過則 λ 上升、懲罰變大
+    - 若訓練時 flat [VIOLATION] 且 Eval 仍 0 交易：可試著調低（如 0.1）以更強懲罰空倉，促使 policy 輸出較大 |action| 以超過 NO_TRADE_ENTRY_THRESHOLD
+    """
+
+    FLAT_WINDOW_STEPS: int = 288 * 3
+    """空倉比例約束的窗口寬度（步數）"""
+
+    FLAT_THRESHOLD: float = 0.2
+    """視為空倉的持倉比例門檻：|final_pos_pct| < 此值則計為空倉（步級 cost_flat=1）"""
+    
+    # Lagrangian 控制器參數
+    LAGRANGIAN_KP: float = 0.1
+    """Lagrangian P-Control 增益係數"""
+    
+    LAGRANGIAN_LAMBDA_INIT: float = 0.0
+    """Lagrangian Lambda 初始值"""
+    
+    LAGRANGIAN_LAMBDA_MIN: float = 0.0
+    """Lagrangian Lambda 最小值"""
+    
+    LAGRANGIAN_LAMBDA_MAX: float = 5.0
+    """Lagrangian Lambda 最大值"""
+    
+    UPDATE_LAMBDA_EVERY_STEPS: int = 1_000
+    """
+    Lambda 更新頻率（每 N 個 global steps 更新一次）
+    - 建議值：1000（在 n_envs=64 時，約每 15.6 個訓練回合更新一次）
+    """
+    
+    LOG_EVERY_EPISODES: int = 100
+    """每 N 個 episode 刷新一次統計輸出（建議：20-50）"""
+    
     STATS_WINDOW_EPISODES: int = 100
-    REWARD_SCALE: float = 1 # 獎勵尺度 1.0 代表獎勵不放大
+    """統計視窗大小：最多取最近 M 個 episode（滾動視窗，建議：100）"""
+    
+    REWARD_SCALE: float = 1.0
+    """獎勵尺度：1.0 代表獎勵不放大，>1.0 會放大獎勵信號"""
 
-    # ---- SB3 SAC 超參數 ----
-    LEARNING_RATE: float = 5e-5
-    BUFFER_SIZE: int = 1_600_000
-    BATCH_SIZE: int = 256 # 512 / 1_500_000 = 0.034% 
+    REGIME_ALIGNMENT_BONUS_WEIGHT: float = 0.0001
+    """Regime 對齊 bonus 權重：A 狀態多頭加分、C 狀態空頭加分，依 dir_strength 加權；0=不啟用。可經 CLI --regime_alignment_bonus_weight 覆寫。"""
+
+    COST_PENALTY_NORMALIZE_FACTOR: float = 1.0
+    """
+    成本懲罰正規化「預設」係數：未在 COST_PENALTY_NORMALIZE_PER_CHANNEL 指定的通道皆用此值。
+    每步該通道貢獻 penalty_k = (λ_k * cost_k) / max(1, norm_k)。
+    """
+
+    # 以下會經 config_builder → env_builder 傳入 LagrangianRewardWrapper，確實會生效。
+    # 每條成本線獨立除數；鍵=通道名(risk|fric|trade_freq|flat)，值=norm_k。未列出者用 COST_PENALTY_NORMALIZE_FACTOR。
+    COST_PENALTY_NORMALIZE_PER_CHANNEL: dict[str, float] = {
+        "risk": 1.0,       # 死亡成本 0/1，除小一點讓懲罰有感
+        "fric": 1.0,         # 手續費比例
+        "trade_freq":1000.0,   # 交易步 0/1
+        "flat": 5000.0,         # 空倉比例 0~1
+    }
+
+    # ==================== SB3 SAC 超參數 ====================
+    LEARNING_RATE: float = 1e-4
+    """學習率"""
+    
+    BUFFER_SIZE: int = 1_500_000
+    """Replay Buffer 大小"""
+    
+    BATCH_SIZE: int = 128
+    """訓練批次大小"""
+    
     ENT_COEF: str = "auto"
-    TRAIN_FREQ: int = 1 # 1 代表每次更新參數時，只用一個 batch 的資料
-    GRADIENT_STEPS: int = 1 # 1 代表每次更新參數時，只用一個 batch 的資料進行梯度下降
+    """熵係數：'auto' 表示自動調整，或指定數值（如 0.01）"""
+    
+    TRAIN_FREQ: int = 2
+    """
+    訓練頻率：每 N 個 env step 做一次梯度更新。
+    - 2（預設）：平衡 it/s 與學習效率，建議優先保證訓練效果
+    - 1：每 step 都更新（學習最密、it/s 最低）
+    - 4 或 8：瓶頸在 GPU 時可提升 it/s，但更新變疏、對訓練未必有益，僅在需要衝高吞吐時使用
+    """
+    
+    GRADIENT_STEPS: int = 1
+    """梯度步數：每次更新時做的梯度步數；建議與 TRAIN_FREQ 同值。過大僅提升 it/s，不利學習效率"""
 
-    # ---- Policy / 網路結構 ----
-    EMB_5M: int = 256 # 5m 特徵維度
-    EMB_1D: int = 128 # 1d 特徵維度
-    EMB_VEC: int = 128 # 向量特徵維度
-    OUT_DIM: int = 256 # 輸出維度
-    PI_ARCH: tuple[int, int] = (256, 256) # P 網路結構
-    QF_ARCH: tuple[int, int] = (128, 128) # Q 網路結構
+    # ==================== Policy / 網路結構（偏泛化：較小容量 + 正則）====================
+    # 雙 CNN 架構參數（DualCnnFeatureExtractor）：適度縮小維度以減少記住訓練期噪音
+    EMB_5M_TARGET: int = 96
+    """Target 5m 特徵維度（原 128，縮小以利泛化）"""
+    
+    EMB_5M_OTHERS: int = 48
+    """Others 5m 特徵維度（原 64）"""
+    
+    EMB_1D_TARGET: int = 48
+    """Target 1d 特徵維度（原 64）"""
+    
+    EMB_1D_OTHERS: int = 24
+    """Others 1d 特徵維度（原 32）"""
+    
+    EMB_VEC: int = 96
+    """向量特徵維度（原 128）"""
+    
+    OUT_DIM: int = 192
+    """最終融合層輸出維度（原 256）"""
+    
+    # 相容性：保留舊參數（用於向後相容，目前未使用）
+    EMB_5M: int = 256
+    """舊版 5m 特徵維度（已棄用）"""
+    
+    EMB_1D: int = 128
+    """舊版 1d 特徵維度（已棄用）"""
+    
+    PI_ARCH: tuple[int, int] = (192, 192)
+    """Policy 網路結構（原 (256,256)，縮小以利泛化）"""
+    
+    QF_ARCH: tuple[int, int] = (96, 96)
+    """Q 網路結構（原 (128,128)）"""
+    
+    FEATURE_EXTRACTOR_DROPOUT: float = 0.1
+    """特徵抽取器 Dropout 比例（0=關閉；0.1～0.2 可減輕過擬合，建議與較小容量搭配）"""
 
-    # ---- Wrapper（動作平滑/重複）----
-    # 訓練時建議用「更強的降頻/降換手」設定，否則手續費與 turnover 會把主線 log-return 磨成長期負值。
-    # 這些會由 Train/run_sac_lag.py 以 CLI 參數覆寫（不必動 Env/config.py 的全域預設）。
-    ACTION_REPEAT: int = 1 # 5 代表 5 步一決策
-    # 作用：訓練入口 `Train/run_sac_lag.py` 會用這個值建立 `ActionClipWrapper`，
-    # 用來限制 agent 的「目標持倉百分比」在 [-MAX_POSITION_PCT, +MAX_POSITION_PCT]。
-    # 優先順序：在 run_sac_lag 訓練流程中，此值會「覆蓋」Env.config.Config.MAX_POSITION_PCT（因為此處是顯式傳參）。
+    # 註：L2 正則（weight_decay）需在優化器設定，SB3 預設未暴露；目前依賴較小 net_arch + dropout 降低過擬合。
+
+    # ==================== Wrapper（動作平滑/重複）====================
+    ACTION_REPEAT: int = 1
+    """
+    動作重複次數（Frame Skipping）
+    - 1 代表每步都決策
+    - 5 代表 5 步一決策（重複執行相同動作 5 次）
+    - 訓練時建議用「更強的降頻/降換手」設定，否則手續費與 turnover 會把主線 log-return 磨成長期負值
+    """
+    
     MAX_POSITION_PCT: float = 0.7
+    """
+    最大持倉百分比
+    - 限制 agent 的「目標持倉百分比」在 [-MAX_POSITION_PCT, +MAX_POSITION_PCT]
+    - 優先順序：在 run_sac_lag 訓練流程中，此值會「覆蓋」Env.config.Config.MAX_POSITION_PCT
+    """
+    
     MIN_POSITION_CHANGE: float = 0.2
+    """
+    最小持倉變化閾值（Deadband）
+    - 抑制微小調倉，避免 action 抖動導致過度成交/手續費爆炸
+    - 單位：目標倉位比例（position pct）
+    """
 
-    # ---- No-trade hysteresis（方案2：雙門檻）----
-    # 建議先用很小的值觀察 trade_steps 與 fees 是否下降：
-    # - entry：空倉時需有明確訊號才進場
-    # - exit ：有倉時較容易回到空倉（避免 0 附近抖動）
-    # 注意：單位是目標倉位比例（position pct），並且動作會先被 clip 到 [-MAX_POSITION_PCT, +MAX_POSITION_PCT]。
-    NO_TRADE_ENTRY_THRESHOLD: float = MIN_POSITION_CHANGE
+    # ==================== No-trade hysteresis（方案2：雙門檻）====================
+    NO_TRADE_ENTRY_THRESHOLD: float = 0.2
+    """
+    空倉進場閾值
+    - 空倉時需有明確訊號（|action| >= 此值）才進場，否則強制 target=0（不交易）
+    - 單位：目標倉位比例（position pct）
+    - Eval 使用 deterministic 策略（輸出為 mean action）；若 policy 學到的 mean 落在 (-0.2, 0.2)，
+      則 Eval 會永遠不進場（0 交易）。可嘗試調低至 0.05~0.1 讓較小動作也能進場，或加強空倉成本使 policy 輸出更大 |action|。
+    """
+    
     NO_TRADE_EXIT_THRESHOLD: float = 0.1
+    """
+    有倉出場閾值
+    - 有倉時較容易回到空倉（避免 0 附近抖動）
+    - 單位：目標倉位比例（position pct）
+    - 注意：動作會先被 clip 到 [-MAX_POSITION_PCT, +MAX_POSITION_PCT]
+    """
 
-    # ---- 環境參數 ----
-    WINDOW_SIZE_5M: int = 288
+    # ==================== 環境參數 ====================
+    # 規劃建議（Window Size vs Policy/網路結構）：
+    # - CNN 使用 AdaptiveAvgPool1d(1)，輸出維度與序列長度 L 無關，故 EMB_* / OUT_DIM 不隨 window 線性綁定。
+    # - 5m 視窗：L 大（如 288）→ 歷史長，可維持或略增 EMB_5M_* / OUT_DIM；L 小（如 36）→ 可維持或略減以防過擬合。
+    # - 1d 視窗：L 小（7~14）→ 輕量即可；L 大（如 30）→ 可略增 EMB_1D_*，或保持不變先觀察。
+    # - 經驗式比例（僅供參考）：OUT_DIM ≈ 1~2x(EMB_5M_TARGET+EMB_5M_OTHERS)；PI_ARCH 首層 ≥ OUT_DIM。
+    WINDOW_SIZE_5M: int = 12  # 36（約 3 小時）；288 = 1 天
+    """5 分鐘 K 線視窗大小（根數）。288 = 1 天。"""
+    
     WINDOW_SIZE_1D: int = 14
+    """1 日 K 線視窗大小（天數）。"""
 
-    # ---- 資料切分（Train/Eval 分離）----
-    # 需求：評估資料使用「最近 N 個月」，剩餘資料作為訓練資料
+    # ==================== 資料切分（Train/Eval 分離）====================
     DATA_SPLIT_ENABLED: bool = True
-    HOLDOUT_MONTHS: int = 3
+    """是否啟用資料切分：評估資料使用「最近 N 個月」，剩餘資料作為訓練資料"""
+    
+    HOLDOUT_MONTHS: int = 2
+    """保留用於評估的月份數（從資料末尾往前取）"""
 
-    # ---- Log / Checkpoint ----
+    # ==================== 訓練 vs 評估差距說明 ====================
+    # 訓練端「Last N Episodes」統計來自「訓練資料」（非最近 HOLDOUT_MONTHS）；評估端在「最近 N 個月」上跑。
+    # 因此訓練數字好、評估數字差，常見原因：
+    # 1) 分布偏移：近期行情與訓練期不同，策略在 holdout 上泛化差。
+    # 2) 口徑一致：訓練端已輸出「Simple Return (同 Eval 口徑)」，可與 eval/mean_return 直接對比（同一資料期內仍可能因 random_start 不同而有差異）。
+    # 3) 若希望訓練期也看「與 Eval 同口徑」的收益，請看 STATS 裡的 Simple Return；若訓練 Simple Return 高而 Eval mean_return 低，多半是泛化問題，可考慮增加訓練多樣性、正則或縮短 holdout 做診斷。
+
+    # ==================== Log / Checkpoint ====================
     TENSORBOARD_LOG_DIR: str = "logs/sac_lag_tb"
+    """TensorBoard 日誌目錄"""
+    
     VEC_MONITOR_LOG_PREFIX: str = "logs/sac_lag"
+    """VecMonitor 日誌前綴"""
+    
     CHECKPOINT_SAVE_FREQ: int = 1_000_000
+    """檢查點保存頻率（每 N 個 timesteps）"""
+    
     CHECKPOINT_DIR_PREFIX: str = "models/sac_lag"
+    """檢查點目錄前綴"""
 
-    # ---- Periodic Evaluation / Validation（每 N steps 驗證）----
-    # 目的：
-    # - 訓練期間定期跑 eval episodes，輸出你關心的指標（止損/強平/交易頻率/進場/平均持倉/最終資金/收益率）
-    # - 依規則挑選並保存 best model
+    # ==================== Periodic Evaluation / Validation ====================
     EVAL_ENABLED: bool = True
-    # 以「訓練總 timesteps」為基準（使用 SB3 的 model.num_timesteps），確保在 VecEnv 下語意正確
-    EVAL_EVERY_TIMESTEPS: int = 1_000_000
-    EVAL_N_EVAL_EPISODES: int = 25
+    """
+    是否啟用週期性評估
+    - 訓練期間定期跑 eval episodes，輸出指標（止損/強平/交易頻率/進場/平均持倉/最終資金/收益率）
+    - 依規則挑選並保存 best model
+    """
+    
+    EVAL_EVERY_TIMESTEPS: int = 5_000_000
+    """
+    評估頻率（每 N 個 timesteps）
+    - 以「訓練總 timesteps」為基準（使用 SB3 的 model.num_timesteps）
+    - 確保在 VecEnv 下語意正確
+    """
+    
+    EVAL_N_EVAL_EPISODES: int = 5
+    """每次評估運行的 episode 數量"""
+    
     EVAL_DETERMINISTIC: bool = True
-    # Eval 環境設定：避免隨機起點使指標不穩定（可重現）
+    """評估時是否使用確定性策略（True 表示使用平均策略，False 表示採樣）"""
+    
     EVAL_RANDOM_START: bool = True
-    # 為了避免 eval 回合過長拖慢訓練：允許在 eval 端覆寫 episode 上限
-    EVAL_MAX_EPISODE_STEPS: int = 288*14
-    # Eval 每回合在 Terminal 顯示一行摘要
-    EVAL_PRINT_EACH_EPISODE: bool = True
+    """Eval 環境設定：是否使用隨機起點（與訓練 random_start=True 一致，避免 eval 起點過於集中）"""
+    
+    EVAL_MAX_EPISODE_STEPS: int = 288 * 14
+    """Eval episode 最大步數（避免回合過長拖慢訓練）"""
+    
+    EVAL_PRINT_EACH_EPISODE: bool = False
+    """是否在每個 eval episode 結束時在 Terminal 顯示一行摘要（為 True 時會自動關閉進度條，避免 Windows 下與進度條衝突導致崩潰）"""
+    
     EVAL_PRINT_PREFIX: str = "[EVAL]"
+    """Eval 輸出前綴"""
 
-    # ---- Best model 保存 ----
+    EVAL_RENDER_EACH_EPISODE: bool = False
+    """
+    Eval 時是否在每個 episode 結束後產出 render 圖檔。
+    - True：每個 eval episode 結束時觸發 env render（存檔至 logs/renders/eval_<symbol>/）
+    - 實際是否彈出視窗由 env 的 render_show 控制（eval 環境預設 render_show=True，可改 to_eval_dict）
+    """
+
+    # ==================== Best Model 保存 ====================
     EVAL_SAVE_BEST_MODEL: bool = True
-    # 實際保存路徑會在訓練入口用 symbol 組合（避免 TrainConfig 內直接格式化）
+    """是否保存最佳模型"""
+    
     EVAL_BEST_MODEL_SUBDIR: str = "best_model"
+    """最佳模型子目錄名稱（實際保存路徑會在訓練入口用 symbol 組合）"""
 
-    # ---- Best model 規則：constraints_then_balance + 排除死亡事件 ----
-    # 1) 任何「死亡事件」出現 => 整次 eval 不合格（不更新 best）
-    # - termination_reason in {"liq_triggered", "balance_insufficient"}
-    # - 或 episode_liq_count > 0
+    # ==================== Best Model 規則 ====================
     EVAL_REJECT_IF_DEATH_EVENT: bool = True
-    # 2) 只在通過約束時才允許更新 best
-    EVAL_MAX_DD_LIMIT: float = 0.40 # 0.40 代表 40%
-    EVAL_MEAN_COST_LIMIT: float = 0.01 # 0.01 代表 1%
+    """
+    是否拒絕包含死亡事件的評估結果
+    - True：任何「死亡事件」出現 => 整次 eval 不合格（不更新 best）
+    - 死亡事件定義：
+      * termination_reason in {"liq_triggered", "balance_insufficient"}
+      * 或 episode_liq_count > 0
+    """
+    
+    EVAL_MAX_DD_LIMIT: float = 0.40
+    """
+    評估最大回撤限制
+    - 0.40 代表 40%
+    - 只在通過此約束時才允許更新 best model
+    """
+    
+    EVAL_MEAN_COST_LIMIT: float = 0.01
+    """
+    評估平均成本限制
+    - 0.01 代表 1%（每步平均成本佔權益比例）
+    - 只在通過此約束時才允許更新 best model
+    """
+    
+    EVAL_MIN_MEAN_RETURN: float = 0.20
+    """
+    評估最低平均收益率（門檻）
+    - 0.20 代表 +20%（mean_return >= 0.20 才通過）
+    - 未達此門檻視為 eval 失敗，不更新 best model
+    """
+    
+    # ==================== Eval Gate 配置 ====================
+    EVAL_GATE_ENABLED: bool = True
+    """是否啟用評估門控（避免早期評估）"""
+    
+    EVAL_GATE_WINDOW_SIZE: int = 100
+    """評估門控視窗大小（最近 N 個訓練回合）"""
+    
+    EVAL_GATE_MIN_MAX_STEPS_REACHED_COUNT: int = 90
+    """評估門控最小達標回合數（視窗內需有 N 個回合達到 max_steps，100 回合中至少 90 回 max_steps_reached 才開啟 EVAL）"""
 
-    # ---- 指標口徑（固定）----
+    # ==================== 指標口徑（固定）====================
+    # 以下指標的計算方式固定，僅供參考：
     # - holding_ratio = episode_holding_steps / episode_steps
     # - trades_per_step = episode_trade_count / episode_steps
 
-    # ---- UI / Console ----
-    # 進度條預設開啟；若你想讓 SB3 的表格輸出（verbose=1）更乾淨，可把預設 verbose 設 0
+    # ==================== UI / Console ====================
     SHOW_PROGRESS_BAR_DEFAULT: bool = True
-    SB3_VERBOSE_DEFAULT: int | None = None  # None 代表由 run_sac_lag.py 依 progress bar 自動決定
+    """進度條預設是否開啟"""
+    
+    SB3_LOG_INTERVAL: int = 10_000
+    """
+    SB3 內建表格輸出的間隔（每 N 個 timestep 才 dump 一次）。
+    - 預設 10000 可大幅減少重複的 rollout/time 表格刷屏
+    - 自訂統計仍由 LagrangianCallback 依 LOG_EVERY_EPISODES 輸出
+    """
+    
+    SB3_VERBOSE_DEFAULT: int | None = None
+    """
+    SB3 預設 verbose 等級
+    - None：由 run_sac_lag.py 依 progress bar 自動決定
+    - 0：僅顯示錯誤（不印 SB3 內建表格）
+    - 1：顯示表格輸出（受 log_interval 控制頻率）
+    """
+
+    # ==================== 結果不佳時的調參建議 ====================
+    # 若訓練後出現：高死亡率(balance_insufficient)、flat 長期 VIOLATION、λ_flat=5 頂滿、
+    # Cost Penalty 主導 Total Reward、Win Rate 極低、Stop Loss 佔絕大多數出場，
+    # 可依序嘗試下列調整（改 train_config 預設或 CLI）：
+    #
+    # 1) 放寬空倉約束，避免 λ_flat 頂滿壓過主線獎勵
+    #    FLAT_COST_LIMIT: 0.4 → 0.55 或 0.6（讓目前 55% 空倉率先不 violation，再慢慢收緊）
+    #
+    # 2) 降低 flat 通道懲罰權重（讓「存活」與「持倉」有機會學到信號）
+    #    COST_PENALTY_NORMALIZE_PER_CHANNEL["flat"]: 1500 → 3000 或 5000（每步懲罰變小）
+    #
+    # 3) 提高死亡懲罰存在感（risk 通道 norm=1 已夠大，可提高 λ 上限或 kp）
+    #    LAGRANGIAN_LAMBDA_MAX: 5.0 → 10.0（僅 risk 需更強時可單獨調 risk 的 channel config）
+    #    或 LAGRANGIAN_KP: 0.1 → 0.15（λ 上升更快，約束更硬）
+    #
+    # 4) 止損過緊導致大量 SL 出場 → 空倉多 → flat violation；可適度放寬止損距離
+    #    Env/config.py: STOP_LOSS_ATR 1.5 → 2.0（需在環境建構時傳入）
+    #
+    # 5) 先讓 agent 學會「少死」再收緊 flat：可暫時放寬 FLAT_COST_LIMIT 到 0.6，
+    #    等 death rate 下降後再改回 0.4～0.45
 
 

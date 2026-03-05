@@ -21,7 +21,7 @@ class CostCalculator:
     確保約束條件在不同資金規模下具有尺度不變性 (Scale Invariance)。
 
     公式：
-    1. Death Cost: 1.0 (若發生爆倉/破產，視為損失 100% 權益)
+    1. Death Cost: 死亡時 = 1.0 + (剩餘步數/總步數)，未死亡 = 0；越早死懲罰越大（最多 2.0）
     2. Fric Cost : StepFee / Equity (本步手續費佔權益的比例)
     """
 
@@ -45,99 +45,51 @@ class CostCalculator:
             equity: 當前權益 (E_t)
             min_balance: 最低資金門檻
             step_fee: 本步產生的手續費 (絕對金額；包含加倉/減倉/平倉)
-            step_fee_add_only: （可選，從 kwargs 傳入）僅計入「加碼/加曝險」的手續費，用於排除減倉/平倉的摩擦成本線
+            episode_steps: （可選）本回合已執行步數（不含本步）；與 episode_max_steps 同時提供時，死亡成本隨剩餘步數加權
+            episode_max_steps: （可選）本回合最大步數
+            step_fee_add_only: （可選）僅計入「加碼/加曝險」的手續費
 
         Returns:
             Dict:
-            - cost: 總正規化成本 (供單一 Lambda 使用)
-            - cost_risk: 死亡成本 (1.0 or 0.0)（不包含止損事件）
-            - cost_fric: 摩擦成本 (Fee / Equity)
-            - cost_sl_buf: 止損安全緩衝成本（密集、0~1、ATR 無量綱）
-            - cost_sl_event: 止損事件成本（事件型；獨立成本線）
+            - cost: 總正規化成本
+            - cost_risk: 死亡成本 (0 或 [1.0, 2.0]，剩餘步數越多越大)
+            - cost_fric: 摩擦成本 (目前固定為 0.0)
             - cost_breakdown: 詳細分項
         """
         # 防除以零保護：使用 min_balance 或極小值做為分母下限
-        # 若 equity 已經低於 0，則保護值為 1e-4，避免負值或除零炸裂
         safe_equity = max(equity, 1e-4)
 
         # 1. 死亡/風險成本 (c_risk)
-        # 定義：發生死亡事件 = 100% 權益損失風險實現 -> Cost = 1.0
+        # 定義：死亡時 = 1.0 + (剩餘步數/總步數)，區間 [1.0, 2.0]；越早死（剩餘步數多）懲罰越大
         is_dead = liq_triggered or (equity <= min_balance)
-        c_death = 1.0 if is_dead else 0.0
-
-        # 1b. 止損事件成本（事件型；獨立成本線，不屬於 risk/sl_buf）
-        # 定義：若本 step 觸發止損，給一個固定成本（0~1）。
-        # 注意：若本 step 同時是死亡事件，death_cost 已主導；此事件成本在該步視為 0（避免重複懲罰）。
-        stop_loss_triggered = bool(kwargs.get("stop_loss_triggered", False))
-        stop_loss_event_cost = kwargs.get("stop_loss_event_cost", 0.0)
-        try:
-            stop_loss_event_cost = float(stop_loss_event_cost)
-        except (TypeError, ValueError):
-            stop_loss_event_cost = 0.0
-        stop_loss_event_cost = float(min(1.0, max(0.0, stop_loss_event_cost)))
-        c_stop_event = stop_loss_event_cost if (stop_loss_triggered and not is_dead) else 0.0
-
-        # 風險通道：只代表死亡事件（你要求「止損獨立出來不能涵蓋在 risk」）。
-        c_risk = float(c_death)
-
-        # 2. 摩擦/換手成本 (c_fric)
-        # 定義：手續費佔當前權益的比例
-        # c_fric = Fee_t / E_t
-        #
-        # 重要：若外部提供 step_fee_add_only，則 cost_fric 會「排除減倉/平倉」，
-        # 只在加碼/加曝險時才計入摩擦成本。
-        fee_for_fric = kwargs.get("step_fee_add_only", step_fee)
-        try:
-            fee_for_fric = float(fee_for_fric)
-        except (TypeError, ValueError):
-            fee_for_fric = float(step_fee)
-        c_fric = fee_for_fric / safe_equity
-
-        # 3. Stop-Buffer Cost（止損成本線）
-        # 定義距離（以 ATR 正規化）：d_t = |P_t - SL_t| / ATR_t
-        # 成本：c_sl_buf = clip( max(0, d_min - d_t) / d_scale, 0, 1 )
-        #
-        # 語義：不是罰虧損，而是罰「你把倉位放在快撞止損的地方還不撤」。
-        # 若持倉但缺少 SL 或 ATR 無法估計，視為不安全 -> stop_missing_cost = 1.0。
-        has_position = bool(kwargs.get("has_position", False))
-        current_price = float(kwargs.get("current_price", 0.0) or 0.0)
-        stop_loss_price = float(kwargs.get("stop_loss_price", 0.0) or 0.0)
-        atr = float(kwargs.get("atr", 0.0) or 0.0)
-        d_min = float(kwargs.get("stop_buffer_d_min", 0.3))
-        d_scale = float(kwargs.get("stop_buffer_d_scale", max(d_min, 1e-12)))
-        d_scale_safe = max(d_scale, 1e-12)
-
-        sl_buf_cost = 0.0
-        stop_missing_cost = 0.0
-        if has_position:
-            # stop_loss_price==0 表示未設定；atr<=0 表示無法估計（資料不足或極端情況）
-            if stop_loss_price <= 0.0 or atr <= 1e-12:
-                stop_missing_cost = 1.0
+        if is_dead:
+            ep_steps = kwargs.get("episode_steps")
+            ep_max = kwargs.get("episode_max_steps")
+            if ep_max is not None and ep_max >= 1 and ep_steps is not None:
+                # 本步為第 (episode_steps+1) 步，剩餘步數 = max(0, max - steps - 1)
+                remaining = max(0, int(ep_max) - int(ep_steps) - 1)
+                ratio = float(remaining) / float(max(1, int(ep_max)))
+                c_death = 1.0 + ratio  # [1.0, 2.0]
             else:
-                d_t = abs(current_price - stop_loss_price) / atr
-                raw = max(0.0, d_min - d_t) / d_scale_safe
-                sl_buf_cost = min(1.0, max(0.0, raw))
+                c_death = 1.0
+        else:
+            c_death = 0.0
 
-        # channel 值：若缺 SL，直接視為最大不安全；否則使用 buffer 公式
-        c_sl_buf = max(sl_buf_cost, stop_missing_cost)
-
-        # 總成本 (若訓練端只支援單一 cost channel，則相加)
-        # 通常死亡成本 (1.0) 會遠大於摩擦成本 (e.g. 0.001)，
-        # 所以直接相加在數學上是合理的 (死亡是主導項)。
-        # 注意：stop_loss_event_cost 不屬於 sl_buf，因此總成本要把事件成本也加進去。
-        total_cost = c_death + c_fric + c_sl_buf + c_stop_event
-
+        c_risk = float(c_death)
+        
+        # 2. 摩擦成本 (c_fric)
+        # 目前固定為 0.0，未來可擴充實現
+        c_fric = 0.0
+        
+        # 總成本 (目前只有 cost_risk，因為 cost_fric 為 0)
+        total_cost = c_death
+        
         return {
             "cost": float(total_cost),       # 總和 (供 Env.info['cost'] 使用)
             "cost_risk": float(c_risk),      # 獨立通道 (供多 Lambda 使用)
-            "cost_fric": float(c_fric),      # 獨立通道 (供多 Lambda 使用)
-            "cost_sl_buf": float(c_sl_buf),  # 獨立通道 (供多 Lambda 使用)
-            "cost_sl_event": float(c_stop_event),  # 獨立通道 (供多 Lambda 使用)
+            "cost_fric": float(c_fric),      # 摩擦成本通道 (目前固定為 0)
             "cost_breakdown": {
                 "death_cost": float(c_death),
-                "stop_loss_event_cost": float(c_stop_event),
                 "fric_cost": float(c_fric),
-                "sl_buf_cost": float(sl_buf_cost),
-                "stop_missing_cost": float(stop_missing_cost),
             },
         }

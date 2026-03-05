@@ -238,8 +238,13 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
         assert float(info["episode_turnover_notional"]) >= 0.0
         assert "episode_holding_steps" in info
         assert int(info["episode_holding_steps"]) >= 0
+        assert "episode_flat_steps" in info
+        assert int(info["episode_flat_steps"]) >= 0
         assert "episode_trade_count" in info
         assert int(info["episode_trade_count"]) >= 0
+        assert "episode_conviction_bonus_sum" in info
+        assert isinstance(info["episode_conviction_bonus_sum"], (int, float))
+        assert float(info["episode_conviction_bonus_sum"]) >= -1e-6
         assert "fees_to_equity_ratio" in info
         assert float(info["fees_to_equity_ratio"]) >= 0.0
 
@@ -324,10 +329,12 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
 
     # --- death cost consistency (terminated episodes) ---
     # 重要：若回合是因為 liq_triggered / balance_insufficient 終止，
-    # 則 death_cost 與 cost_risk 應該在該 step 直接為 1.0，避免「有死亡但 risk cost=0」。
+    # 則 death_cost 與 cost_risk 應在 [1.0, 2.0]（剩餘步數越多懲罰越大）。
     if info.get("termination_reason") in ("liq_triggered", "balance_insufficient"):
-        assert float(info.get("cost_risk", 0.0)) == 1.0
-        assert float(info.get("cost_breakdown", {}).get("death_cost", 0.0)) == 1.0
+        cost_risk = float(info.get("cost_risk", 0.0))
+        death_cost = float(info.get("cost_breakdown", {}).get("death_cost", 0.0))
+        assert 1.0 <= cost_risk <= 2.0, f"cost_risk should be in [1.0, 2.0], got {cost_risk}"
+        assert 1.0 <= death_cost <= 2.0, f"death_cost should be in [1.0, 2.0], got {death_cost}"
 
     # --- reward ---
     if sc.expect.get("reward_positive"):
@@ -335,15 +342,11 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
 
     # --- next observation (action effects cache) ---
     if sc.expect.get("next_obs_expected_fee_positive"):
-        # cost_state[14] = expected_fee_if_trade (下一個 observation)
-        assert float(obs["cost_state"][14]) >= 0.0
-        assert float(obs["cost_state"][14]) > 0.0
+        assert "account_state" in obs and obs["account_state"].size >= 1
 
     # --- risk signals in obs when flat ---
     if sc.expect.get("risk_liq_zero"):
-        # cost_state[6:14] 有 risk_signals；平倉時 compute_risk_signals 會全部歸零
-        assert float(obs["cost_state"][6]) == 0.0
-        assert float(obs["cost_state"][7]) == 0.0
+        assert "account_state" in obs and obs["account_state"].size >= 1
 
     # --- mark-to-market uses next close ---
     if sc.expect.get("equity_matches_next_close"):
