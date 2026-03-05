@@ -21,8 +21,8 @@ class Config:
     # -------------------------------------------------------------------------
     # 視窗與步數
     # -------------------------------------------------------------------------
-    WINDOW_SIZE: int = 288 * 1.5  # 5m 根數，432 ≈ 1.5 天
-    WINDOW_SIZE_1D: int = 30
+    WINDOW_SIZE: int = 14  # 5m 根數，432 ≈ 1.5 天
+    WINDOW_SIZE_1D: int = 12
     MIN_EPISODE_STEPS: int = 288 * 31 * 1
     MAX_EPISODE_STEPS: int = 288 * 31 * 1
     RISK_BASE_UPDATE_STEPS: int = 288  # 每 N steps 更新 daily_risk_base（用於單步倉位變化上限）
@@ -65,7 +65,7 @@ class Config:
     # -------------------------------------------------------------------------
     STOP_LOSS_ATR: float = 2  # 止損距離的 ATR 倍數
     STOP_LOSS_LIQ_BUFFER_PCT: float = 0.2  # 止損相對強平價的安全緩衝（比例）
-    STOP_LOSS_COOLDOWN_STEPS: int = 6  # 止損後冷卻步數（30/5）
+    STOP_LOSS_COOLDOWN_STEPS: int = 0  # 止損後冷卻步數（30/5）
     STOP_LOSS_EVENT_COST: float = 0.02  # 觸發止損時的額外事件成本（比例）
 
     # Stop-Buffer Cost：罰「持倉接近止損卻不撤」（ATR 正規化）
