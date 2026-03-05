@@ -24,7 +24,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from Env.config import Config
-from Train.train_config import TrainConfig
+from Eval.train_config import TrainConfig
 
 
 @dataclass

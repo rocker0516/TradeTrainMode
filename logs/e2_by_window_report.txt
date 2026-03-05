@@ -7,26 +7,26 @@ tasks: ['binary'], cnn_keys: ['5m_target', '5m_others', '1d_target', '1d_others'
 --- cnn_key=5m_target, task=binary ---
  ws_5m  ws_1d        n   feat   AUC_LR  AUC_LGB  LblShuf  MktShuf
 --------------------------------------------------------------------------------
-    12     14    65299    161   0.4998   0.4981   0.5110   0.5035
-    12     30    65299    161   0.4998   0.4980   0.5110   0.5035
+    12     14    65299    161   0.4998   0.4981   0.5109   0.5035
+    12     30    65299    161   0.4998   0.4982   0.5109   0.5035
 
 --- cnn_key=5m_others, task=binary ---
  ws_5m  ws_1d        n   feat   AUC_LR  AUC_LGB  LblShuf  MktShuf
 --------------------------------------------------------------------------------
-    12     14    65299    336   0.4996   0.4942   0.5082   0.5000
-    12     30    65299    336   0.4996   0.4944   0.5082   0.4999
+    12     14    65299    336   0.4996   0.4943   0.5081   0.5000
+    12     30    65299    336   0.4996   0.4944   0.5081   0.5000
 
 --- cnn_key=1d_target, task=binary ---
  ws_5m  ws_1d        n   feat   AUC_LR  AUC_LGB  LblShuf  MktShuf
 --------------------------------------------------------------------------------
-    12     14    65299     63   0.5913   0.5846   0.5013   0.4947
-    12     30    65299     63   0.5909   0.5877   0.5230   0.4950
+    12     14    65299     63   0.5913   0.5859   0.5055   0.4947
+    12     30    65299     63   0.5909   0.5870   0.5205   0.4950
 
 --- cnn_key=1d_others, task=binary ---
  ws_5m  ws_1d        n   feat   AUC_LR  AUC_LGB  LblShuf  MktShuf
 --------------------------------------------------------------------------------
-    12     14    65299    294   0.5409   0.5459   0.5168   0.4961
-    12     30    65299    294   0.5122   0.5415   0.5096   0.4956
+    12     14    65299    294   0.5409   0.5450   0.5209   0.4961
+    12     30    65299    294   0.5122   0.5412   0.5093   0.4956
 
 
 --- 報告保留樣本比例 ---
@@ -40,72 +40,3 @@ tasks: ['binary'], cnn_keys: ['5m_target', '5m_others', '1d_target', '1d_others'
     12     30    5m_others     30.00%           合理
     12     30    1d_target     30.00%           合理
     12     30    1d_others     30.00%           合理
---- Gated 5m horizon sweep (Gate A=up, B=liquidity, C=has direction, D=down; k=3,6,12,24) ---
-Pass: gated AUC >= 0.53 and LblShuf~0.5 -> conditional signal. Gate D: AUC_neg = AUC(y, 1-score); AUC<0.5 and AUC_neg>0.5 -> 反向可學.
-  gate  ws_5m  ws_1d      cnn_key    k   n_kept  AUC_LGB  AUC_neg  LblShuf  MktShuf                                                 判斷
---------------------------------------------------------------------------------------------------------------------------------------------
-Gate_A     12     14    5m_target    3    27222   0.5013        —   0.5061   0.5066                                                   
-Gate_B     12     14    5m_target    3    25918   0.5050        —   0.5074   0.4955                                                   
-Gate_C     12     14    5m_target    3    52549   0.5067        —   0.4707   0.4984                                                   
-Gate_D     12     14    5m_target    3    25327   0.5126   0.4874   0.5278   0.5062                         down 可能無訊號或對齊/切分/label 有問題
-Gate_A     12     14    5m_target    6    27259   0.5472        —   0.4980   0.5061 conditional signal; suggest hierarchical policy (1d regime, 5m timing)
-Gate_B     12     14    5m_target    6    25407   0.5011        —   0.4854   0.5078                                                   
-Gate_C     12     14    5m_target    6    52624   0.5038        —   0.5025   0.4916                                                   
-Gate_D     12     14    5m_target    6    25365   0.4987   0.5013   0.4914   0.5085                                 反向可學 (down regime)
-Gate_A     12     14    5m_target   12    27047   0.5554        —   0.5196   0.4966 conditional signal; suggest hierarchical policy (1d regime, 5m timing)
-Gate_B     12     14    5m_target   12    25044   0.5157        —   0.4971   0.5133                                                   
-Gate_C     12     14    5m_target   12    52526   0.5045        —   0.5029   0.5013                                                   
-Gate_D     12     14    5m_target   12    25479   0.4661   0.5339   0.4903   0.4885                                 反向可學 (down regime)
-Gate_A     12     14    5m_target   24    27093   0.5052        —   0.5111   0.4896                                                   
-Gate_B     12     14    5m_target   24    24765   0.5173        —   0.5246   0.5065                                                   
-Gate_C     12     14    5m_target   24    52718   0.4821        —   0.5076   0.4960                                                   
-Gate_D     12     14    5m_target   24    25625   0.4660   0.5340   0.5191   0.4995                                 反向可學 (down regime)
-Gate_A     12     14    5m_others    3    27222   0.5090        —   0.4925   0.5011                                                   
-Gate_B     12     14    5m_others    3    25918   0.4906        —   0.4989   0.4931                                                   
-Gate_C     12     14    5m_others    3    52549   0.5111        —   0.4742   0.4830                                                   
-Gate_D     12     14    5m_others    3    25327   0.5001   0.4999   0.5136   0.4935                         down 可能無訊號或對齊/切分/label 有問題
-Gate_A     12     14    5m_others    6    27259   0.5175        —   0.5363   0.4941                                                   
-Gate_B     12     14    5m_others    6    25407   0.4800        —   0.4879   0.4949                                                   
-Gate_C     12     14    5m_others    6    52624   0.5116        —   0.4997   0.4813                                                   
-Gate_D     12     14    5m_others    6    25365   0.4845   0.5155   0.4950   0.4952                                 反向可學 (down regime)
-Gate_A     12     14    5m_others   12    27047   0.5447        —   0.5105   0.5026 conditional signal; suggest hierarchical policy (1d regime, 5m timing)
-Gate_B     12     14    5m_others   12    25044   0.5087        —   0.4856   0.5067                                                   
-Gate_C     12     14    5m_others   12    52526   0.5193        —   0.4916   0.4942                                                   
-Gate_D     12     14    5m_others   12    25479   0.4916   0.5084   0.4918   0.4827                                 反向可學 (down regime)
-Gate_A     12     14    5m_others   24    27093   0.5366        —   0.4875   0.5066 conditional signal; suggest hierarchical policy (1d regime, 5m timing)
-Gate_B     12     14    5m_others   24    24765   0.5451        —   0.4654   0.5129 conditional signal; suggest hierarchical policy (1d regime, 5m timing)
-Gate_C     12     14    5m_others   24    52718   0.4980        —   0.5110   0.4959                                                   
-Gate_D     12     14    5m_others   24    25625   0.4789   0.5211   0.4989   0.4911                                 反向可學 (down regime)
-Gate_A     12     30    5m_target    3    27222   0.5014        —   0.5061   0.5066                                                   
-Gate_B     12     30    5m_target    3    25918   0.5050        —   0.5072   0.4955                                                   
-Gate_C     12     30    5m_target    3    52549   0.5067        —   0.4707   0.4984                                                   
-Gate_D     12     30    5m_target    3    25327   0.5124   0.4876   0.5277   0.5060                         down 可能無訊號或對齊/切分/label 有問題
-Gate_A     12     30    5m_target    6    27259   0.5472        —   0.4979   0.5060 conditional signal; suggest hierarchical policy (1d regime, 5m timing)
-Gate_B     12     30    5m_target    6    25407   0.5011        —   0.4856   0.5078                                                   
-Gate_C     12     30    5m_target    6    52624   0.5038        —   0.5024   0.4916                                                   
-Gate_D     12     30    5m_target    6    25365   0.4988   0.5012   0.4912   0.5085                                 反向可學 (down regime)
-Gate_A     12     30    5m_target   12    27047   0.5553        —   0.5197   0.4965 conditional signal; suggest hierarchical policy (1d regime, 5m timing)
-Gate_B     12     30    5m_target   12    25044   0.5157        —   0.4971   0.5133                                                   
-Gate_C     12     30    5m_target   12    52526   0.5045        —   0.5031   0.5013                                                   
-Gate_D     12     30    5m_target   12    25479   0.4661   0.5339   0.4903   0.4885                                 反向可學 (down regime)
-Gate_A     12     30    5m_target   24    27093   0.5049        —   0.5110   0.4896                                                   
-Gate_B     12     30    5m_target   24    24765   0.5171        —   0.5245   0.5064                                                   
-Gate_C     12     30    5m_target   24    52718   0.4821        —   0.5077   0.4959                                                   
-Gate_D     12     30    5m_target   24    25625   0.4659   0.5341   0.5191   0.4994                                 反向可學 (down regime)
-Gate_A     12     30    5m_others    3    27222   0.5090        —   0.4925   0.5012                                                   
-Gate_B     12     30    5m_others    3    25918   0.4906        —   0.4990   0.4931                                                   
-Gate_C     12     30    5m_others    3    52549   0.5110        —   0.4742   0.4830                                                   
-Gate_D     12     30    5m_others    3    25327   0.4999   0.5001   0.5137   0.4935                                 反向可學 (down regime)
-Gate_A     12     30    5m_others    6    27259   0.5175        —   0.5365   0.4941                                                   
-Gate_B     12     30    5m_others    6    25407   0.4799        —   0.4880   0.4949                                                   
-Gate_C     12     30    5m_others    6    52624   0.5117        —   0.4997   0.4812                                                   
-Gate_D     12     30    5m_others    6    25365   0.4845   0.5155   0.4951   0.4952                                 反向可學 (down regime)
-Gate_A     12     30    5m_others   12    27047   0.5446        —   0.5104   0.5026 conditional signal; suggest hierarchical policy (1d regime, 5m timing)
-Gate_B     12     30    5m_others   12    25044   0.5088        —   0.4853   0.5067                                                   
-Gate_C     12     30    5m_others   12    52526   0.5193        —   0.4915   0.4942                                                   
-Gate_D     12     30    5m_others   12    25479   0.4922   0.5078   0.4917   0.4827                                 反向可學 (down regime)
-Gate_A     12     30    5m_others   24    27093   0.5367        —   0.4876   0.5067 conditional signal; suggest hierarchical policy (1d regime, 5m timing)
-Gate_B     12     30    5m_others   24    24765   0.5450        —   0.4653   0.5129 conditional signal; suggest hierarchical policy (1d regime, 5m timing)
-Gate_C     12     30    5m_others   24    52718   0.4981        —   0.5107   0.4959                                                   
-Gate_D     12     30    5m_others   24    25625   0.4787   0.5213   0.4988   0.4910                                 反向可學 (down regime)
-====================================================================================================
