@@ -21,8 +21,8 @@ class Config:
     # -------------------------------------------------------------------------
     # 視窗與步數
     # -------------------------------------------------------------------------
-    WINDOW_SIZE: int = 14  # 5m 根數，432 ≈ 1.5 天
-    WINDOW_SIZE_1D: int = 12
+    WINDOW_SIZE: int = 12  # 5m 根數，432 ≈ 1.5 天
+    WINDOW_SIZE_1D: int = 14
     MIN_EPISODE_STEPS: int = 288 * 31 * 1
     MAX_EPISODE_STEPS: int = 288 * 31 * 1
     RISK_BASE_UPDATE_STEPS: int = 288  # 每 N steps 更新 daily_risk_base（用於單步倉位變化上限）
@@ -43,8 +43,8 @@ class Config:
     # -------------------------------------------------------------------------
     # 主線獎勵：順向交易獎勵（Conviction Trend Bonus）
     # -------------------------------------------------------------------------
-    # 順向獎勵權重；>0 啟用「強訊號 + 大倉 + 同向」時加分，建議從小值開始（如 0.1）
-    CONVICTION_TREND_BONUS_WEIGHT: float = 0.3
+    # 順向獎勵權重；>0 啟用「強訊號 + 大倉 + 同向」時加分；主線為 log return，此為輔助小權重＋退火
+    CONVICTION_TREND_BONUS_WEIGHT: float = 0.1
     # trend_score 縮放倍數（(ma50-ma200)/ma200 為小數比，乘上此倍數後再 tanh 算 strength）
     # 例如 scale=10：trend_score=0.05 → strength≈0.46，易通過 min_strength 0.25
     CONVICTION_TREND_SCORE_SCALE: float = 10.0
@@ -52,8 +52,8 @@ class Config:
     CONVICTION_TREND_MIN_STRENGTH: float = 0.35
     # 最小曝險門檻 [0,1]，僅當 abs(position_pct) >= 此值才加分，避免小倉刷分
     CONVICTION_MIN_ABS_POS: float = 0.5
-    # Regime 對齊 bonus 權重：A 狀態多頭加分、C 狀態空頭加分，依 dir_strength 加權；0=不啟用
-    REGIME_ALIGNMENT_BONUS_WEIGHT: float = 0.5
+    # Regime 對齊 bonus 權重：A 狀態多頭加分、C 狀態空頭加分，依 dir_strength 加權；0=不啟用；主線為 log return，此為輔助小權重＋退火
+    REGIME_ALIGNMENT_BONUS_WEIGHT: float = 0.1
 
     # -------------------------------------------------------------------------
     # 手續費與 Fee Limit
@@ -110,8 +110,7 @@ class Config:
         "price_seq_others",      # 5m 其他標的序列
         "price_seq_1d_target",   # 1d 目標標的序列
         "price_seq_1d_others",   # 1d 其他標的序列
-        "account_state",         # 帳戶狀態（22 維）
-        "context_state",         # 情境狀態（8 維）
+        "account_state",         # 帳戶狀態（含 actual_pos_pct）
         "gate_flags",            # Gate A/B/C multi-hot（1d up, 5m 流動性, 1d down）
         "regime_score",          # [p_up, p_down, dir_strength] 強度分數（與 gate 同頻率）
     )
@@ -188,10 +187,11 @@ class Config:
         "sopr_z",
     )
 
-    # 帳戶狀態：22 維的完整名稱（順序須與 observer 內建一致）；子集由 OBS_ACCOUNT_STATE_COLS 指定
+    # 帳戶狀態：23 維的完整名稱（順序須與 observer 內建一致）；子集由 OBS_ACCOUNT_STATE_COLS 指定
     OBS_ACCOUNT_STATE_NAMES: tuple[str, ...] = (
         "position_side",
         "position_size_norm",
+        "actual_pos_pct",        # 執行後真實倉位比例 [-1, 1]（與 last_final_pos_pct 同口徑）
         "equity_ratio",
         "realized_pnl_ratio",
         "unrealized_pnl_atr",
@@ -213,7 +213,7 @@ class Config:
         "stop_loss_price_ratio",
         "recent_flat_ratio",
     )
-    OBS_ACCOUNT_STATE_COLS: tuple[str, ...] = ()  # 空 = 使用上列全部 22 欄
+    OBS_ACCOUNT_STATE_COLS: tuple[str, ...] = ()  # 空 = 使用上列全部 23 欄
 
     # 情境狀態：8 維的完整名稱；子集由 OBS_CONTEXT_STATE_COLS 指定
     OBS_CONTEXT_STATE_NAMES: tuple[str, ...] = (

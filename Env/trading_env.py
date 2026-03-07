@@ -258,6 +258,8 @@ class TradingEnvironment(gym.Env):
         self.episode_log_return_sum = 0.0
         # Regime 對齊 bonus 本回合累計（主線 STATS 分解用）
         self.episode_regime_alignment_bonus_sum = 0.0
+        # 本回合 cost_risk 累計（供 TensorBoard / 輔助主線比對照）
+        self.episode_cost_risk_sum = 0.0
 
         # Action-conditioned effects cache (for next obs)
         self._last_action_effects = {}
@@ -474,6 +476,7 @@ class TradingEnvironment(gym.Env):
         self.episode_conviction_bonus_sum = 0.0
         self.episode_log_return_sum = 0.0
         self.episode_regime_alignment_bonus_sum = 0.0
+        self.episode_cost_risk_sum = 0.0
 
         self.last_trade_step = -999999
         self.position_entry_step = None
@@ -776,6 +779,7 @@ class TradingEnvironment(gym.Env):
         episode_conviction_bonus_sum: float = 0.0,
         episode_log_return_sum: float = 0.0,
         episode_regime_alignment_bonus_sum: float = 0.0,
+        episode_cost_risk_sum: float = 0.0,
         terminated: bool = False,
         truncated: bool = False,
         termination_reason: Optional[str] = None,
@@ -798,6 +802,7 @@ class TradingEnvironment(gym.Env):
             episode_conviction_bonus_sum: 本回合順向交易獎勵累計（主線 STATS 用）
             episode_log_return_sum: 本回合純對數報酬累計 = log(E_final/E_init)（STATS Est. ROI 用）
             episode_regime_alignment_bonus_sum: 本回合 regime 對齊 bonus 累計（STATS 分解用）
+            episode_cost_risk_sum: 本回合 cost_risk 累計（TensorBoard 用）
             terminated: Gymnasium terminated（自然終止）
             truncated: Gymnasium truncated（時間/資料截斷）
             termination_reason: 終止原因（若結束回合）
@@ -833,6 +838,7 @@ class TradingEnvironment(gym.Env):
             info["episode_conviction_bonus_sum"] = float(episode_conviction_bonus_sum)
             info["episode_log_return_sum"] = float(episode_log_return_sum)
             info["episode_regime_alignment_bonus_sum"] = float(episode_regime_alignment_bonus_sum)
+            info["episode_cost_risk_sum"] = float(episode_cost_risk_sum)
             info["fees_to_equity_ratio"] = (
                 float(getattr(self.executor, "total_fees", 0.0)) / float(max(1e-8, new_equity))
             )
@@ -1040,9 +1046,17 @@ class TradingEnvironment(gym.Env):
             atr=prices.atr_est,
             risk_base=self.daily_risk_base,
         )
+        # 執行後真實倉位比例（executor 可能因 min_trade_qty / deadband 未動，故以實際持倉為準）
+        max_nominal = max(float(last_equity) * float(self.leverage), 1e-8)
+        actual_size = float(self.executor.position.size)
+        actual_pos_pct = np.clip(
+            (actual_size * float(prices.current_price)) / max_nominal,
+            -1.0,
+            1.0,
+        )
 
         return (
-            float(final_pos_pct),
+            float(actual_pos_pct),
             float(expected_fee),
             float(prev_wallet),
             bool(is_flip),
@@ -1355,6 +1369,7 @@ class TradingEnvironment(gym.Env):
         self.done = bool(terminated or truncated)
         
         # 9. Reward Calculation（含 regime 對齊 bonus：傳入本 step 的 gate_flags 與 regime_score）
+        # 逐步 log return 對齊實際收益：last_equity = 本 bar 收盤權益（執行前舊倉），new_equity = 下一 bar 收盤權益（執行後新倉＋手續費已入帳），故 log(new/last) 即該步真實帳戶報酬率。
         # 本 step 執行的 bar 為 step_idx，regime 與分數以此為準
         gate_flags_step = self.market_data.get_gate_flags(step_idx)
         regime_score_step = self.market_data.get_regime_score(step_idx)
@@ -1419,6 +1434,8 @@ class TradingEnvironment(gym.Env):
             episode_max_steps=int(self.episode_max_steps),
         )
 
+        # 本回合 cost_risk 累計（供 TensorBoard；須在 _build_step_info 前累加當步）
+        self.episode_cost_risk_sum += float(cost_out.get("cost_risk", 0.0))
         # ---- Record render events (entry/reduce/close/flip/SL/LIQ) ----
         self._record_step_events(
             step_idx=step_idx,
@@ -1458,6 +1475,7 @@ class TradingEnvironment(gym.Env):
             episode_conviction_bonus_sum=float(self.episode_conviction_bonus_sum),
             episode_log_return_sum=float(self.episode_log_return_sum),
             episode_regime_alignment_bonus_sum=float(self.episode_regime_alignment_bonus_sum),
+            episode_cost_risk_sum=float(self.episode_cost_risk_sum),
             terminated=bool(terminated),
             truncated=bool(truncated),
             termination_reason=termination_reason,
@@ -1480,6 +1498,12 @@ class TradingEnvironment(gym.Env):
             self._trade_freq_deque.append(1.0 if position_changed else 0.0)
         # 空倉成本：鼓勵持倉、允許避險；|final_pos_pct| < 門檻則 1.0，否則 0.0
         info["cost_flat"] = 1.0 if is_flat else 0.0
+        # Reward 分解（供訓練端退火與 episode_stats）：主線 log_return、輔助 regime/conviction
+        _reg = float(getattr(self.reward_calculator, "last_regime_alignment_bonus", 0.0))
+        _conv = float(getattr(self.reward_calculator, "last_conviction_bonus", 0.0))
+        info["reward_log_return"] = float(reward) - _reg - _conv
+        info["reward_regime_bonus"] = _reg
+        info["reward_conviction_bonus"] = _conv
         # 更新空倉滑窗與 recent_flat_ratio（供下一步 obs，實盤可算）
         if getattr(self, "_flat_deque", None) is not None:
             self._flat_deque.append(1.0 if is_flat else 0.0)

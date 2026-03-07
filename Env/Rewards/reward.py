@@ -139,10 +139,11 @@ class ConvictionTrendRewardCalculator(RewardCalculator):
     - abs_position_pct: [0, 1] position_pct 絕對值
     - trend_score: (ma50-ma200)/ma200 小數比，會乘上 conviction_trend_score_scale 後再 tanh 算 strength
     """
-    conviction_trend_bonus_weight: float = 0.0
-    conviction_trend_min_strength: float = 0.8
-    conviction_min_abs_pos: float = 0.15
-    conviction_trend_score_scale: float = 10.0
+    conviction_trend_bonus_weight: float = 0.0 # 順向獎勵權重；>0 啟用「強訊號 + 大倉 + 同向」時加分，建議從小值開始（如 0.1）
+    conviction_trend_min_strength: float = 0.8 # 趨勢強度門檻 [0,1]；strength = |tanh(scale * trend_score)|，達此值才加分
+    conviction_min_abs_pos: float = 0.15 # 最小曝險門檻 [0,1]，僅當 abs(position_pct) >= 此值才加分，避免小倉刷分
+    conviction_trend_score_scale: float = 10.0 # trend_score 縮放倍數（(ma50-ma200)/ma200 為小數比，乘上此倍數後再 tanh 算 strength）
+    # 例如 scale=10：trend_score=0.05 → strength≈0.46，易通過 min_strength 0.25
 
     def compute(
         self,

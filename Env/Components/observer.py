@@ -64,7 +64,7 @@ class TradingObserver:
         account_cols = getattr(Config, "OBS_ACCOUNT_STATE_COLS", ()) or ()
         context_names = getattr(Config, "OBS_CONTEXT_STATE_NAMES", ())
         context_cols = getattr(Config, "OBS_CONTEXT_STATE_COLS", ()) or ()
-        self._obs_account_state_idx = _resolve_col_indices(list(account_names), account_cols) if account_names else list(range(22))
+        self._obs_account_state_idx = _resolve_col_indices(list(account_names), account_cols) if account_names else list(range(23))
         self._obs_context_state_idx = _resolve_col_indices(list(context_names), context_cols) if context_names else list(range(8))
         # 納入 obs 的實際維度（用於 observation_space）
         self._eff_price_seq_target_dim = len(self._obs_price_seq_target_idx)
@@ -355,7 +355,7 @@ class TradingObserver:
         current_price: float,
         atr_ratio: float,
     ) -> dict:
-        """生成帳戶狀態觀察值（22 欄位：已移除 stop_loss_rate、fee_budget_remaining、realized_pnl_per_close_norm、episode_progress、trend_strength_last、chop_last）"""
+        """生成帳戶狀態觀察值（23 欄位，含 actual_pos_pct 執行後真實倉位比例）"""
         
         # 緩存常用計算值（優化效率）
         equity = float(executor.equity(current_price))
@@ -387,12 +387,15 @@ class TradingObserver:
         max_notional = equity * executor.leverage
         position_size_norm = pos_notional / max_notional if max_notional > 0 else 0.0
         position_size_norm = np.clip(position_size_norm, 0.0, 1.0)
-        
-        # 3. equity_ratio [0, 5]
+        # 3. actual_pos_pct [-1, 1]：執行後真實倉位比例（與 last_final_pos_pct 同口徑）
+        actual_pos_pct = position_side * position_size_norm
+        actual_pos_pct = np.clip(actual_pos_pct, -1.0, 1.0)
+
+        # 4. equity_ratio [0, 5]
         equity_ratio = equity / initial_balance if initial_balance > 0 else 0.0
         equity_ratio = np.clip(equity_ratio, 0.0, 5.0)
         
-        # 4. realized_pnl_ratio [-1, 5]
+        # 5. realized_pnl_ratio [-1, 5]
         wallet_balance = float(executor.wallet_balance)
         realized_pnl = wallet_balance - initial_balance
         realized_pnl_ratio = realized_pnl / initial_balance if initial_balance > 0 else 0.0
@@ -499,20 +502,21 @@ class TradingObserver:
         account_state_full = np.array([
             position_side,              # 0
             position_size_norm,         # 1
-            equity_ratio,              # 2
-            realized_pnl_ratio,         # 3
-            unrealized_pnl_atr,         # 4
-            drawdown,                   # 5
-            liq_distance_atr,           # 6
-            stop_loss_distance_atr,     # 7
-            margin_usage_ratio,         # 8
-            cooldown_remaining_norm,    # 9
-            fee_rate,                   # 10
-            rolling_fee_ratio,          # 11
-            trade_count_log,            # 12
-            stop_loss_count_log,        # 13
-            holding_time_log,           # 14
-            buffer_to_min_balance_ratio,  # 15
+            actual_pos_pct,             # 2  執行後真實倉位比例 [-1, 1]
+            equity_ratio,              # 3
+            realized_pnl_ratio,         # 4
+            unrealized_pnl_atr,         # 5
+            drawdown,                   # 6
+            liq_distance_atr,           # 7
+            stop_loss_distance_atr,     # 8
+            margin_usage_ratio,         # 9
+            cooldown_remaining_norm,    # 10
+            fee_rate,                   # 11
+            rolling_fee_ratio,          # 12
+            trade_count_log,            # 13
+            stop_loss_count_log,        # 14
+            holding_time_log,           # 15
+            buffer_to_min_balance_ratio,  # 16
             steps_since_trade_norm,     # 17
             trade_freq_remaining_ratio, # 18
             trade_freq_blocked_last,    # 19

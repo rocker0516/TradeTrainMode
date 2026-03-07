@@ -2,7 +2,7 @@
 E2 最小可驗證規格：方向 proxy（bar close 決策、統計彙總特徵、時間切分、LR + LightGBM、破壞測試）。
 
 - 標籤：二分類 y = 1[log(close_{t+k}/close_t) > 0]，三分類 ±1/0 用 δ = 0.1*atr_ratio[t]。
-- 特徵：預設時序彙總（近期+全窗）每 channel 7 統計量 → 7*F；或 five_stats 模式 5*F。可 concat account_state(22)。
+- 特徵：預設時序彙總（近期+全窗）每 channel 7 統計量 → 7*F；或 five_stats 模式 5*F。可 concat account_state(23)。
 - 時間切分：Train 70% / Valid 15% / Test 15%，禁止 shuffle。
 - 模型：LogisticRegression(L2) + LightGBM。
 - 破壞測試：label shuffle（AUC→0.5）、market shuffle（AUC 顯著下降）。
@@ -96,7 +96,7 @@ def n_market_dims_from_feature_mode(feature_mode: str, n_total: int) -> int:
         return n_total
     if feature_mode == "market_plus_account_s":
         return n_total - ACCOUNT_S_NDIM
-    return n_total - 22  # market_plus_account_full
+    return n_total - 23  # market_plus_account_full
 
 
 def build_labels(
@@ -278,7 +278,7 @@ def obs_to_summary_features(
         market_only: 僅市場彙總（5m + 可選 1d）
         account_s_only: 僅 account_state[0:ACCOUNT_S_NDIM]
         market_plus_account_s: 市場彙總 + account_state[0:ACCOUNT_S_NDIM]
-        market_plus_account_full: 市場彙總 + account_state 全 22 維（預設）
+        market_plus_account_full: 市場彙總 + account_state 全 23 維（預設）
 
     summary_mode: "temporal"（近期+全窗）或 "five_stats"（單一視窗 5 統計量）
     recent_bars: summary_mode=="temporal" 時近期視窗 bar 數
@@ -984,9 +984,9 @@ def run_sanity_market_shuffle(
 ) -> float:
     """
     破壞測試 B：對每個樣本的「市場特徵」（前 n_features_market 維）用隨機 permutation 打亂樣本間對應
-    （即：把該維度整列重排），帳戶特徵（後 22 維）不變。再訓練二分類，回傳 Test AUC（預期顯著下降）。
+    （即：把該維度整列重排），帳戶特徵（後 23 維）不變。再訓練二分類，回傳 Test AUC（預期顯著下降）。
 
-    實作：對 X 的每一行，前 n_features_market 維用「隨機選的另一行的市場部分」替換，後 22 維保留。
+    實作：對 X 的每一行，前 n_features_market 維用「隨機選的另一行的市場部分」替換，後 23 維保留。
     """
     rng = np.random.default_rng(random_state)
     n = X_full.shape[0]

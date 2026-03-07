@@ -7,6 +7,12 @@ Phase B：在 Phase A 基礎上只加 cost_risk 懲罰（不把 cost_trade_freq 
 使用方式：
     python -m Train.run_sac_phase_ab --phase A --timesteps 300000
     python -m Train.run_sac_phase_ab --phase B --timesteps 300000 --lambda-risk 0.05 --reward-scale 10
+
+TensorBoard 儀表板（僅顯示實際 PnL 兩條，方便觀察）：
+    1) 訓練時寫入 log（指定目錄）：
+       python -m Train.run_sac_phase_ab --phase B --tb-log logs/phase_b
+    2) 啟動 TensorBoard：tensorboard --logdir=logs/phase_b
+    3) 瀏覽器 http://localhost:6006 只會看到 episode_stats/log_return_sum_mean、episode_stats/final_balance_mean。
 """
 from __future__ import annotations
 
@@ -70,6 +76,38 @@ class RiskOnlyPenaltyWrapper(gym.Wrapper):
 
 
 # ---------------------------------------------------------------------------
+# 輔助 reward 退火：主線 log_return 不變，regime/conviction 隨訓練步數線性衰減
+# ---------------------------------------------------------------------------
+
+
+class RewardAnnealWrapper(gym.Wrapper):
+    """
+    依 info 的 reward_log_return / reward_regime_bonus / reward_conviction_bonus 重組 reward：
+    reward = reward_log_return + anneal_factor * (reward_regime_bonus + reward_conviction_bonus)。
+    anneal_factor 從 1 線性降到 0（anneal_steps 步內）；anneal_steps<=0 表示不退火（恆為 1）。
+    training_timestep 由 PhaseABStatsCallback 每步寫入，供計算 factor。
+    """
+
+    def __init__(self, env: gym.Env, anneal_steps: int = 0) -> None:
+        super().__init__(env)
+        self.anneal_steps = max(0, int(anneal_steps))
+
+    def step(self, action: Any) -> tuple[Any, float, bool, bool, dict]:
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        r_log = float(info.get("reward_log_return", reward))
+        r_reg = float(info.get("reward_regime_bonus", 0.0))
+        r_conv = float(info.get("reward_conviction_bonus", 0.0))
+        step = int(getattr(self, "training_timestep", 0))
+        if self.anneal_steps > 0 and step >= 0:
+            factor = max(0.0, 1.0 - float(step) / float(self.anneal_steps))
+        else:
+            factor = 1.0
+        reward_new = r_log + factor * (r_reg + r_conv)
+        info["reward_anneal_factor"] = float(factor)
+        return obs, float(reward_new), terminated, truncated, info
+
+
+# ---------------------------------------------------------------------------
 # 把 action 統計寫入 info，供 callback 彙總
 # ---------------------------------------------------------------------------
 
@@ -105,24 +143,139 @@ class ActionStatsInfoWrapper(gym.Wrapper):
 
 class PhaseABStatsCallback(BaseCallback):
     """
-    從每個 env 的 info 彙總 action 統計並寫入 logger。
-    需要 env 外層包 ActionStatsInfoWrapper（或 env 本身在 info 裡提供上述鍵）。
+    從每個 env 的 info 彙總：
+    1) action 統計（每 log_freq 步）：override_rate、tracking_error、execution_rate（僅印出，不寫 TensorBoard）
+    2) episode 結束時累積 log_return_sum、final_balance，每 log_freq 步寫入「僅含此兩條」的 TensorBoard（tb_log_dir）
     """
 
     def __init__(
         self,
         log_freq: int = 1000,
         verbose: int = 1,
+        tb_log_dir: Optional[str] = None,
     ) -> None:
         super().__init__(verbose=verbose)
         self.log_freq = max(1, int(log_freq))
+        self._log_return_buf: list[float] = []
+        self._final_balance_buf: list[float] = []
+        self._regime_bonus_buf: list[float] = []
+        self._conviction_bonus_buf: list[float] = []
+        self._cost_risk_buf: list[float] = []
+        self._tb_log_dir = (tb_log_dir or "").strip()
+        self._tb_writer = None
+        if self._tb_log_dir:
+            try:
+                from torch.utils.tensorboard import SummaryWriter
+                os.makedirs(self._tb_log_dir, exist_ok=True)
+                self._tb_writer = SummaryWriter(log_dir=self._tb_log_dir)
+            except Exception:
+                self._tb_writer = None
+
+    def _on_training_end(self) -> None:
+        if getattr(self, "_tb_writer", None) is not None:
+            try:
+                self._tb_writer.close()
+            except Exception:
+                pass
+            self._tb_writer = None
 
     def _on_step(self) -> bool:
-        if self.n_calls % self.log_freq != 0:
-            return True
+        # 供 RewardAnnealWrapper 讀取當前訓練步數（退火用）
+        try:
+            for env in getattr(self.training_env, "envs", []):
+                setattr(env, "training_timestep", self.num_timesteps)
+        except Exception:
+            pass
+
         infos = self.locals.get("infos")
         if not infos:
             return True
+
+        # --- 每步：若有 episode 結束，累積實際 PnL、終局 equity、reward 分解 ---
+        for i in range(len(infos)):
+            info = infos[i] if isinstance(infos, (list, tuple)) else infos
+            if not isinstance(info, dict):
+                continue
+            if "episode_log_return_sum" in info:
+                try:
+                    self._log_return_buf.append(float(info["episode_log_return_sum"]))
+                except (TypeError, ValueError):
+                    pass
+            if "final_balance" in info:
+                try:
+                    self._final_balance_buf.append(float(info["final_balance"]))
+                except (TypeError, ValueError):
+                    pass
+            if "episode_regime_alignment_bonus_sum" in info:
+                try:
+                    self._regime_bonus_buf.append(float(info["episode_regime_alignment_bonus_sum"]))
+                except (TypeError, ValueError):
+                    pass
+            if "episode_conviction_bonus_sum" in info:
+                try:
+                    self._conviction_bonus_buf.append(float(info["episode_conviction_bonus_sum"]))
+                except (TypeError, ValueError):
+                    pass
+            if "episode_cost_risk_sum" in info:
+                try:
+                    self._cost_risk_buf.append(float(info["episode_cost_risk_sum"]))
+                except (TypeError, ValueError):
+                    pass
+
+        # --- 每 log_freq 步：寫入 action 統計（logger 僅 stdout）+ reward 分解與輔助/主線比寫入 TensorBoard ---
+        if self.n_calls % self.log_freq != 0:
+            return True
+        step = getattr(self, "num_timesteps", self.n_calls)
+        if self._tb_writer is not None:
+            try:
+                # Reward 分解：主線 log_return、輔助 regime/conviction、cost_risk
+                if self._log_return_buf:
+                    val = float(np.mean(self._log_return_buf))
+                    self.logger.record("episode_stats/reward_log_return_sum_mean", val)
+                    self._tb_writer.add_scalar("episode_stats/reward_log_return_sum_mean", val, step)
+                if self._regime_bonus_buf:
+                    val = float(np.mean(self._regime_bonus_buf))
+                    self.logger.record("episode_stats/reward_regime_bonus_sum_mean", val)
+                    self._tb_writer.add_scalar("episode_stats/reward_regime_bonus_sum_mean", val, step)
+                if self._conviction_bonus_buf:
+                    val = float(np.mean(self._conviction_bonus_buf))
+                    self.logger.record("episode_stats/reward_conviction_bonus_sum_mean", val)
+                    self._tb_writer.add_scalar("episode_stats/reward_conviction_bonus_sum_mean", val, step)
+                if self._cost_risk_buf:
+                    val = float(np.mean(self._cost_risk_buf))
+                    self.logger.record("episode_stats/cost_risk_sum_mean", val)
+                    self._tb_writer.add_scalar("episode_stats/cost_risk_sum_mean", val, step)
+                # 輔助/主線比：(|regime|+|conviction|) / max(|log_return|, 1e-8)，>1 表示輔助項量級壓過主線
+                if self._log_return_buf and (self._regime_bonus_buf or self._conviction_bonus_buf):
+                    mean_log = float(np.mean(self._log_return_buf))
+                    mean_reg = float(np.mean(self._regime_bonus_buf)) if self._regime_bonus_buf else 0.0
+                    mean_conv = float(np.mean(self._conviction_bonus_buf)) if self._conviction_bonus_buf else 0.0
+                    denom = max(abs(mean_log), 1e-8)
+                    ratio = (abs(mean_reg) + abs(mean_conv)) / denom
+                    self.logger.record("episode_stats/auxiliary_main_ratio", ratio)
+                    self._tb_writer.add_scalar("episode_stats/auxiliary_main_ratio", ratio, step)
+            except Exception:
+                pass
+        # 保留原有 logger key 以相容既有腳本，並清空 buffer
+        if self._log_return_buf:
+            self.logger.record("episode_stats/log_return_sum_mean", float(np.mean(self._log_return_buf)))
+            self._log_return_buf.clear()
+        if self._final_balance_buf:
+            val = float(np.mean(self._final_balance_buf))
+            self.logger.record("episode_stats/final_balance_mean", val)
+            if self._tb_writer is not None:
+                try:
+                    self._tb_writer.add_scalar("episode_stats/final_balance_mean", val, step)
+                except Exception:
+                    pass
+            self._final_balance_buf.clear()
+        if self._regime_bonus_buf:
+            self._regime_bonus_buf.clear()
+        if self._conviction_bonus_buf:
+            self._conviction_bonus_buf.clear()
+        if self._cost_risk_buf:
+            self._cost_risk_buf.clear()
+
         overrides: list[float] = []
         tracking_errors: list[float] = []
         executions: list[float] = []
@@ -166,11 +319,13 @@ def make_env(
     lambda_risk: float = 0.05,
     reward_scale: float = 10.0,
     action_repeat: int = 1,
+    anneal_steps: int = 0,
     seed: Optional[int] = None,
     **env_kwargs: Any,
 ) -> Callable[[], gym.Env]:
     """
     回傳一個 thunk：呼叫後建立一個 Phase A 或 Phase B 的環境。
+    主線 log_return 不變；輔助 regime/conviction 依 anneal_steps 線性退火（0=不退火）。
     """
 
     def thunk() -> gym.Env:
@@ -179,6 +334,8 @@ def make_env(
         if seed is not None:
             env.reset(seed=seed)
         env = ActionStatsInfoWrapper(env)
+        if anneal_steps > 0:
+            env = RewardAnnealWrapper(env, anneal_steps=anneal_steps)
         if phase == "B":
             env = RiskOnlyPenaltyWrapper(env, lambda_risk=lambda_risk, reward_scale=reward_scale)
         if action_repeat and action_repeat > 1:
@@ -191,8 +348,15 @@ def make_env(
 
 def get_phase_ab_env_kwargs(
     max_episode_steps: Optional[int] = None,
+    regime_bonus_weight: float = 0.0,
+    conviction_bonus_weight: float = 0.0,
+    conviction_min_abs_pos: float = 0.2,
+    conviction_trend_min_strength: float = 0.25,
 ) -> dict[str, Any]:
-    """Phase A/B 共用的 env 參數：減少 hard override、主線純 log-return。"""
+    """
+    Phase A/B 共用的 env 參數：減少 hard override、主線 log-return。
+    可選：小權重 regime/conviction 輔助 reward，讓「做對方向」有額外正訊號。
+    """
     try:
         from Eval.train_config import TrainConfig
         symbol = TrainConfig.SYMBOL
@@ -207,8 +371,8 @@ def get_phase_ab_env_kwargs(
     return dict(
         env_id=0,
         random_start=True,
-        window_size=288,
-        window_size_1d=30,
+        window_size=14,
+        window_size_1d=12,
         max_episode_steps=max_episode_steps,
         target_symbol=symbol,
         feature_symbols=feature_symbols,
@@ -219,9 +383,11 @@ def get_phase_ab_env_kwargs(
         min_position_change=0.0,
         trade_freq_window_steps=None,
         trade_freq_cost_limit=None,
-        # 主線先純 log-return，不加 bonus
-        conviction_trend_bonus_weight=0.0,
-        regime_alignment_bonus_weight=0.0,
+        # 順向／regime 輔助 reward（小權重）：做對方向加分，主線仍是 log-return
+        regime_alignment_bonus_weight=float(regime_bonus_weight),
+        conviction_trend_bonus_weight=float(conviction_bonus_weight),
+        conviction_min_abs_pos=float(conviction_min_abs_pos),
+        conviction_trend_min_strength=float(conviction_trend_min_strength),
     )
 
 
@@ -233,8 +399,8 @@ def get_phase_ab_env_kwargs(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase A/B SAC 訓練")
     parser.add_argument("--phase", choices=["A", "B"], default="A", help="Phase A=只放寬控制, B=再加 cost_risk 懲罰")
-    parser.add_argument("--timesteps", type=int, default=300_000)
-    parser.add_argument("--n-envs", type=int, default=4)
+    parser.add_argument("--timesteps", type=int, default=288*31*16* 10) # 288 * 31 * 16 * 10 = 1_474_560
+    parser.add_argument("--n-envs", type=int, default=16)
     parser.add_argument("--lambda-risk", type=float, default=0.05, help="Phase B 時 cost_risk 的權重")
     parser.add_argument("--reward-scale", type=float, default=10.0, help="Phase B 時主線 reward 放大倍數")
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")
@@ -242,9 +408,20 @@ def main() -> None:
     parser.add_argument("--save-path", type=str, default="models/sac_phase_ab")
     parser.add_argument("--log-freq", type=int, default=1000, help="PhaseAB 統計與 log 間隔（步數）")
     parser.add_argument("--tb-log", type=str, default="", help="TensorBoard log 目錄，空則不寫")
+    # 順向／regime 輔助 reward（小權重，做對方向加分）
+    parser.add_argument("--regime-bonus-weight", type=float, default=0.1, help="Regime 對齊 bonus 權重（A 多/C 空加分，依 dir_strength 加權）")
+    parser.add_argument("--conviction-bonus-weight", type=float, default=0.0, help="Conviction 順向 bonus 權重（強訊號+大倉+同向加分）")
+    parser.add_argument("--conviction-min-abs-pos", type=float, default=0.2, help="Conviction 生效最小持倉比例")
+    parser.add_argument("--conviction-trend-min-strength", type=float, default=0.25, help="Conviction 生效最小趨勢強度")
+    parser.add_argument("--anneal-steps", type=int, default=500_000, help="輔助 reward 退火步數（0=不退火，regime/conviction 全程滿權重）")
     args = parser.parse_args()
 
-    env_kwargs = get_phase_ab_env_kwargs()
+    env_kwargs = get_phase_ab_env_kwargs(
+        regime_bonus_weight=args.regime_bonus_weight,
+        conviction_bonus_weight=args.conviction_bonus_weight,
+        conviction_min_abs_pos=args.conviction_min_abs_pos,
+        conviction_trend_min_strength=args.conviction_trend_min_strength,
+    )
 
     vec_env: VecEnv = DummyVecEnv([
         make_env(
@@ -252,6 +429,7 @@ def main() -> None:
             lambda_risk=args.lambda_risk,
             reward_scale=args.reward_scale,
             action_repeat=args.action_repeat,
+            anneal_steps=args.anneal_steps,
             **env_kwargs,
         )
         for _ in range(args.n_envs)
@@ -259,7 +437,11 @@ def main() -> None:
     vec_env = VecMonitor(vec_env)
 
     callbacks: list[BaseCallback] = [
-        PhaseABStatsCallback(log_freq=args.log_freq, verbose=1),
+        PhaseABStatsCallback(
+            log_freq=args.log_freq,
+            verbose=1,
+            tb_log_dir=args.tb_log if args.tb_log else None,
+        ),
     ]
     model = SAC(
         policy="MultiInputPolicy",
@@ -272,9 +454,10 @@ def main() -> None:
         verbose=1,
         device=args.device,
     )
+    # TensorBoard 僅由 callback 寫入「兩條 PnL」到 tb_log，主 logger 只 stdout 避免畫面雜亂
     if args.tb_log:
         from stable_baselines3.common.logger import configure
-        model.set_logger(configure(args.tb_log, ["stdout", "tensorboard"]))
+        model.set_logger(configure(None, ["stdout"]))
 
     model.learn(total_timesteps=args.timesteps, callback=callbacks)
     os.makedirs(os.path.dirname(args.save_path) or ".", exist_ok=True)

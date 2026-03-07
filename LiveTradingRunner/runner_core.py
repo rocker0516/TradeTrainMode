@@ -37,20 +37,21 @@ def _build_account_and_context_obs_named(obs: dict) -> Dict[str, Dict[str, float
     account_state_names = [
         "position_side",              # 0
         "position_size_norm",         # 1
-        "equity_ratio",               # 2
-        "realized_pnl_ratio",         # 3
-        "unrealized_pnl_atr",         # 4
-        "drawdown",                   # 5
-        "liq_distance_atr",           # 6
-        "stop_loss_distance_atr",     # 7
-        "margin_usage_ratio",         # 8
-        "cooldown_remaining_norm",    # 9
-        "fee_rate",                   # 10
-        "rolling_fee_ratio",          # 11
-        "trade_count_log",            # 12
-        "stop_loss_count_log",        # 13
-        "holding_time_log",           # 14
-        "buffer_to_min_balance_ratio", # 15
+        "actual_pos_pct",             # 2  執行後真實倉位比例 [-1, 1]
+        "equity_ratio",               # 3
+        "realized_pnl_ratio",         # 4
+        "unrealized_pnl_atr",         # 5
+        "drawdown",                   # 6
+        "liq_distance_atr",           # 7
+        "stop_loss_distance_atr",     # 8
+        "margin_usage_ratio",         # 9
+        "cooldown_remaining_norm",    # 10
+        "fee_rate",                   # 11
+        "rolling_fee_ratio",          # 12
+        "trade_count_log",            # 13
+        "stop_loss_count_log",        # 14
+        "holding_time_log",           # 15
+        "buffer_to_min_balance_ratio", # 16
         "steps_since_trade_norm",     # 17
         "trade_freq_remaining_ratio", # 18
         "trade_freq_blocked_last",    # 19
