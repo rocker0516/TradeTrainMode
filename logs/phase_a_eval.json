@@ -1,0 +1,207 @@
+{
+  "timestamp": "2026-03-08T07:48:20.489562Z",
+  "reason": "train_trigger",
+  "step": 10000000,
+  "episodes": 20,
+  "deterministic": true,
+  "results": [
+    {
+      "episode_log_return_sum": 0.6486919245753698,
+      "final_balance": 1913.036795220159,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.12054597570889979,
+      "execution_rate": 0.748991935483871
+    },
+    {
+      "episode_log_return_sum": 3.3900380355597193,
+      "final_balance": 29667.080652927576,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.1357983654698745,
+      "execution_rate": 0.8646953405017921
+    },
+    {
+      "episode_log_return_sum": 2.5572249662695405,
+      "final_balance": 12899.969748270092,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.12432185230074703,
+      "execution_rate": 0.7580645161290323
+    },
+    {
+      "episode_log_return_sum": 2.592705725412081,
+      "final_balance": 13365.887142292404,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.11957106515282016,
+      "execution_rate": 0.7860663082437276
+    },
+    {
+      "episode_log_return_sum": 2.125668093089044,
+      "final_balance": 8378.493232105155,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.13322392328688978,
+      "execution_rate": 0.6457213261648745
+    },
+    {
+      "episode_log_return_sum": 0.42407048964964705,
+      "final_balance": 1528.1693101068388,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.12439075430327805,
+      "execution_rate": 0.756608422939068
+    },
+    {
+      "episode_log_return_sum": 2.236638005307256,
+      "final_balance": 9361.803984515826,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.1435042012699552,
+      "execution_rate": 0.805891577060932
+    },
+    {
+      "episode_log_return_sum": 0.3377133123057729,
+      "final_balance": 1401.7385845927517,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.12270279762314176,
+      "execution_rate": 0.6984767025089605
+    },
+    {
+      "episode_log_return_sum": 2.02306512797663,
+      "final_balance": 7561.466311838022,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.138152738045891,
+      "execution_rate": 0.6854838709677419
+    },
+    {
+      "episode_log_return_sum": 1.8209170440381515,
+      "final_balance": 6177.520911846035,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.12325326392067575,
+      "execution_rate": 0.7055331541218638
+    },
+    {
+      "episode_log_return_sum": 1.7891100743898722,
+      "final_balance": 5984.124670265373,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.14210430869862964,
+      "execution_rate": 0.7811379928315412
+    },
+    {
+      "episode_log_return_sum": -1.61381539665986,
+      "final_balance": 199.1264165986212,
+      "episode_cost_risk_sum": 1.5221774193548387,
+      "override_rate": 0.0,
+      "tracking_error": 0.13013286549050496,
+      "execution_rate": 0.6441631504922645
+    },
+    {
+      "episode_log_return_sum": 1.9202750463073606,
+      "final_balance": 6822.834806758421,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.12604808708861467,
+      "execution_rate": 0.8565188172043011
+    },
+    {
+      "episode_log_return_sum": 2.680935555653239,
+      "final_balance": 14598.744847264124,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.15113258354573733,
+      "execution_rate": 0.6990367383512545
+    },
+    {
+      "episode_log_return_sum": 2.2169526771455086,
+      "final_balance": 9179.315863164175,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.16007125168750866,
+      "execution_rate": 0.683915770609319
+    },
+    {
+      "episode_log_return_sum": 0.02300981255797773,
+      "final_balance": 1023.2765804587264,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.1133665204533993,
+      "execution_rate": 0.6402329749103942
+    },
+    {
+      "episode_log_return_sum": -0.01664962082632684,
+      "final_balance": 983.4882180618771,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.12051188575121458,
+      "execution_rate": 0.6514336917562724
+    },
+    {
+      "episode_log_return_sum": 2.4960738530135966,
+      "final_balance": 12134.757470311508,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.1338399250418775,
+      "execution_rate": 0.7277105734767025
+    },
+    {
+      "episode_log_return_sum": 1.9514945898092793,
+      "final_balance": 7039.200439668913,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.13521602417460493,
+      "execution_rate": 0.786402329749104
+    },
+    {
+      "episode_log_return_sum": 0.9482890022738772,
+      "final_balance": 2581.2892986602633,
+      "episode_cost_risk_sum": 0.0,
+      "override_rate": 0.0,
+      "tracking_error": 0.13032509341893345,
+      "execution_rate": 0.608646953405018
+    }
+  ],
+  "summary": {
+    "episode_log_return_sum": {
+      "mean": 1.527620415892387,
+      "std": 1.1886856427214443,
+      "min": -1.61381539665986,
+      "max": 3.3900380355597193
+    },
+    "final_balance": {
+      "mean": 7640.066264246343,
+      "std": 6723.775986010179,
+      "min": 199.1264165986212,
+      "max": 29667.080652927576
+    },
+    "episode_cost_risk_sum": {
+      "mean": 0.07610887096774194,
+      "std": 0.3317508772553637,
+      "min": 0.0,
+      "max": 1.5221774193548387
+    },
+    "override_rate": {
+      "mean": 0.0,
+      "std": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    "tracking_error": {
+      "mean": 0.1314106741216599,
+      "std": 0.011259284047191967,
+      "min": 0.1133665204533993,
+      "max": 0.16007125168750866
+    },
+    "execution_rate": {
+      "mean": 0.7267366073454017,
+      "std": 0.0709162909696501,
+      "min": 0.608646953405018,
+      "max": 0.8646953405017921
+    }
+  }
+}

@@ -27,6 +27,15 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, VecMonitor
 
 from Env.trading_env import TradingEnvironment
+from Eval.eval_triggers import (
+    CompositeTrigger,
+    EvalTriggerContext,
+    ExpressionTrigger,
+    MetricRule,
+    MetricTrigger,
+    StepTrigger,
+)
+from Eval.phase_ab_evaluator import PhaseABEvaluator, build_single_env_builder
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +242,7 @@ class PhaseABStatsCallback(BaseCallback):
                     val = float(np.mean(self._log_return_buf))
                     self.logger.record("episode_stats/reward_log_return_sum_mean", val)
                     self._tb_writer.add_scalar("episode_stats/reward_log_return_sum_mean", val, step)
+                    self._tb_writer.add_scalar("episode_stats/log_return_sum_mean", val, step)
                 if self._regime_bonus_buf:
                     val = float(np.mean(self._regime_bonus_buf))
                     self.logger.record("episode_stats/reward_regime_bonus_sum_mean", val)
@@ -391,6 +401,187 @@ def get_phase_ab_env_kwargs(
     )
 
 
+def _parse_metric_rule(rule_text: str) -> Optional[MetricRule]:
+    """解析 `metric>=value` 類型的規則字串。"""
+    text = (rule_text or "").strip()
+    if not text:
+        return None
+    for op in (">=", "<=", "==", "!=", ">", "<"):
+        if op in text:
+            left, right = text.split(op, 1)
+            metric_name = left.strip()
+            threshold_text = right.strip()
+            if not metric_name:
+                return None
+            try:
+                threshold = float(threshold_text)
+            except ValueError:
+                return None
+            return MetricRule(metric_name=metric_name, op=op, threshold=threshold)
+    return None
+
+
+def _build_eval_trigger(args: argparse.Namespace) -> Optional[CompositeTrigger]:
+    """依 CLI 參數建構評估觸發器。"""
+    triggers: list[Any] = []
+
+    step_trigger = StepTrigger(
+        at_steps=tuple(int(s) for s in (args.eval_trigger_steps or []) if int(s) > 0),
+        every_n_steps=int(args.eval_trigger_every),
+        min_interval_steps=int(args.eval_trigger_min_interval),
+        include_training_end=False,
+    )
+    if step_trigger.at_steps or step_trigger.every_n_steps > 0:
+        triggers.append(step_trigger)
+
+    metric_rules: list[MetricRule] = []
+    for rule_text in args.eval_metric_rule or []:
+        rule = _parse_metric_rule(rule_text)
+        if rule is not None:
+            metric_rules.append(rule)
+    if metric_rules:
+        triggers.append(MetricTrigger(rules=tuple(metric_rules), mode=args.eval_trigger_mode, include_training_end=False))
+
+    if (args.eval_expression or "").strip():
+        triggers.append(ExpressionTrigger(expression=args.eval_expression, include_training_end=False))
+
+    if not triggers:
+        return None
+    return CompositeTrigger(triggers=tuple(triggers), mode=args.eval_trigger_mode)
+
+
+class PhaseABEvaluationTriggerCallback(BaseCallback):
+    """
+    訓練期間依條件觸發評估，並可在訓練結束後再做一次評估。
+    """
+
+    def __init__(
+        self,
+        evaluator: PhaseABEvaluator,
+        trigger: Optional[CompositeTrigger],
+        log_freq: int = 1000,
+        eval_on_train_end: bool = True,
+        verbose: int = 1,
+    ) -> None:
+        super().__init__(verbose=verbose)
+        self.evaluator = evaluator
+        self.trigger = trigger
+        self.log_freq = max(1, int(log_freq))
+        self.eval_on_train_end = bool(eval_on_train_end)
+        self.eval_count = 0
+        self.last_eval_step: Optional[int] = None
+        self._latest_metrics: dict[str, float] = {}
+        self._log_return_buf: list[float] = []
+        self._final_balance_buf: list[float] = []
+        self._cost_risk_buf: list[float] = []
+        self._override_buf: list[float] = []
+        self._tracking_error_buf: list[float] = []
+        self._execution_buf: list[float] = []
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos")
+        if infos:
+            for i in range(len(infos)):
+                info = infos[i] if isinstance(infos, (list, tuple)) else infos
+                if not isinstance(info, dict):
+                    continue
+                if "episode_log_return_sum" in info:
+                    try:
+                        self._log_return_buf.append(float(info["episode_log_return_sum"]))
+                    except (TypeError, ValueError):
+                        pass
+                if "final_balance" in info:
+                    try:
+                        self._final_balance_buf.append(float(info["final_balance"]))
+                    except (TypeError, ValueError):
+                        pass
+                if "episode_cost_risk_sum" in info:
+                    try:
+                        self._cost_risk_buf.append(float(info["episode_cost_risk_sum"]))
+                    except (TypeError, ValueError):
+                        pass
+
+                try:
+                    self._override_buf.append(float(info.get("action_overridden_flag", 0.0)))
+                    raw = float(info.get("last_action_raw", 0.0))
+                    final = float(info.get("last_final_pos_pct", 0.0))
+                    self._tracking_error_buf.append(abs(raw - final))
+                    self._execution_buf.append(float(info.get("trade_executed_flag", 0.0)))
+                except (TypeError, ValueError):
+                    pass
+
+        if self.n_calls % self.log_freq != 0:
+            return True
+        self._latest_metrics = self._collect_metrics()
+        if self.trigger is None:
+            return True
+
+        context = EvalTriggerContext(
+            step=int(getattr(self, "num_timesteps", self.n_calls)),
+            metrics=self._latest_metrics,
+            eval_count=self.eval_count,
+            training_end=False,
+            last_eval_step=self.last_eval_step,
+        )
+        if self.trigger.should_evaluate(context):
+            current_step = int(getattr(self, "num_timesteps", self.n_calls))
+            self.evaluator.evaluate(
+                model=self.model,
+                reason="train_trigger",
+                step=current_step,
+                print_result=True,
+            )
+            self.eval_count += 1
+            self.last_eval_step = current_step
+        return True
+
+    def _on_training_end(self) -> None:
+        if not self.eval_on_train_end:
+            return
+        current_step = int(getattr(self, "num_timesteps", self.n_calls))
+        if not self._latest_metrics:
+            self._latest_metrics = self._collect_metrics()
+        context = EvalTriggerContext(
+            step=current_step,
+            metrics=self._latest_metrics,
+            eval_count=self.eval_count,
+            training_end=True,
+            last_eval_step=self.last_eval_step,
+        )
+        # 訓練結束評估預設強制執行；若你要受 trigger 控制，可自行改為 trigger 判斷
+        _ = context
+        self.evaluator.evaluate(
+            model=self.model,
+            reason="training_end",
+            step=current_step,
+            print_result=True,
+        )
+        self.eval_count += 1
+        self.last_eval_step = current_step
+
+    def _collect_metrics(self) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        if self._log_return_buf:
+            metrics["log_return_sum_mean"] = float(np.mean(self._log_return_buf))
+            self._log_return_buf.clear()
+        if self._final_balance_buf:
+            metrics["final_balance_mean"] = float(np.mean(self._final_balance_buf))
+            self._final_balance_buf.clear()
+        if self._cost_risk_buf:
+            metrics["cost_risk_sum_mean"] = float(np.mean(self._cost_risk_buf))
+            self._cost_risk_buf.clear()
+        if self._override_buf:
+            metrics["override_rate"] = float(np.mean(self._override_buf))
+            self._override_buf.clear()
+        if self._tracking_error_buf:
+            metrics["tracking_error"] = float(np.mean(self._tracking_error_buf))
+            self._tracking_error_buf.clear()
+        if self._execution_buf:
+            metrics["execution_rate"] = float(np.mean(self._execution_buf))
+            self._execution_buf.clear()
+        return metrics
+
+
 # ---------------------------------------------------------------------------
 # 主程式
 # ---------------------------------------------------------------------------
@@ -399,9 +590,9 @@ def get_phase_ab_env_kwargs(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase A/B SAC 訓練")
     parser.add_argument("--phase", choices=["A", "B"], default="A", help="Phase A=只放寬控制, B=再加 cost_risk 懲罰")
-    parser.add_argument("--timesteps", type=int, default=288*31*16* 10) # 288 * 31 * 16 * 10 = 1_474_560
-    parser.add_argument("--n-envs", type=int, default=16)
-    parser.add_argument("--lambda-risk", type=float, default=0.05, help="Phase B 時 cost_risk 的權重")
+    parser.add_argument("--timesteps", type=int, default=288*21*40* 50) # 288 * 31 * 32 * 100 = 2_949_120_000
+    parser.add_argument("--n-envs", type=int, default=40)
+    parser.add_argument("--lambda-risk", type=float, default=0.8, help="Phase B 時 cost_risk 的權重")
     parser.add_argument("--reward-scale", type=float, default=10.0, help="Phase B 時主線 reward 放大倍數")
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")
     parser.add_argument("--device", type=str, default="auto")
@@ -409,11 +600,25 @@ def main() -> None:
     parser.add_argument("--log-freq", type=int, default=1000, help="PhaseAB 統計與 log 間隔（步數）")
     parser.add_argument("--tb-log", type=str, default="", help="TensorBoard log 目錄，空則不寫")
     # 順向／regime 輔助 reward（小權重，做對方向加分）
-    parser.add_argument("--regime-bonus-weight", type=float, default=0.1, help="Regime 對齊 bonus 權重（A 多/C 空加分，依 dir_strength 加權）")
-    parser.add_argument("--conviction-bonus-weight", type=float, default=0.0, help="Conviction 順向 bonus 權重（強訊號+大倉+同向加分）")
-    parser.add_argument("--conviction-min-abs-pos", type=float, default=0.2, help="Conviction 生效最小持倉比例")
-    parser.add_argument("--conviction-trend-min-strength", type=float, default=0.25, help="Conviction 生效最小趨勢強度")
+    parser.add_argument("--regime-bonus-weight", type=float, default=0.00003, help="Regime 對齊 bonus 權重（A 多/C 空加分，依 dir_strength 加權）")
+    parser.add_argument("--conviction-bonus-weight", type=float, default=0.1, help="Conviction 順向 bonus 權重（強訊號+大倉+同向加分）")
+    parser.add_argument("--conviction-min-abs-pos", type=float, default=0.4, help="Conviction 生效最小持倉比例")
+    parser.add_argument("--conviction-trend-min-strength", type=float, default=0.5, help="Conviction 生效最小趨勢強度")
     parser.add_argument("--anneal-steps", type=int, default=500_000, help="輔助 reward 退火步數（0=不退火，regime/conviction 全程滿權重）")
+    # 評估參數（可訓練中觸發、訓練後觸發，或 eval-only）
+    parser.add_argument("--eval-only", action="store_true", help="只做評估，不進行訓練")
+    parser.add_argument("--eval-model-path", type=str, default="", help="評估模型路徑（空則沿用 --save-path）")
+    parser.add_argument("--eval-episodes", type=int, default=100, help="每次評估回合數")
+    parser.add_argument("--eval-seed", type=int, default=42, help="評估用 seed")
+    parser.add_argument("--eval-report-path", type=str, default="", help="評估結果 JSON 輸出路徑")
+    parser.add_argument("--eval-deterministic", action=argparse.BooleanOptionalAction, default=True, help="評估是否使用 deterministic 動作(False=使用隨機動作)")
+    parser.add_argument("--eval-on-train-end", action=argparse.BooleanOptionalAction, default=True, help="訓練結束後是否執行一次評估")
+    parser.add_argument("--eval-trigger-steps", type=int, nargs="*", default=[], help="訓練中在指定步數觸發評估，可多個")
+    parser.add_argument("--eval-trigger-every", type=int, default=0, help="訓練中每 N steps 觸發評估（0=停用）")
+    parser.add_argument("--eval-trigger-min-interval", type=int, default=0, help="兩次訓練中評估最小間隔步數")
+    parser.add_argument("--eval-trigger-mode", choices=["any", "all"], default="any", help="多條件組合模式")
+    parser.add_argument("--eval-metric-rule", action="append", default=[], help="內建 metric 規則，例如 log_return_sum_mean>=0.2")
+    parser.add_argument("--eval-expression", type=str, default="", help="自訂評估條件式，例如 step>=5_000_000 and log_return_sum_mean>0")
     args = parser.parse_args()
 
     env_kwargs = get_phase_ab_env_kwargs(
@@ -423,17 +628,41 @@ def main() -> None:
         conviction_trend_min_strength=args.conviction_trend_min_strength,
     )
 
-    vec_env: VecEnv = DummyVecEnv([
-        make_env(
-            phase=args.phase,
-            lambda_risk=args.lambda_risk,
-            reward_scale=args.reward_scale,
-            action_repeat=args.action_repeat,
-            anneal_steps=args.anneal_steps,
-            **env_kwargs,
-        )
-        for _ in range(args.n_envs)
-    ])
+    eval_env_thunk = make_env(
+        phase=args.phase,
+        lambda_risk=args.lambda_risk,
+        reward_scale=args.reward_scale,
+        action_repeat=args.action_repeat,
+        anneal_steps=args.anneal_steps,
+        seed=args.eval_seed,
+        **env_kwargs,
+    )
+    evaluator = PhaseABEvaluator(
+        env_builder=build_single_env_builder(eval_env_thunk),
+        n_episodes=args.eval_episodes,
+        deterministic=args.eval_deterministic,
+        seed=args.eval_seed,
+        report_path=args.eval_report_path,
+    )
+    if args.eval_only:
+        model_path = args.eval_model_path.strip() or args.save_path
+        model = SAC.load(model_path, device=args.device)
+        evaluator.evaluate(model=model, reason="eval_only", step=None, print_result=True)
+        return
+
+    vec_env: VecEnv = DummyVecEnv(
+        [
+            make_env(
+                phase=args.phase,
+                lambda_risk=args.lambda_risk,
+                reward_scale=args.reward_scale,
+                action_repeat=args.action_repeat,
+                anneal_steps=args.anneal_steps,
+                **env_kwargs,
+            )
+            for _ in range(args.n_envs)
+        ]
+    )
     vec_env = VecMonitor(vec_env)
 
     callbacks: list[BaseCallback] = [
@@ -443,6 +672,17 @@ def main() -> None:
             tb_log_dir=args.tb_log if args.tb_log else None,
         ),
     ]
+    eval_trigger = _build_eval_trigger(args)
+    if eval_trigger is not None or args.eval_on_train_end:
+        callbacks.append(
+            PhaseABEvaluationTriggerCallback(
+                evaluator=evaluator,
+                trigger=eval_trigger,
+                log_freq=args.log_freq,
+                eval_on_train_end=args.eval_on_train_end,
+                verbose=1,
+            )
+        )
     model = SAC(
         policy="MultiInputPolicy",
         env=vec_env,
@@ -459,7 +699,7 @@ def main() -> None:
         from stable_baselines3.common.logger import configure
         model.set_logger(configure(None, ["stdout"]))
 
-    model.learn(total_timesteps=args.timesteps, callback=callbacks)
+    model.learn(total_timesteps=args.timesteps, callback=callbacks, progress_bar=True)
     os.makedirs(os.path.dirname(args.save_path) or ".", exist_ok=True)
     model.save(args.save_path)
     vec_env.close()
