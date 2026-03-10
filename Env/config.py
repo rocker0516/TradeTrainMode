@@ -16,7 +16,7 @@ class Config:
     # 資金與交易成本
     # -------------------------------------------------------------------------
     INITIAL_BALANCE: float = 1000.0
-    TRANSACTION_FEE: float = 0.0  # 手續費百分比（例：0.04 代表 0.04%）
+    TRANSACTION_FEE: float = 0.01  # 手續費百分比（例：0.04 代表 0.04%）
 
     # -------------------------------------------------------------------------
     # 視窗與步數
@@ -31,7 +31,7 @@ class Config:
     # 槓桿、餘額與倉位限制
     # -------------------------------------------------------------------------
     LEVERAGE: float = 10.0
-    MIN_BALANCE: float = INITIAL_BALANCE * 0.2  # 最小餘額比例（0.5 = 50%）
+    MIN_BALANCE: float = INITIAL_BALANCE * 0.6  # 最小餘額比例（0.5 = 50%）
     MIN_POSITION_CHANGE: float = 0.0  # 最小調倉幅度 deadband（0 = 不啟用）
     MAX_STEP_POS_CHANGE_PCT: float = 0.5  # 單步最大持倉比例變化（0.5 = 50%）
     MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（供 ActionClipWrapper 等使用）

@@ -362,10 +362,15 @@ def get_phase_ab_env_kwargs(
     conviction_bonus_weight: float = 0.0,
     conviction_min_abs_pos: float = 0.2,
     conviction_trend_min_strength: float = 0.25,
+    data_split_enabled: bool = True,
+    holdout_months: int = 3,
+    data_mode: str = "train",
 ) -> dict[str, Any]:
     """
     Phase A/B 共用的 env 參數：減少 hard override、主線 log-return。
     可選：小權重 regime/conviction 輔助 reward，讓「做對方向」有額外正訊號。
+    訓練/評估時間切分：data_split_enabled=True 時，data_mode="train" 用非最近 N 月，
+    data_mode="eval" 用最近 holdout_months 月，避免評估用訓練見過的資料。
     """
     try:
         from Eval.train_config import TrainConfig
@@ -386,6 +391,10 @@ def get_phase_ab_env_kwargs(
         max_episode_steps=max_episode_steps,
         target_symbol=symbol,
         feature_symbols=feature_symbols,
+        # 訓練/評估時間切分（預設：訓練用過去、評估用最近 holdout_months 月）
+        data_split_enabled=bool(data_split_enabled),
+        holdout_months=max(1, int(holdout_months)),
+        data_mode=str(data_mode).strip().lower() or "train",
         # 降低 hard override
         no_trade_entry_threshold=0.0,
         no_trade_exit_threshold=0.0,
@@ -590,15 +599,18 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase A/B SAC 訓練")
     parser.add_argument("--phase", choices=["A", "B"], default="A", help="Phase A=只放寬控制, B=再加 cost_risk 懲罰")
-    parser.add_argument("--timesteps", type=int, default=288*21*40* 50) # 288 * 31 * 32 * 100 = 2_949_120_000
+    parser.add_argument("--timesteps", type=int, default=288*21*48* 20) # 288 * 31 * 48 * 15 = 589,824,000
     parser.add_argument("--n-envs", type=int, default=40)
-    parser.add_argument("--lambda-risk", type=float, default=0.8, help="Phase B 時 cost_risk 的權重")
+    parser.add_argument("--lambda-risk", type=float, default=1.0, help="Phase B 時 cost_risk 的權重")
     parser.add_argument("--reward-scale", type=float, default=10.0, help="Phase B 時主線 reward 放大倍數")
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--save-path", type=str, default="models/sac_phase_ab")
     parser.add_argument("--log-freq", type=int, default=1000, help="PhaseAB 統計與 log 間隔（步數）")
     parser.add_argument("--tb-log", type=str, default="", help="TensorBoard log 目錄，空則不寫")
+    # 訓練/評估時間切分（預設：訓練用過去、評估用最近 N 月，避免評估用訓練見過的資料）
+    parser.add_argument("--holdout-months", type=int, default=2, help="評估用最近 N 個月資料；訓練用其餘過去資料（與 --no-data-split 互斥）")
+    parser.add_argument("--no-data-split", action="store_true", help="停用訓練/評估時間切分，訓練與評估皆用完整資料")
     # 順向／regime 輔助 reward（小權重，做對方向加分）
     parser.add_argument("--regime-bonus-weight", type=float, default=0.00003, help="Regime 對齊 bonus 權重（A 多/C 空加分，依 dir_strength 加權）")
     parser.add_argument("--conviction-bonus-weight", type=float, default=0.1, help="Conviction 順向 bonus 權重（強訊號+大倉+同向加分）")
@@ -621,11 +633,30 @@ def main() -> None:
     parser.add_argument("--eval-expression", type=str, default="", help="自訂評估條件式，例如 step>=5_000_000 and log_return_sum_mean>0")
     args = parser.parse_args()
 
-    env_kwargs = get_phase_ab_env_kwargs(
+    data_split = not getattr(args, "no_data_split", False)
+    holdout = max(1, int(getattr(args, "holdout_months", 3)))
+    if data_split:
+        print(f"[Data split] 訓練用「非最近 {holdout} 月」、評估用「最近 {holdout} 月」")
+    else:
+        print("[Data split] 已停用，訓練與評估皆使用完整資料")
+
+    env_kwargs_train = get_phase_ab_env_kwargs(
         regime_bonus_weight=args.regime_bonus_weight,
         conviction_bonus_weight=args.conviction_bonus_weight,
         conviction_min_abs_pos=args.conviction_min_abs_pos,
         conviction_trend_min_strength=args.conviction_trend_min_strength,
+        data_split_enabled=data_split,
+        holdout_months=holdout,
+        data_mode="train",
+    )
+    env_kwargs_eval = get_phase_ab_env_kwargs(
+        regime_bonus_weight=args.regime_bonus_weight,
+        conviction_bonus_weight=args.conviction_bonus_weight,
+        conviction_min_abs_pos=args.conviction_min_abs_pos,
+        conviction_trend_min_strength=args.conviction_trend_min_strength,
+        data_split_enabled=data_split,
+        holdout_months=holdout,
+        data_mode="eval",
     )
 
     eval_env_thunk = make_env(
@@ -635,7 +666,7 @@ def main() -> None:
         action_repeat=args.action_repeat,
         anneal_steps=args.anneal_steps,
         seed=args.eval_seed,
-        **env_kwargs,
+        **env_kwargs_eval,
     )
     evaluator = PhaseABEvaluator(
         env_builder=build_single_env_builder(eval_env_thunk),
@@ -658,7 +689,7 @@ def main() -> None:
                 reward_scale=args.reward_scale,
                 action_repeat=args.action_repeat,
                 anneal_steps=args.anneal_steps,
-                **env_kwargs,
+                **env_kwargs_train,
             )
             for _ in range(args.n_envs)
         ]
