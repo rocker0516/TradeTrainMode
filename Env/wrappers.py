@@ -50,7 +50,7 @@ class ActionRepeatWrapper(gym.Wrapper):
             if 'cost' in info:
                 total_cost += float(info['cost'])
             # 嘗試累積多通道 cost（如果存在）
-            for k in ("cost_risk", "cost_fric"):
+            for k in ("cost_risk", "cost_risk_dense", "cost_fric"):
                 if k in info:
                     try:
                         total_cost_channels[k] += float(info.get(k, 0.0))

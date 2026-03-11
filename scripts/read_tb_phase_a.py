@@ -1,5 +1,9 @@
-"""讀取 Phase A/B TensorBoard 日誌並輸出摘要。可指定目錄路徑。"""
+"""讀取 Phase A/B TensorBoard 日誌並輸出摘要。可指定目錄路徑。
+
+若某個 scalar 不存在（例如舊 run 沒有 cost_risk_dense_sum_mean），該欄位輸出為空，不報錯。
+"""
 import argparse
+import os
 import sys
 
 from tensorboard.backend.event_processing import event_accumulator
@@ -8,6 +12,7 @@ KEYS = [
     "episode_stats/log_return_sum_mean",
     "episode_stats/final_balance_mean",
     "episode_stats/cost_risk_sum_mean",
+    "episode_stats/cost_risk_dense_sum_mean",
     "episode_stats/auxiliary_main_ratio",
 ]
 
@@ -22,22 +27,38 @@ def main() -> None:
     )
     args = parser.parse_args()
     path = args.path.strip()
+    if not os.path.isdir(path):
+        print(f"Error: directory not found: {path}", file=sys.stderr)
+        sys.exit(1)
 
     ea = event_accumulator.EventAccumulator(path)
     ea.Reload()
 
-    scalars = ea.Scalars(KEYS[0])
-    if not scalars:
+    # 每個 key 的 (step -> value) 對照，缺的 key 用空 dict
+    by_key: dict[str, dict[int, float]] = {}
+    steps_primary: list[int] = []
+
+    for k in KEYS:
+        s = ea.Scalars(k)
+        if s is None:
+            s = []
+        by_key[k] = {int(e.step): float(e.value) for e in s}
+        if k == KEYS[0] and s:
+            steps_primary = sorted(by_key[k].keys())
+
+    if not steps_primary:
         print(f"No scalars found in {path}", file=sys.stderr)
         sys.exit(1)
 
-    print("step,log_return_mean,final_balance_mean,cost_risk_mean,auxiliary_main_ratio")
-    for i in range(len(scalars)):
-        step = scalars[i].step
+    print("step,log_return_mean,final_balance_mean,cost_risk_mean,cost_risk_dense_mean,auxiliary_main_ratio")
+    for step in steps_primary:
         row = [str(step)]
         for k in KEYS:
-            s = ea.Scalars(k)
-            row.append(str(round(s[i].value, 6)) if i < len(s) else "")
+            val = by_key.get(k, {}).get(step)
+            if val is not None:
+                row.append(str(round(val, 6)))
+            else:
+                row.append("")
         print(",".join(row))
 
 

@@ -23,6 +23,7 @@ class CostCalculator:
     公式：
     1. Death Cost: 死亡時 = 1.0 + (剩餘步數/總步數)，未死亡 = 0；越早死懲罰越大（最多 2.0）
     2. Fric Cost : StepFee / Equity (本步手續費佔權益的比例)
+    3. Dense Buffer Cost (cost_risk_dense): 每步 (1 - buffer_to_min_balance_ratio)^2，僅在接近死亡線時變大（方案 B 獨立通道）
     """
 
     def __init__(self, weights: CostWeights | None = None) -> None:
@@ -48,11 +49,13 @@ class CostCalculator:
             episode_steps: （可選）本回合已執行步數（不含本步）；與 episode_max_steps 同時提供時，死亡成本隨剩餘步數加權
             episode_max_steps: （可選）本回合最大步數
             step_fee_add_only: （可選）僅計入「加碼/加曝險」的手續費
+            initial_balance: （可選）初始資金；與 min_balance 同時提供時，計算 buffer_to_min_balance_ratio 以輸出 cost_risk_dense
 
         Returns:
             Dict:
-            - cost: 總正規化成本
+            - cost: 總正規化成本（不含 cost_risk_dense，僅 death + fric）
             - cost_risk: 死亡成本 (0 或 [1.0, 2.0]，剩餘步數越多越大)
+            - cost_risk_dense: 每步 dense 懲罰 (1 - buffer_ratio)^2，僅在接近死亡線時變大
             - cost_fric: 摩擦成本 (目前固定為 0.0)
             - cost_breakdown: 詳細分項
         """
@@ -76,20 +79,32 @@ class CostCalculator:
             c_death = 0.0
 
         c_risk = float(c_death)
+
+        # 2. Dense buffer 成本 (cost_risk_dense)：每步 (1 - buffer_to_min_balance_ratio)^2，只在很危險時才變大
+        initial_balance = kwargs.get("initial_balance")
+        if initial_balance is not None and float(initial_balance) > 0:
+            buffer_to_min = (float(equity) - float(min_balance)) / float(initial_balance)
+            buffer_ratio = max(0.0, min(1.0, buffer_to_min))
+            c_dense = (1.0 - buffer_ratio) ** 2
+        else:
+            c_dense = 0.0
+        c_risk_dense = float(c_dense)
         
-        # 2. 摩擦成本 (c_fric)
+        # 3. 摩擦成本 (c_fric)
         # 目前固定為 0.0，未來可擴充實現
         c_fric = 0.0
         
-        # 總成本 (目前只有 cost_risk，因為 cost_fric 為 0)
+        # 總成本 (供 Env.info['cost'] 使用；不含 cost_risk_dense，dense 由獨立 lambda 處理)
         total_cost = c_death
         
         return {
-            "cost": float(total_cost),       # 總和 (供 Env.info['cost'] 使用)
-            "cost_risk": float(c_risk),      # 獨立通道 (供多 Lambda 使用)
-            "cost_fric": float(c_fric),      # 摩擦成本通道 (目前固定為 0)
+            "cost": float(total_cost),             # 總和 (death + fric)
+            "cost_risk": float(c_risk),            # 死亡成本通道
+            "cost_risk_dense": float(c_risk_dense),  # dense 緩衝懲罰通道 (方案 B 獨立)
+            "cost_fric": float(c_fric),            # 摩擦成本通道 (目前固定為 0)
             "cost_breakdown": {
                 "death_cost": float(c_death),
+                "dense_buffer_cost": float(c_risk_dense),
                 "fric_cost": float(c_fric),
             },
         }

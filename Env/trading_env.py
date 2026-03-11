@@ -260,6 +260,8 @@ class TradingEnvironment(gym.Env):
         self.episode_regime_alignment_bonus_sum = 0.0
         # 本回合 cost_risk 累計（供 TensorBoard / 輔助主線比對照）
         self.episode_cost_risk_sum = 0.0
+        # 本回合 cost_risk_dense 累計（dense 緩衝懲罰，方案 B 獨立通道）
+        self.episode_cost_risk_dense_sum = 0.0
 
         # Action-conditioned effects cache (for next obs)
         self._last_action_effects = {}
@@ -477,6 +479,7 @@ class TradingEnvironment(gym.Env):
         self.episode_log_return_sum = 0.0
         self.episode_regime_alignment_bonus_sum = 0.0
         self.episode_cost_risk_sum = 0.0
+        self.episode_cost_risk_dense_sum = 0.0
 
         self.last_trade_step = -999999
         self.position_entry_step = None
@@ -780,6 +783,7 @@ class TradingEnvironment(gym.Env):
         episode_log_return_sum: float = 0.0,
         episode_regime_alignment_bonus_sum: float = 0.0,
         episode_cost_risk_sum: float = 0.0,
+        episode_cost_risk_dense_sum: float = 0.0,
         terminated: bool = False,
         truncated: bool = False,
         termination_reason: Optional[str] = None,
@@ -803,6 +807,7 @@ class TradingEnvironment(gym.Env):
             episode_log_return_sum: 本回合純對數報酬累計 = log(E_final/E_init)（STATS Est. ROI 用）
             episode_regime_alignment_bonus_sum: 本回合 regime 對齊 bonus 累計（STATS 分解用）
             episode_cost_risk_sum: 本回合 cost_risk 累計（TensorBoard 用）
+            episode_cost_risk_dense_sum: 本回合 cost_risk_dense 累計（dense 緩衝懲罰）
             terminated: Gymnasium terminated（自然終止）
             truncated: Gymnasium truncated（時間/資料截斷）
             termination_reason: 終止原因（若結束回合）
@@ -839,6 +844,7 @@ class TradingEnvironment(gym.Env):
             info["episode_log_return_sum"] = float(episode_log_return_sum)
             info["episode_regime_alignment_bonus_sum"] = float(episode_regime_alignment_bonus_sum)
             info["episode_cost_risk_sum"] = float(episode_cost_risk_sum)
+            info["episode_cost_risk_dense_sum"] = float(episode_cost_risk_dense_sum)
             info["fees_to_equity_ratio"] = (
                 float(getattr(self.executor, "total_fees", 0.0)) / float(max(1e-8, new_equity))
             )
@@ -1423,7 +1429,7 @@ class TradingEnvironment(gym.Env):
         )
         step_fee_ratio = float(step_fee / self.initial_balance) if self.initial_balance > 0 else 0.0
         
-        # 計算成本（僅保留 cost_risk 和 cost_fric）
+        # 計算成本（cost_risk 事件型、cost_risk_dense 每步 dense、cost_fric）
         # 死亡時傳入 episode 步數，使 cost_risk 隨剩餘步數加權（越早死懲罰越大）
         cost_out = self.cost_calculator.compute(
             liq_triggered=bool(liq_triggered),
@@ -1432,10 +1438,12 @@ class TradingEnvironment(gym.Env):
             step_fee=float(step_fee),
             episode_steps=int(self.episode_steps),
             episode_max_steps=int(self.episode_max_steps),
+            initial_balance=float(self.initial_balance),
         )
 
-        # 本回合 cost_risk 累計（供 TensorBoard；須在 _build_step_info 前累加當步）
+        # 本回合 cost_risk / cost_risk_dense 累計（供 TensorBoard；須在 _build_step_info 前累加當步）
         self.episode_cost_risk_sum += float(cost_out.get("cost_risk", 0.0))
+        self.episode_cost_risk_dense_sum += float(cost_out.get("cost_risk_dense", 0.0))
         # ---- Record render events (entry/reduce/close/flip/SL/LIQ) ----
         self._record_step_events(
             step_idx=step_idx,
@@ -1476,6 +1484,7 @@ class TradingEnvironment(gym.Env):
             episode_log_return_sum=float(self.episode_log_return_sum),
             episode_regime_alignment_bonus_sum=float(self.episode_regime_alignment_bonus_sum),
             episode_cost_risk_sum=float(self.episode_cost_risk_sum),
+            episode_cost_risk_dense_sum=float(self.episode_cost_risk_dense_sum),
             terminated=bool(terminated),
             truncated=bool(truncated),
             termination_reason=termination_reason,
@@ -1488,6 +1497,8 @@ class TradingEnvironment(gym.Env):
         # 雙通道成本（供多 λ 使用）
         if "cost_risk" in cost_out:
             info["cost_risk"] = float(cost_out["cost_risk"])
+        if "cost_risk_dense" in cost_out:
+            info["cost_risk_dense"] = float(cost_out["cost_risk_dense"])
         if "cost_fric" in cost_out:
             info["cost_fric"] = float(cost_out["cost_fric"])
         # 交易頻率成本：本步有持倉變化則 1.0，否則 0.0（供「最近 N 步交易比例」約束使用）

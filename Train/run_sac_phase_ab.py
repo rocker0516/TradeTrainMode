@@ -60,27 +60,36 @@ class TradingEnvPhaseA(TradingEnvironment):
 
 class RiskOnlyPenaltyWrapper(gym.Wrapper):
     """
-    Phase B：reward_mod = reward_scale * reward - lambda_risk * cost_risk。
+    Phase B：reward_mod = reward_scale * reward - lambda_risk * cost_risk - lambda_buffer * cost_risk_dense。
     不把 cost_trade_freq / cost_flat 放進懲罰，避免主線被約束吞掉。
+    cost_risk 為事件型（死亡）；cost_risk_dense 為每步 dense 緩衝懲罰（方案 B 獨立通道）。
     """
 
     def __init__(
         self,
         env: gym.Env,
         lambda_risk: float = 0.05,
+        lambda_buffer: float = 0.1,
         reward_scale: float = 10.0,
     ) -> None:
         super().__init__(env)
         self.lambda_risk = float(lambda_risk)
+        self.lambda_buffer = float(lambda_buffer)
         self.reward_scale = float(reward_scale)
 
     def step(self, action: Any) -> tuple[Any, float, bool, bool, dict]:
         obs, reward, terminated, truncated, info = self.env.step(action)
         cost_risk = float(info.get("cost_risk", 0.0))
-        reward_mod = self.reward_scale * float(reward) - self.lambda_risk * cost_risk
+        cost_risk_dense = float(info.get("cost_risk_dense", 0.0))
+        reward_mod = (
+            self.reward_scale * float(reward)
+            - self.lambda_risk * cost_risk
+            - self.lambda_buffer * cost_risk_dense
+        )
         info["reward_raw"] = float(reward)
         info["reward_mod"] = float(reward_mod)
         info["cost_risk_used"] = cost_risk
+        info["cost_risk_dense_used"] = cost_risk_dense
         return obs, reward_mod, terminated, truncated, info
 
 
@@ -162,6 +171,9 @@ class PhaseABStatsCallback(BaseCallback):
         log_freq: int = 1000,
         verbose: int = 1,
         tb_log_dir: Optional[str] = None,
+        lambda_buffer: Optional[float] = None,
+        reward_scale: Optional[float] = None,
+        lambda_risk: Optional[float] = None,
     ) -> None:
         super().__init__(verbose=verbose)
         self.log_freq = max(1, int(log_freq))
@@ -170,8 +182,17 @@ class PhaseABStatsCallback(BaseCallback):
         self._regime_bonus_buf: list[float] = []
         self._conviction_bonus_buf: list[float] = []
         self._cost_risk_buf: list[float] = []
+        self._cost_risk_dense_buf: list[float] = []
+        # 每步 reward 明細（來自 RiskOnlyPenaltyWrapper 的 info，供 TensorBoard reward_decomp）
+        self._reward_raw_step: list[float] = []
+        self._reward_mod_step: list[float] = []
+        self._cost_risk_used_step: list[float] = []
+        self._cost_risk_dense_used_step: list[float] = []
         self._tb_log_dir = (tb_log_dir or "").strip()
         self._tb_writer = None
+        self._reward_scale = float(reward_scale) if reward_scale is not None else None
+        self._lambda_risk = float(lambda_risk) if lambda_risk is not None else None
+        self._lambda_buffer = float(lambda_buffer) if lambda_buffer is not None else None
         if self._tb_log_dir:
             try:
                 from torch.utils.tensorboard import SummaryWriter
@@ -230,6 +251,32 @@ class PhaseABStatsCallback(BaseCallback):
                     self._cost_risk_buf.append(float(info["episode_cost_risk_sum"]))
                 except (TypeError, ValueError):
                     pass
+            if "episode_cost_risk_dense_sum" in info:
+                try:
+                    self._cost_risk_dense_buf.append(float(info["episode_cost_risk_dense_sum"]))
+                except (TypeError, ValueError):
+                    pass
+            # 每步 reward 明細（Phase B 時 RiskOnlyPenaltyWrapper 會寫入）
+            if "reward_raw" in info:
+                try:
+                    self._reward_raw_step.append(float(info["reward_raw"]))
+                except (TypeError, ValueError):
+                    pass
+            if "reward_mod" in info:
+                try:
+                    self._reward_mod_step.append(float(info["reward_mod"]))
+                except (TypeError, ValueError):
+                    pass
+            if "cost_risk_used" in info:
+                try:
+                    self._cost_risk_used_step.append(float(info["cost_risk_used"]))
+                except (TypeError, ValueError):
+                    pass
+            if "cost_risk_dense_used" in info:
+                try:
+                    self._cost_risk_dense_used_step.append(float(info["cost_risk_dense_used"]))
+                except (TypeError, ValueError):
+                    pass
 
         # --- 每 log_freq 步：寫入 action 統計（logger 僅 stdout）+ reward 分解與輔助/主線比寫入 TensorBoard ---
         if self.n_calls % self.log_freq != 0:
@@ -255,6 +302,10 @@ class PhaseABStatsCallback(BaseCallback):
                     val = float(np.mean(self._cost_risk_buf))
                     self.logger.record("episode_stats/cost_risk_sum_mean", val)
                     self._tb_writer.add_scalar("episode_stats/cost_risk_sum_mean", val, step)
+                if self._cost_risk_dense_buf:
+                    val = float(np.mean(self._cost_risk_dense_buf))
+                    self.logger.record("episode_stats/cost_risk_dense_sum_mean", val)
+                    self._tb_writer.add_scalar("episode_stats/cost_risk_dense_sum_mean", val, step)
                 # 輔助/主線比：(|regime|+|conviction|) / max(|log_return|, 1e-8)，>1 表示輔助項量級壓過主線
                 if self._log_return_buf and (self._regime_bonus_buf or self._conviction_bonus_buf):
                     mean_log = float(np.mean(self._log_return_buf))
@@ -264,6 +315,24 @@ class PhaseABStatsCallback(BaseCallback):
                     ratio = (abs(mean_reg) + abs(mean_conv)) / denom
                     self.logger.record("episode_stats/auxiliary_main_ratio", ratio)
                     self._tb_writer.add_scalar("episode_stats/auxiliary_main_ratio", ratio, step)
+                # Reward 計算明細（reward_decomp）：每 log_freq 內步的平均，方便對照公式
+                if self._reward_raw_step:
+                    mean_raw = float(np.mean(self._reward_raw_step))
+                    self._tb_writer.add_scalar("reward_decomp/reward_raw_mean", mean_raw, step)
+                    if self._reward_scale is not None:
+                        self._tb_writer.add_scalar("reward_decomp/reward_scaled_mean", self._reward_scale * mean_raw, step)
+                if self._reward_mod_step:
+                    self._tb_writer.add_scalar("reward_decomp/reward_mod_mean", float(np.mean(self._reward_mod_step)), step)
+                if self._cost_risk_used_step:
+                    mean_cr = float(np.mean(self._cost_risk_used_step))
+                    self._tb_writer.add_scalar("reward_decomp/cost_risk_used_mean", mean_cr, step)
+                    if self._lambda_risk is not None:
+                        self._tb_writer.add_scalar("reward_decomp/penalty_risk_mean", self._lambda_risk * mean_cr, step)
+                if self._cost_risk_dense_used_step:
+                    mean_cd = float(np.mean(self._cost_risk_dense_used_step))
+                    self._tb_writer.add_scalar("reward_decomp/cost_risk_dense_used_mean", mean_cd, step)
+                    if self._lambda_buffer is not None:
+                        self._tb_writer.add_scalar("reward_decomp/penalty_dense_mean", self._lambda_buffer * mean_cd, step)
             except Exception:
                 pass
         # 保留原有 logger key 以相容既有腳本，並清空 buffer
@@ -285,6 +354,16 @@ class PhaseABStatsCallback(BaseCallback):
             self._conviction_bonus_buf.clear()
         if self._cost_risk_buf:
             self._cost_risk_buf.clear()
+        if self._cost_risk_dense_buf:
+            self._cost_risk_dense_buf.clear()
+        if self._reward_raw_step:
+            self._reward_raw_step.clear()
+        if self._reward_mod_step:
+            self._reward_mod_step.clear()
+        if self._cost_risk_used_step:
+            self._cost_risk_used_step.clear()
+        if self._cost_risk_dense_used_step:
+            self._cost_risk_dense_used_step.clear()
 
         overrides: list[float] = []
         tracking_errors: list[float] = []
@@ -327,6 +406,7 @@ def _default_feature_symbols() -> tuple[str, ...]:
 def make_env(
     phase: str,
     lambda_risk: float = 0.05,
+    lambda_buffer: float = 0.1,
     reward_scale: float = 10.0,
     action_repeat: int = 1,
     anneal_steps: int = 0,
@@ -336,6 +416,7 @@ def make_env(
     """
     回傳一個 thunk：呼叫後建立一個 Phase A 或 Phase B 的環境。
     主線 log_return 不變；輔助 regime/conviction 依 anneal_steps 線性退火（0=不退火）。
+    Phase B 時套用 cost_risk（事件型）與 cost_risk_dense（dense 緩衝懲罰）雙通道。
     """
 
     def thunk() -> gym.Env:
@@ -347,7 +428,12 @@ def make_env(
         if anneal_steps > 0:
             env = RewardAnnealWrapper(env, anneal_steps=anneal_steps)
         if phase == "B":
-            env = RiskOnlyPenaltyWrapper(env, lambda_risk=lambda_risk, reward_scale=reward_scale)
+            env = RiskOnlyPenaltyWrapper(
+                env,
+                lambda_risk=lambda_risk,
+                lambda_buffer=lambda_buffer,
+                reward_scale=reward_scale,
+            )
         if action_repeat and action_repeat > 1:
             from Env.wrappers import ActionRepeatWrapper
             env = ActionRepeatWrapper(env, repeat=action_repeat)
@@ -483,6 +569,7 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
         self._log_return_buf: list[float] = []
         self._final_balance_buf: list[float] = []
         self._cost_risk_buf: list[float] = []
+        self._cost_risk_dense_buf: list[float] = []
         self._override_buf: list[float] = []
         self._tracking_error_buf: list[float] = []
         self._execution_buf: list[float] = []
@@ -507,6 +594,11 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
                 if "episode_cost_risk_sum" in info:
                     try:
                         self._cost_risk_buf.append(float(info["episode_cost_risk_sum"]))
+                    except (TypeError, ValueError):
+                        pass
+                if "episode_cost_risk_dense_sum" in info:
+                    try:
+                        self._cost_risk_dense_buf.append(float(info["episode_cost_risk_dense_sum"]))
                     except (TypeError, ValueError):
                         pass
 
@@ -579,6 +671,9 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
         if self._cost_risk_buf:
             metrics["cost_risk_sum_mean"] = float(np.mean(self._cost_risk_buf))
             self._cost_risk_buf.clear()
+        if self._cost_risk_dense_buf:
+            metrics["cost_risk_dense_sum_mean"] = float(np.mean(self._cost_risk_dense_buf))
+            self._cost_risk_dense_buf.clear()
         if self._override_buf:
             metrics["override_rate"] = float(np.mean(self._override_buf))
             self._override_buf.clear()
@@ -599,9 +694,10 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase A/B SAC 訓練")
     parser.add_argument("--phase", choices=["A", "B"], default="A", help="Phase A=只放寬控制, B=再加 cost_risk 懲罰")
-    parser.add_argument("--timesteps", type=int, default=288*21*48* 20) # 288 * 31 * 48 * 15 = 589,824,000
+    parser.add_argument("--timesteps", type=int, default=288*21*48* 25) # 288 * 31 * 48 * 15 = 589,824,000
     parser.add_argument("--n-envs", type=int, default=40)
-    parser.add_argument("--lambda-risk", type=float, default=1.0, help="Phase B 時 cost_risk 的權重")
+    parser.add_argument("--lambda-risk", type=float, default=1.0, help="Phase B 時 cost_risk（事件型）的權重")
+    parser.add_argument("--lambda-buffer", type=float, default=0.1, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
     parser.add_argument("--reward-scale", type=float, default=10.0, help="Phase B 時主線 reward 放大倍數")
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")
     parser.add_argument("--device", type=str, default="auto")
@@ -662,6 +758,7 @@ def main() -> None:
     eval_env_thunk = make_env(
         phase=args.phase,
         lambda_risk=args.lambda_risk,
+        lambda_buffer=args.lambda_buffer,
         reward_scale=args.reward_scale,
         action_repeat=args.action_repeat,
         anneal_steps=args.anneal_steps,
@@ -686,6 +783,7 @@ def main() -> None:
             make_env(
                 phase=args.phase,
                 lambda_risk=args.lambda_risk,
+                lambda_buffer=args.lambda_buffer,
                 reward_scale=args.reward_scale,
                 action_repeat=args.action_repeat,
                 anneal_steps=args.anneal_steps,
@@ -701,6 +799,9 @@ def main() -> None:
             log_freq=args.log_freq,
             verbose=1,
             tb_log_dir=args.tb_log if args.tb_log else None,
+            lambda_buffer=args.lambda_buffer if args.phase == "B" else None,
+            reward_scale=args.reward_scale if args.phase == "B" else None,
+            lambda_risk=args.lambda_risk if args.phase == "B" else None,
         ),
     ]
     eval_trigger = _build_eval_trigger(args)
