@@ -183,6 +183,9 @@ class PhaseABStatsCallback(BaseCallback):
         self._conviction_bonus_buf: list[float] = []
         self._cost_risk_buf: list[float] = []
         self._cost_risk_dense_buf: list[float] = []
+        self._trade_count_buf: list[float] = []
+        self._total_fees_buf: list[float] = []
+        self._profit_buf: list[float] = []
         # 每步 reward 明細（來自 RiskOnlyPenaltyWrapper 的 info，供 TensorBoard reward_decomp）
         self._reward_raw_step: list[float] = []
         self._reward_mod_step: list[float] = []
@@ -256,6 +259,21 @@ class PhaseABStatsCallback(BaseCallback):
                     self._cost_risk_dense_buf.append(float(info["episode_cost_risk_dense_sum"]))
                 except (TypeError, ValueError):
                     pass
+            if "episode_trade_count" in info:
+                try:
+                    self._trade_count_buf.append(float(info["episode_trade_count"]))
+                except (TypeError, ValueError):
+                    pass
+            if "total_fees" in info:
+                try:
+                    self._total_fees_buf.append(float(info["total_fees"]))
+                except (TypeError, ValueError):
+                    pass
+            if "profit" in info:
+                try:
+                    self._profit_buf.append(float(info["profit"]))
+                except (TypeError, ValueError):
+                    pass
             # 每步 reward 明細（Phase B 時 RiskOnlyPenaltyWrapper 會寫入）
             if "reward_raw" in info:
                 try:
@@ -306,6 +324,14 @@ class PhaseABStatsCallback(BaseCallback):
                     val = float(np.mean(self._cost_risk_dense_buf))
                     self.logger.record("episode_stats/cost_risk_dense_sum_mean", val)
                     self._tb_writer.add_scalar("episode_stats/cost_risk_dense_sum_mean", val, step)
+                if self._trade_count_buf:
+                    val = float(np.mean(self._trade_count_buf))
+                    self.logger.record("episode_stats/trade_count_mean", val)
+                    self._tb_writer.add_scalar("episode_stats/trade_count_mean", val, step)
+                if self._total_fees_buf:
+                    val = float(np.mean(self._total_fees_buf))
+                    self.logger.record("episode_stats/total_fees_mean", val)
+                    self._tb_writer.add_scalar("episode_stats/total_fees_mean", val, step)
                 # 輔助/主線比：(|regime|+|conviction|) / max(|log_return|, 1e-8)，>1 表示輔助項量級壓過主線
                 if self._log_return_buf and (self._regime_bonus_buf or self._conviction_bonus_buf):
                     mean_log = float(np.mean(self._log_return_buf))
@@ -315,6 +341,14 @@ class PhaseABStatsCallback(BaseCallback):
                     ratio = (abs(mean_reg) + abs(mean_conv)) / denom
                     self.logger.record("episode_stats/auxiliary_main_ratio", ratio)
                     self._tb_writer.add_scalar("episode_stats/auxiliary_main_ratio", ratio, step)
+                # 手續費 / 利潤 比例：total_fees_mean / max(|profit_mean|, 1e-8)
+                if self._total_fees_buf and self._profit_buf:
+                    mean_fees = float(np.mean(self._total_fees_buf))
+                    mean_profit = float(np.mean(self._profit_buf))
+                    denom_profit = max(abs(mean_profit), 1e-8)
+                    ratio_fp = mean_fees / denom_profit
+                    self.logger.record("episode_stats/fees_profit_ratio_mean", ratio_fp)
+                    self._tb_writer.add_scalar("episode_stats/fees_profit_ratio_mean", ratio_fp, step)
                 # Reward 計算明細（reward_decomp）：每 log_freq 內步的平均，方便對照公式
                 if self._reward_raw_step:
                     mean_raw = float(np.mean(self._reward_raw_step))
@@ -356,6 +390,12 @@ class PhaseABStatsCallback(BaseCallback):
             self._cost_risk_buf.clear()
         if self._cost_risk_dense_buf:
             self._cost_risk_dense_buf.clear()
+        if self._trade_count_buf:
+            self._trade_count_buf.clear()
+        if self._total_fees_buf:
+            self._total_fees_buf.clear()
+        if self._profit_buf:
+            self._profit_buf.clear()
         if self._reward_raw_step:
             self._reward_raw_step.clear()
         if self._reward_mod_step:
@@ -482,10 +522,10 @@ def get_phase_ab_env_kwargs(
         holdout_months=max(1, int(holdout_months)),
         data_mode=str(data_mode).strip().lower() or "train",
         # 降低 hard override
-        no_trade_entry_threshold=0.0,
-        no_trade_exit_threshold=0.0,
-        max_step_pos_change_pct=1.0,
-        min_position_change=0.0,
+        no_trade_entry_threshold=0.1,
+        no_trade_exit_threshold=0.05,
+        max_step_pos_change_pct=0.5,
+        min_position_change=0.02,
         trade_freq_window_steps=None,
         trade_freq_cost_limit=None,
         # 順向／regime 輔助 reward（小權重）：做對方向加分，主線仍是 log-return
@@ -694,16 +734,14 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase A/B SAC 訓練")
     parser.add_argument("--phase", choices=["A", "B"], default="A", help="Phase A=只放寬控制, B=再加 cost_risk 懲罰")
-    parser.add_argument("--timesteps", type=int, default=288*21*48* 25) # 288 * 31 * 48 * 15 = 589,824,000
-    parser.add_argument("--n-envs", type=int, default=40)
+    parser.add_argument("--timesteps", type=int, default=6_000_000) # 288 * 21 * 48 * 20 = 261,360,000
+    parser.add_argument("--n-envs", type=int, default=48)
     parser.add_argument("--lambda-risk", type=float, default=1.0, help="Phase B 時 cost_risk（事件型）的權重")
     parser.add_argument("--lambda-buffer", type=float, default=0.1, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
     parser.add_argument("--reward-scale", type=float, default=10.0, help="Phase B 時主線 reward 放大倍數")
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--save-path", type=str, default="models/sac_phase_ab")
     parser.add_argument("--log-freq", type=int, default=1000, help="PhaseAB 統計與 log 間隔（步數）")
-    parser.add_argument("--tb-log", type=str, default="", help="TensorBoard log 目錄，空則不寫")
     # 訓練/評估時間切分（預設：訓練用過去、評估用最近 N 月，避免評估用訓練見過的資料）
     parser.add_argument("--holdout-months", type=int, default=2, help="評估用最近 N 個月資料；訓練用其餘過去資料（與 --no-data-split 互斥）")
     parser.add_argument("--no-data-split", action="store_true", help="停用訓練/評估時間切分，訓練與評估皆用完整資料")
@@ -716,9 +754,11 @@ def main() -> None:
     # 評估參數（可訓練中觸發、訓練後觸發，或 eval-only）
     parser.add_argument("--eval-only", action="store_true", help="只做評估，不進行訓練")
     parser.add_argument("--eval-model-path", type=str, default="", help="評估模型路徑（空則沿用 --save-path）")
-    parser.add_argument("--eval-episodes", type=int, default=100, help="每次評估回合數")
+    parser.add_argument("--eval-episodes", type=int, default=5, help="每次評估回合數")
     parser.add_argument("--eval-seed", type=int, default=42, help="評估用 seed")
-    parser.add_argument("--eval-report-path", type=str, default="", help="評估結果 JSON 輸出路徑")
+    parser.add_argument("--eval-report-path", type=str, default="", help="評估結果 JSON 輸出路徑，空則依 phase/lr/lb/rs/rb/cb 自動產生")
+    parser.add_argument("--tb-log", type=str, default="", help="TensorBoard log 目錄，空則依 phase/lr/lb/rs/rb/cb 自動產生或不寫")
+    parser.add_argument("--save-path", type=str, default="", help="模型儲存路徑，空則依 phase/lr/lb/rs/rb/cb 自動產生")
     parser.add_argument("--eval-deterministic", action=argparse.BooleanOptionalAction, default=True, help="評估是否使用 deterministic 動作(False=使用隨機動作)")
     parser.add_argument("--eval-on-train-end", action=argparse.BooleanOptionalAction, default=True, help="訓練結束後是否執行一次評估")
     parser.add_argument("--eval-trigger-steps", type=int, nargs="*", default=[], help="訓練中在指定步數觸發評估，可多個")
@@ -728,6 +768,19 @@ def main() -> None:
     parser.add_argument("--eval-metric-rule", action="append", default=[], help="內建 metric 規則，例如 log_return_sum_mean>=0.2")
     parser.add_argument("--eval-expression", type=str, default="", help="自訂評估條件式，例如 step>=5_000_000 and log_return_sum_mean>0")
     args = parser.parse_args()
+
+    # 路徑預設：依 phase/lr/lb/rs/rb/cb 產生（不可在 add_argument 時用 args，故在此補上）
+    def _path_prefix() -> str:
+        return (
+            f"phase_{args.phase}_lr{str(args.lambda_risk).replace('.', '')}_lb{str(args.lambda_buffer).replace('.', '')}"
+            f"_rs{str(args.reward_scale).replace('.', '')}_rb{str(args.regime_bonus_weight).replace('.', '')}_cb{str(args.conviction_bonus_weight).replace('.', '')}"
+        )
+    if not (getattr(args, "eval_report_path", "") or "").strip():
+        args.eval_report_path = f"logs/{_path_prefix()}_eval.json"
+    if not (getattr(args, "tb_log", "") or "").strip():
+        args.tb_log = f"logs/{_path_prefix()}"
+    if not (getattr(args, "save_path", "") or "").strip():
+        args.save_path = f"models/{_path_prefix()}"
 
     data_split = not getattr(args, "no_data_split", False)
     holdout = max(1, int(getattr(args, "holdout_months", 3)))
