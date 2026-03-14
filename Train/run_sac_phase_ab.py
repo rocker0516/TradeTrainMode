@@ -71,25 +71,55 @@ class RiskOnlyPenaltyWrapper(gym.Wrapper):
         lambda_risk: float = 0.05,
         lambda_buffer: float = 0.1,
         reward_scale: float = 10.0,
+        lambda_fee_max: float = 0.0,
+        fee_anneal_steps: int = 0,
     ) -> None:
         super().__init__(env)
         self.lambda_risk = float(lambda_risk)
         self.lambda_buffer = float(lambda_buffer)
         self.reward_scale = float(reward_scale)
+        # 手續費懲罰權重退火：lambda_fee(t) 從 0 線性升到 lambda_fee_max
+        self.lambda_fee_max = float(lambda_fee_max)
+        self.fee_anneal_steps = max(0, int(fee_anneal_steps))
+
+    def _current_lambda_fee(self) -> float:
+        """
+        依當前 training_timestep 決定手續費懲罰權重。
+
+        規則：
+        - fee_anneal_steps <= 0：不退火，恆為 lambda_fee_max
+        - 0 < step < fee_anneal_steps：線性從 0 升到 lambda_fee_max
+        - step >= fee_anneal_steps：固定為 lambda_fee_max
+        """
+        if self.lambda_fee_max <= 0.0:
+            return 0.0
+        if self.fee_anneal_steps <= 0:
+            return self.lambda_fee_max
+        step = int(getattr(self, "training_timestep", 0) or 0)
+        if step <= 0:
+            return 0.0
+        factor = max(0.0, min(1.0, float(step) / float(self.fee_anneal_steps)))
+        return self.lambda_fee_max * factor
 
     def step(self, action: Any) -> tuple[Any, float, bool, bool, dict]:
         obs, reward, terminated, truncated, info = self.env.step(action)
         cost_risk = float(info.get("cost_risk", 0.0))
         cost_risk_dense = float(info.get("cost_risk_dense", 0.0))
+        # 手續費相關成本（由 CostCalculator.compute 輸出），若不存在則視為 0
+        cost_fric = float(info.get("cost_fric", 0.0))
+        lambda_fee = self._current_lambda_fee()
         reward_mod = (
             self.reward_scale * float(reward)
             - self.lambda_risk * cost_risk
             - self.lambda_buffer * cost_risk_dense
+            - lambda_fee * cost_fric
         )
         info["reward_raw"] = float(reward)
         info["reward_mod"] = float(reward_mod)
         info["cost_risk_used"] = cost_risk
         info["cost_risk_dense_used"] = cost_risk_dense
+        info["cost_fric_used"] = cost_fric
+        info["lambda_fee"] = float(lambda_fee)
         return obs, reward_mod, terminated, truncated, info
 
 
@@ -448,6 +478,8 @@ def make_env(
     lambda_risk: float = 0.05,
     lambda_buffer: float = 0.1,
     reward_scale: float = 10.0,
+    lambda_fee_max: float = 0.0,
+    fee_anneal_steps: int = 0,
     action_repeat: int = 1,
     anneal_steps: int = 0,
     seed: Optional[int] = None,
@@ -473,6 +505,8 @@ def make_env(
                 lambda_risk=lambda_risk,
                 lambda_buffer=lambda_buffer,
                 reward_scale=reward_scale,
+                lambda_fee_max=lambda_fee_max,
+                fee_anneal_steps=fee_anneal_steps,
             )
         if action_repeat and action_repeat > 1:
             from Env.wrappers import ActionRepeatWrapper
@@ -522,10 +556,10 @@ def get_phase_ab_env_kwargs(
         holdout_months=max(1, int(holdout_months)),
         data_mode=str(data_mode).strip().lower() or "train",
         # 降低 hard override
-        no_trade_entry_threshold=0.1,
+        no_trade_entry_threshold=0.3,
         no_trade_exit_threshold=0.05,
         max_step_pos_change_pct=0.5,
-        min_position_change=0.02,
+        min_position_change=0.05,
         trade_freq_window_steps=None,
         trade_freq_cost_limit=None,
         # 順向／regime 輔助 reward（小權重）：做對方向加分，主線仍是 log-return
@@ -734,16 +768,28 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase A/B SAC 訓練")
     parser.add_argument("--phase", choices=["A", "B"], default="A", help="Phase A=只放寬控制, B=再加 cost_risk 懲罰")
-    parser.add_argument("--timesteps", type=int, default=6_000_000) # 288 * 21 * 48 * 20 = 261,360,000
+    parser.add_argument("--timesteps", type=int, default=12_000_000) # 288 * 21 * 48 * 20 = 261,360,000
     parser.add_argument("--n-envs", type=int, default=48)
     parser.add_argument("--lambda-risk", type=float, default=1.0, help="Phase B 時 cost_risk（事件型）的權重")
     parser.add_argument("--lambda-buffer", type=float, default=0.1, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
     parser.add_argument("--reward-scale", type=float, default=10.0, help="Phase B 時主線 reward 放大倍數")
+    parser.add_argument(
+        "--lambda-fee-max",
+        type=float,
+        default=0.0,
+        help="Phase B 時 cost_fric（手續費摩擦成本）的最終權重（0=不啟用手續費懲罰）",
+    )
+    parser.add_argument(
+        "--fee-anneal-steps",
+        type=int,
+        default=2_000_000,
+        help="手續費懲罰權重從 0 線性升到 lambda_fee_max 所需的步數（<=0 表示不退火，恆為 lambda_fee_max）",
+    )
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--log-freq", type=int, default=1000, help="PhaseAB 統計與 log 間隔（步數）")
     # 訓練/評估時間切分（預設：訓練用過去、評估用最近 N 月，避免評估用訓練見過的資料）
-    parser.add_argument("--holdout-months", type=int, default=2, help="評估用最近 N 個月資料；訓練用其餘過去資料（與 --no-data-split 互斥）")
+    parser.add_argument("--holdout-months", type=int, default=1, help="評估用最近 N 個月資料；訓練用其餘過去資料（與 --no-data-split 互斥）")
     parser.add_argument("--no-data-split", action="store_true", help="停用訓練/評估時間切分，訓練與評估皆用完整資料")
     # 順向／regime 輔助 reward（小權重，做對方向加分）
     parser.add_argument("--regime-bonus-weight", type=float, default=0.00003, help="Regime 對齊 bonus 權重（A 多/C 空加分，依 dir_strength 加權）")
@@ -754,7 +800,7 @@ def main() -> None:
     # 評估參數（可訓練中觸發、訓練後觸發，或 eval-only）
     parser.add_argument("--eval-only", action="store_true", help="只做評估，不進行訓練")
     parser.add_argument("--eval-model-path", type=str, default="", help="評估模型路徑（空則沿用 --save-path）")
-    parser.add_argument("--eval-episodes", type=int, default=5, help="每次評估回合數")
+    parser.add_argument("--eval-episodes", type=int, default=10, help="每次評估回合數")
     parser.add_argument("--eval-seed", type=int, default=42, help="評估用 seed")
     parser.add_argument("--eval-report-path", type=str, default="", help="評估結果 JSON 輸出路徑，空則依 phase/lr/lb/rs/rb/cb 自動產生")
     parser.add_argument("--tb-log", type=str, default="", help="TensorBoard log 目錄，空則依 phase/lr/lb/rs/rb/cb 自動產生或不寫")
@@ -762,18 +808,19 @@ def main() -> None:
     parser.add_argument("--eval-deterministic", action=argparse.BooleanOptionalAction, default=True, help="評估是否使用 deterministic 動作(False=使用隨機動作)")
     parser.add_argument("--eval-on-train-end", action=argparse.BooleanOptionalAction, default=True, help="訓練結束後是否執行一次評估")
     parser.add_argument("--eval-trigger-steps", type=int, nargs="*", default=[], help="訓練中在指定步數觸發評估，可多個")
-    parser.add_argument("--eval-trigger-every", type=int, default=0, help="訓練中每 N steps 觸發評估（0=停用）")
+    parser.add_argument("--eval-trigger-every", type=int, default=3_000_000, help="訓練中每 N steps 觸發評估（0=停用）")
     parser.add_argument("--eval-trigger-min-interval", type=int, default=0, help="兩次訓練中評估最小間隔步數")
     parser.add_argument("--eval-trigger-mode", choices=["any", "all"], default="any", help="多條件組合模式")
     parser.add_argument("--eval-metric-rule", action="append", default=[], help="內建 metric 規則，例如 log_return_sum_mean>=0.2")
     parser.add_argument("--eval-expression", type=str, default="", help="自訂評估條件式，例如 step>=5_000_000 and log_return_sum_mean>0")
     args = parser.parse_args()
 
-    # 路徑預設：依 phase/lr/lb/rs/rb/cb 產生（不可在 add_argument 時用 args，故在此補上）
+    # 路徑預設：依 phase/lr/lb/rs/rb/cb/lf/fas 產生（不可在 add_argument 時用 args，故在此補上）
     def _path_prefix() -> str:
         return (
             f"phase_{args.phase}_lr{str(args.lambda_risk).replace('.', '')}_lb{str(args.lambda_buffer).replace('.', '')}"
             f"_rs{str(args.reward_scale).replace('.', '')}_rb{str(args.regime_bonus_weight).replace('.', '')}_cb{str(args.conviction_bonus_weight).replace('.', '')}"
+            f"_lf{str(args.lambda_fee_max).replace('.', '')}_fas{str(args.fee_anneal_steps).replace('.', '')}"
         )
     if not (getattr(args, "eval_report_path", "") or "").strip():
         args.eval_report_path = f"logs/{_path_prefix()}_eval.json"
@@ -813,6 +860,8 @@ def main() -> None:
         lambda_risk=args.lambda_risk,
         lambda_buffer=args.lambda_buffer,
         reward_scale=args.reward_scale,
+        lambda_fee_max=args.lambda_fee_max,
+        fee_anneal_steps=args.fee_anneal_steps,
         action_repeat=args.action_repeat,
         anneal_steps=args.anneal_steps,
         seed=args.eval_seed,
@@ -838,6 +887,8 @@ def main() -> None:
                 lambda_risk=args.lambda_risk,
                 lambda_buffer=args.lambda_buffer,
                 reward_scale=args.reward_scale,
+                lambda_fee_max=args.lambda_fee_max,
+                fee_anneal_steps=args.fee_anneal_steps,
                 action_repeat=args.action_repeat,
                 anneal_steps=args.anneal_steps,
                 **env_kwargs_train,

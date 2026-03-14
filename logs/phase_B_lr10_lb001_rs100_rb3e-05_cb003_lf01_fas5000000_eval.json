@@ -1,0 +1,266 @@
+{
+  "timestamp": "2026-03-14T05:34:13.672881Z",
+  "reason": "training_end",
+  "step": 12000000,
+  "episodes": 10,
+  "deterministic": true,
+  "results": [
+    {
+      "episode_log_return_sum": -0.511872963817862,
+      "final_balance": 599.3719249303794,
+      "episode_cost_risk_sum": 1.6787280701754386,
+      "episode_cost_risk_dense_sum": 946.0532624793226,
+      "override_rate": 0.0,
+      "tracking_error": 0.13292747317085057,
+      "execution_rate": 0.7042093287827076,
+      "episode_index": 0,
+      "episode_steps": 1758,
+      "termination_reason": "balance_insufficient",
+      "profit": -400.62807506962065,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.4534981723216648,
+      "episode_trade_count": 1238,
+      "total_fees": 386.140371403141,
+      "episode_start_timestamp": "2026-01-02 15:05:00"
+    },
+    {
+      "episode_log_return_sum": -0.511872963817862,
+      "final_balance": 599.3719249303794,
+      "episode_cost_risk_sum": 1.6787280701754386,
+      "episode_cost_risk_dense_sum": 946.0532624793226,
+      "override_rate": 0.0,
+      "tracking_error": 0.13292747317085057,
+      "execution_rate": 0.7042093287827076,
+      "episode_index": 1,
+      "episode_steps": 1758,
+      "termination_reason": "balance_insufficient",
+      "profit": -400.62807506962065,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.4534981723216648,
+      "episode_trade_count": 1238,
+      "total_fees": 386.140371403141,
+      "episode_start_timestamp": "2026-01-02 15:05:00"
+    },
+    {
+      "episode_log_return_sum": -0.511872963817862,
+      "final_balance": 599.3719249303794,
+      "episode_cost_risk_sum": 1.6787280701754386,
+      "episode_cost_risk_dense_sum": 946.0532624793226,
+      "override_rate": 0.0,
+      "tracking_error": 0.13292747317085057,
+      "execution_rate": 0.7042093287827076,
+      "episode_index": 2,
+      "episode_steps": 1758,
+      "termination_reason": "balance_insufficient",
+      "profit": -400.62807506962065,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.4534981723216648,
+      "episode_trade_count": 1238,
+      "total_fees": 386.140371403141,
+      "episode_start_timestamp": "2026-01-02 15:05:00"
+    },
+    {
+      "episode_log_return_sum": -0.511872963817862,
+      "final_balance": 599.3719249303794,
+      "episode_cost_risk_sum": 1.6787280701754386,
+      "episode_cost_risk_dense_sum": 946.0532624793226,
+      "override_rate": 0.0,
+      "tracking_error": 0.13292747317085057,
+      "execution_rate": 0.7042093287827076,
+      "episode_index": 3,
+      "episode_steps": 1758,
+      "termination_reason": "balance_insufficient",
+      "profit": -400.62807506962065,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.4534981723216648,
+      "episode_trade_count": 1238,
+      "total_fees": 386.140371403141,
+      "episode_start_timestamp": "2026-01-02 15:05:00"
+    },
+    {
+      "episode_log_return_sum": -0.511872963817862,
+      "final_balance": 599.3719249303794,
+      "episode_cost_risk_sum": 1.6787280701754386,
+      "episode_cost_risk_dense_sum": 946.0532624793226,
+      "override_rate": 0.0,
+      "tracking_error": 0.13292747317085057,
+      "execution_rate": 0.7042093287827076,
+      "episode_index": 4,
+      "episode_steps": 1758,
+      "termination_reason": "balance_insufficient",
+      "profit": -400.62807506962065,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.4534981723216648,
+      "episode_trade_count": 1238,
+      "total_fees": 386.140371403141,
+      "episode_start_timestamp": "2026-01-02 15:05:00"
+    },
+    {
+      "episode_log_return_sum": -0.511872963817862,
+      "final_balance": 599.3719249303794,
+      "episode_cost_risk_sum": 1.6787280701754386,
+      "episode_cost_risk_dense_sum": 946.0532624793226,
+      "override_rate": 0.0,
+      "tracking_error": 0.13292747317085057,
+      "execution_rate": 0.7042093287827076,
+      "episode_index": 5,
+      "episode_steps": 1758,
+      "termination_reason": "balance_insufficient",
+      "profit": -400.62807506962065,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.4534981723216648,
+      "episode_trade_count": 1238,
+      "total_fees": 386.140371403141,
+      "episode_start_timestamp": "2026-01-02 15:05:00"
+    },
+    {
+      "episode_log_return_sum": -0.511872963817862,
+      "final_balance": 599.3719249303794,
+      "episode_cost_risk_sum": 1.6787280701754386,
+      "episode_cost_risk_dense_sum": 946.0532624793226,
+      "override_rate": 0.0,
+      "tracking_error": 0.13292747317085057,
+      "execution_rate": 0.7042093287827076,
+      "episode_index": 6,
+      "episode_steps": 1758,
+      "termination_reason": "balance_insufficient",
+      "profit": -400.62807506962065,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.4534981723216648,
+      "episode_trade_count": 1238,
+      "total_fees": 386.140371403141,
+      "episode_start_timestamp": "2026-01-02 15:05:00"
+    },
+    {
+      "episode_log_return_sum": -0.511872963817862,
+      "final_balance": 599.3719249303794,
+      "episode_cost_risk_sum": 1.6787280701754386,
+      "episode_cost_risk_dense_sum": 946.0532624793226,
+      "override_rate": 0.0,
+      "tracking_error": 0.13292747317085057,
+      "execution_rate": 0.7042093287827076,
+      "episode_index": 7,
+      "episode_steps": 1758,
+      "termination_reason": "balance_insufficient",
+      "profit": -400.62807506962065,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.4534981723216648,
+      "episode_trade_count": 1238,
+      "total_fees": 386.140371403141,
+      "episode_start_timestamp": "2026-01-02 15:05:00"
+    },
+    {
+      "episode_log_return_sum": -0.511872963817862,
+      "final_balance": 599.3719249303794,
+      "episode_cost_risk_sum": 1.6787280701754386,
+      "episode_cost_risk_dense_sum": 946.0532624793226,
+      "override_rate": 0.0,
+      "tracking_error": 0.13292747317085057,
+      "execution_rate": 0.7042093287827076,
+      "episode_index": 8,
+      "episode_steps": 1758,
+      "termination_reason": "balance_insufficient",
+      "profit": -400.62807506962065,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.4534981723216648,
+      "episode_trade_count": 1238,
+      "total_fees": 386.140371403141,
+      "episode_start_timestamp": "2026-01-02 15:05:00"
+    },
+    {
+      "episode_log_return_sum": -0.511872963817862,
+      "final_balance": 599.3719249303794,
+      "episode_cost_risk_sum": 1.6787280701754386,
+      "episode_cost_risk_dense_sum": 946.0532624793226,
+      "override_rate": 0.0,
+      "tracking_error": 0.13292747317085057,
+      "execution_rate": 0.7042093287827076,
+      "episode_index": 9,
+      "episode_steps": 1758,
+      "termination_reason": "balance_insufficient",
+      "profit": -400.62807506962065,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.4534981723216648,
+      "episode_trade_count": 1238,
+      "total_fees": 386.140371403141,
+      "episode_start_timestamp": "2026-01-02 15:05:00"
+    }
+  ],
+  "summary": {
+    "episode_log_return_sum": {
+      "mean": -0.5118729638178621,
+      "std": 1.1102230246251565e-16,
+      "min": -0.511872963817862,
+      "max": -0.511872963817862
+    },
+    "final_balance": {
+      "mean": 599.3719249303794,
+      "std": 0.0,
+      "min": 599.3719249303794,
+      "max": 599.3719249303794
+    },
+    "episode_cost_risk_sum": {
+      "mean": 1.6787280701754388,
+      "std": 2.220446049250313e-16,
+      "min": 1.6787280701754386,
+      "max": 1.6787280701754386
+    },
+    "episode_cost_risk_dense_sum": {
+      "mean": 946.0532624793226,
+      "std": 0.0,
+      "min": 946.0532624793226,
+      "max": 946.0532624793226
+    },
+    "override_rate": {
+      "mean": 0.0,
+      "std": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    "tracking_error": {
+      "mean": 0.13292747317085057,
+      "std": 0.0,
+      "min": 0.13292747317085057,
+      "max": 0.13292747317085057
+    },
+    "execution_rate": {
+      "mean": 0.7042093287827076,
+      "std": 0.0,
+      "min": 0.7042093287827076,
+      "max": 0.7042093287827076
+    },
+    "episode_steps": {
+      "mean": 1758.0,
+      "std": 0.0,
+      "min": 1758.0,
+      "max": 1758.0
+    },
+    "profit": {
+      "mean": -400.62807506962065,
+      "std": 0.0,
+      "min": -400.62807506962065,
+      "max": -400.62807506962065
+    },
+    "episode_max_dd": {
+      "mean": 0.45349817232166484,
+      "std": 5.551115123125783e-17,
+      "min": 0.4534981723216648,
+      "max": 0.4534981723216648
+    },
+    "episode_trade_count": {
+      "mean": 1238.0,
+      "std": 0.0,
+      "min": 1238.0,
+      "max": 1238.0
+    },
+    "total_fees": {
+      "mean": 386.14037140314105,
+      "std": 5.684341886080802e-14,
+      "min": 386.140371403141,
+      "max": 386.140371403141
+    }
+  },
+  "termination_reason_counts": {
+    "balance_insufficient": 10
+  }
+}
