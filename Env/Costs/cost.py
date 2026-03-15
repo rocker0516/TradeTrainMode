@@ -56,7 +56,7 @@ class CostCalculator:
             - cost: 總正規化成本（不含 cost_risk_dense，僅 death + fric）
             - cost_risk: 死亡成本 (0 或 [1.0, 2.0]，剩餘步數越多越大)
             - cost_risk_dense: 每步 dense 懲罰 (1 - buffer_ratio)^2，僅在接近死亡線時變大
-            - cost_fric: 摩擦成本 (目前固定為 0.0)
+            - cost_fric: 摩擦成本（本步手續費正規化，優先使用 step_fee_add_only）
             - cost_breakdown: 詳細分項
         """
         # 防除以零保護：使用 min_balance 或極小值做為分母下限
@@ -91,17 +91,20 @@ class CostCalculator:
         c_risk_dense = float(c_dense)
         
         # 3. 摩擦成本 (c_fric)
-        # 目前固定為 0.0，未來可擴充實現
-        c_fric = 0.0
+        # 預設使用本步手續費；若有提供 step_fee_add_only（僅加碼/加曝險）則優先使用
+        # 正規化為「手續費佔當前權益比例」，保持尺度不變性
+        step_fee_add_only = kwargs.get("step_fee_add_only")
+        fee_source = step_fee_add_only if step_fee_add_only is not None else step_fee
+        c_fric = max(0.0, float(fee_source)) / safe_equity
         
         # 總成本 (供 Env.info['cost'] 使用；不含 cost_risk_dense，dense 由獨立 lambda 處理)
-        total_cost = c_death
+        total_cost = c_death + c_fric
         
         return {
             "cost": float(total_cost),             # 總和 (death + fric)
             "cost_risk": float(c_risk),            # 死亡成本通道
             "cost_risk_dense": float(c_risk_dense),  # dense 緩衝懲罰通道 (方案 B 獨立)
-            "cost_fric": float(c_fric),            # 摩擦成本通道 (目前固定為 0)
+            "cost_fric": float(c_fric),            # 摩擦成本通道
             "cost_breakdown": {
                 "death_cost": float(c_death),
                 "dense_buffer_cost": float(c_risk_dense),

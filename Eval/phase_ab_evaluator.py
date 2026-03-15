@@ -108,13 +108,21 @@ class PhaseABEvaluator:
         self, model: SAC, env: VecEnv, print_per_episode: bool = False
     ) -> list[dict[str, Any]]:
         episodes: list[dict[str, Any]] = []
+        # 說明：
+        # - 若提供 seed，僅在「第一個 episode」時用來初始化隨機狀態；
+        # - 後續 episode 只呼叫 env.reset()，交由 env 內部的 random_start / RNG 決定起點，
+        #   以增加軌跡多樣性（避免每次 reset 都重新播種導致路徑完全相同）。
+        seeded_once = False
         for idx in range(self.n_episodes):
-            obs = env.reset()
-            if self.seed is not None:
+            if self.seed is not None and not seeded_once:
                 try:
-                    obs = env.reset(seed=int(self.seed) + idx)
+                    obs = env.reset(seed=int(self.seed))
+                    seeded_once = True
                 except TypeError:
                     obs = env.reset()
+                    seeded_once = True
+            else:
+                obs = env.reset()
 
             done = False
             action_overrides: list[float] = []

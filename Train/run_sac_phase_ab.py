@@ -60,9 +60,11 @@ class TradingEnvPhaseA(TradingEnvironment):
 
 class RiskOnlyPenaltyWrapper(gym.Wrapper):
     """
-    Phase B：reward_mod = reward_scale * reward - lambda_risk * cost_risk - lambda_buffer * cost_risk_dense。
+    Phase B：reward_mod = reward_scale * reward - lambda_risk * cost_risk - lambda_buffer * cost_risk_dense - lambda_fee * cost_fric。
     不把 cost_trade_freq / cost_flat 放進懲罰，避免主線被約束吞掉。
     cost_risk 為事件型（死亡）；cost_risk_dense 為每步 dense 緩衝懲罰（方案 B 獨立通道）。
+    cost_fric 為摩擦成本（手續費相關）；lambda_fee_max 是「手續費懲罰」的權重，不是環境的每筆交易手續費率
+    （每筆手續費率由環境的 transaction_fee / Config.TRANSACTION_FEE 決定）。
     """
 
     def __init__(
@@ -78,7 +80,7 @@ class RiskOnlyPenaltyWrapper(gym.Wrapper):
         self.lambda_risk = float(lambda_risk)
         self.lambda_buffer = float(lambda_buffer)
         self.reward_scale = float(reward_scale)
-        # 手續費懲罰權重退火：lambda_fee(t) 從 0 線性升到 lambda_fee_max
+        # 手續費「懲罰」權重退火（非 transaction_fee）：lambda_fee(t) 從 0 線性升到 lambda_fee_max
         self.lambda_fee_max = float(lambda_fee_max)
         self.fee_anneal_steps = max(0, int(fee_anneal_steps))
 
@@ -221,6 +223,9 @@ class PhaseABStatsCallback(BaseCallback):
         self._reward_mod_step: list[float] = []
         self._cost_risk_used_step: list[float] = []
         self._cost_risk_dense_used_step: list[float] = []
+        self._cost_fric_used_step: list[float] = []
+        self._lambda_fee_step: list[float] = []
+        self._penalty_fee_step: list[float] = []
         self._tb_log_dir = (tb_log_dir or "").strip()
         self._tb_writer = None
         self._reward_scale = float(reward_scale) if reward_scale is not None else None
@@ -325,6 +330,23 @@ class PhaseABStatsCallback(BaseCallback):
                     self._cost_risk_dense_used_step.append(float(info["cost_risk_dense_used"]))
                 except (TypeError, ValueError):
                     pass
+            if "cost_fric_used" in info:
+                try:
+                    self._cost_fric_used_step.append(float(info["cost_fric_used"]))
+                except (TypeError, ValueError):
+                    pass
+            if "lambda_fee" in info:
+                try:
+                    self._lambda_fee_step.append(float(info["lambda_fee"]))
+                except (TypeError, ValueError):
+                    pass
+            if "cost_fric_used" in info and "lambda_fee" in info:
+                try:
+                    cost_fric_val = float(info["cost_fric_used"])
+                    lambda_fee_val = float(info["lambda_fee"])
+                    self._penalty_fee_step.append(lambda_fee_val * cost_fric_val)
+                except (TypeError, ValueError):
+                    pass
 
         # --- 每 log_freq 步：寫入 action 統計（logger 僅 stdout）+ reward 分解與輔助/主線比寫入 TensorBoard ---
         if self.n_calls % self.log_freq != 0:
@@ -397,6 +419,24 @@ class PhaseABStatsCallback(BaseCallback):
                     self._tb_writer.add_scalar("reward_decomp/cost_risk_dense_used_mean", mean_cd, step)
                     if self._lambda_buffer is not None:
                         self._tb_writer.add_scalar("reward_decomp/penalty_dense_mean", self._lambda_buffer * mean_cd, step)
+                if self._cost_fric_used_step:
+                    self._tb_writer.add_scalar(
+                        "reward_decomp/cost_fric_used_mean",
+                        float(np.mean(self._cost_fric_used_step)),
+                        step,
+                    )
+                if self._lambda_fee_step:
+                    self._tb_writer.add_scalar(
+                        "reward_decomp/lambda_fee_mean",
+                        float(np.mean(self._lambda_fee_step)),
+                        step,
+                    )
+                if self._penalty_fee_step:
+                    self._tb_writer.add_scalar(
+                        "reward_decomp/penalty_fee_mean",
+                        float(np.mean(self._penalty_fee_step)),
+                        step,
+                    )
             except Exception:
                 pass
         # 保留原有 logger key 以相容既有腳本，並清空 buffer
@@ -434,6 +474,12 @@ class PhaseABStatsCallback(BaseCallback):
             self._cost_risk_used_step.clear()
         if self._cost_risk_dense_used_step:
             self._cost_risk_dense_used_step.clear()
+        if self._cost_fric_used_step:
+            self._cost_fric_used_step.clear()
+        if self._lambda_fee_step:
+            self._lambda_fee_step.clear()
+        if self._penalty_fee_step:
+            self._penalty_fee_step.clear()
 
         overrides: list[float] = []
         tracking_errors: list[float] = []
@@ -543,7 +589,8 @@ def get_phase_ab_env_kwargs(
     if max_episode_steps is None:
         max_episode_steps = 288 * 31
 
-    return dict(
+    mode = str(data_mode).strip().lower() or "train"
+    env_kwargs = dict(
         env_id=0,
         random_start=True,
         window_size=14,
@@ -554,7 +601,7 @@ def get_phase_ab_env_kwargs(
         # 訓練/評估時間切分（預設：訓練用過去、評估用最近 holdout_months 月）
         data_split_enabled=bool(data_split_enabled),
         holdout_months=max(1, int(holdout_months)),
-        data_mode=str(data_mode).strip().lower() or "train",
+        data_mode=mode,
         # 降低 hard override
         no_trade_entry_threshold=0.3,
         no_trade_exit_threshold=0.05,
@@ -568,6 +615,11 @@ def get_phase_ab_env_kwargs(
         conviction_min_abs_pos=float(conviction_min_abs_pos),
         conviction_trend_min_strength=float(conviction_trend_min_strength),
     )
+    # 評估端若沿用預設 min_episode_steps，常會把可選起點範圍壓縮到單一點，
+    # 導致每次 reset 都是同一起點。eval 模式改為放寬，確保 random_start 可生效。
+    if mode == "eval":
+        env_kwargs["min_episode_steps"] = 1
+    return env_kwargs
 
 
 def _parse_metric_rule(rule_text: str) -> Optional[MetricRule]:
@@ -777,7 +829,7 @@ def main() -> None:
         "--lambda-fee-max",
         type=float,
         default=0.0,
-        help="Phase B 時 cost_fric（手續費摩擦成本）的最終權重（0=不啟用手續費懲罰）",
+        help="Phase B 時 cost_fric（手續費摩擦成本）的「懲罰權重」；非每筆交易手續費率（手續費率由環境 transaction_fee 決定）。0=不啟用手續費懲罰",
     )
     parser.add_argument(
         "--fee-anneal-steps",
@@ -800,7 +852,7 @@ def main() -> None:
     # 評估參數（可訓練中觸發、訓練後觸發，或 eval-only）
     parser.add_argument("--eval-only", action="store_true", help="只做評估，不進行訓練")
     parser.add_argument("--eval-model-path", type=str, default="", help="評估模型路徑（空則沿用 --save-path）")
-    parser.add_argument("--eval-episodes", type=int, default=10, help="每次評估回合數")
+    parser.add_argument("--eval-episodes", type=int, default=100, help="每次評估回合數")
     parser.add_argument("--eval-seed", type=int, default=42, help="評估用 seed")
     parser.add_argument("--eval-report-path", type=str, default="", help="評估結果 JSON 輸出路徑，空則依 phase/lr/lb/rs/rb/cb 自動產生")
     parser.add_argument("--tb-log", type=str, default="", help="TensorBoard log 目錄，空則依 phase/lr/lb/rs/rb/cb 自動產生或不寫")
