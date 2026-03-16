@@ -232,6 +232,9 @@ class TradingEnvironment(gym.Env):
         # REFACTORED: 只保留死亡懲罰 (Liq / Bankrupt) 與 摩擦成本 (Fee/Equity)
         # CostCalculator 現在不再需要 weights (已內建正規化公式)，這裡維持空建構
         self.cost_calculator = CostCalculator()
+        # cost_fric_scale：放大 cost_fric，使 lambda_fee * cost_fric 與 reward 同數量級（預設 1.0）
+        self._cost_fric_scale = float(kwargs.get("cost_fric_scale", 1.0))
+        self._cost_fric_scale = max(1e-12, self._cost_fric_scale)
 
         # Runtime State
         self.current_step = 0
@@ -1439,6 +1442,7 @@ class TradingEnvironment(gym.Env):
             episode_steps=int(self.episode_steps),
             episode_max_steps=int(self.episode_max_steps),
             initial_balance=float(self.initial_balance),
+            cost_fric_scale=self._cost_fric_scale,
         )
 
         # 本回合 cost_risk / cost_risk_dense 累計（供 TensorBoard；須在 _build_step_info 前累加當步）

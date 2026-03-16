@@ -50,6 +50,7 @@ class CostCalculator:
             episode_max_steps: （可選）本回合最大步數
             step_fee_add_only: （可選）僅計入「加碼/加曝險」的手續費
             initial_balance: （可選）初始資金；與 min_balance 同時提供時，計算 buffer_to_min_balance_ratio 以輸出 cost_risk_dense
+            cost_fric_scale: （可選）cost_fric 放大係數，預設 1.0；設為 100~1000 可讓 lambda_fee 懲罰與 reward 同數量級
 
         Returns:
             Dict:
@@ -93,9 +94,12 @@ class CostCalculator:
         # 3. 摩擦成本 (c_fric)
         # 預設使用本步手續費；若有提供 step_fee_add_only（僅加碼/加曝險）則優先使用
         # 正規化為「手續費佔當前權益比例」，保持尺度不變性
+        # cost_fric_scale：放大係數，使 cost_fric 與 reward 同數量級（預設 1.0；Phase B 可設 100~1000）
         step_fee_add_only = kwargs.get("step_fee_add_only")
         fee_source = step_fee_add_only if step_fee_add_only is not None else step_fee
-        c_fric = max(0.0, float(fee_source)) / safe_equity
+        fric_scale = float(kwargs.get("cost_fric_scale", 1.0))
+        fric_scale = max(1e-12, fric_scale)
+        c_fric = (max(0.0, float(fee_source)) / safe_equity) * fric_scale
         
         # 總成本 (供 Env.info['cost'] 使用；不含 cost_risk_dense，dense 由獨立 lambda 處理)
         total_cost = c_death + c_fric

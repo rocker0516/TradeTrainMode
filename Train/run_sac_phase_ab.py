@@ -65,6 +65,11 @@ class RiskOnlyPenaltyWrapper(gym.Wrapper):
     cost_risk 為事件型（死亡）；cost_risk_dense 為每步 dense 緩衝懲罰（方案 B 獨立通道）。
     cost_fric 為摩擦成本（手續費相關）；lambda_fee_max 是「手續費懲罰」的權重，不是環境的每筆交易手續費率
     （每筆手續費率由環境的 transaction_fee / Config.TRANSACTION_FEE 決定）。
+
+    註：episode_trade_count 約等於 execution_rate × episode_steps。同一資料集下 episode 長度由
+    max_episode_steps（288*31）與 random_start 決定，分佈固定，故若策略學到的「交易頻率」相近，
+    平均交易次數會落在相近區間。若要顯著改變交易次數：可提高 lambda_fee_max、在 reward 中加
+    trade_count 懲罰、或啟用 trade_freq_window_steps / trade_freq_cost_limit 做硬性上限。
     """
 
     def __init__(
@@ -571,6 +576,7 @@ def get_phase_ab_env_kwargs(
     data_split_enabled: bool = True,
     holdout_months: int = 3,
     data_mode: str = "train",
+    cost_fric_scale: float = 1.0,
 ) -> dict[str, Any]:
     """
     Phase A/B 共用的 env 參數：減少 hard override、主線 log-return。
@@ -609,6 +615,7 @@ def get_phase_ab_env_kwargs(
         min_position_change=0.05,
         trade_freq_window_steps=None,
         trade_freq_cost_limit=None,
+        cost_fric_scale=float(cost_fric_scale),
         # 順向／regime 輔助 reward（小權重）：做對方向加分，主線仍是 log-return
         regime_alignment_bonus_weight=float(regime_bonus_weight),
         conviction_trend_bonus_weight=float(conviction_bonus_weight),
@@ -819,23 +826,29 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase A/B SAC 訓練")
-    parser.add_argument("--phase", choices=["A", "B"], default="A", help="Phase A=只放寬控制, B=再加 cost_risk 懲罰")
-    parser.add_argument("--timesteps", type=int, default=12_000_000) # 288 * 21 * 48 * 20 = 261,360,000
+    parser.add_argument("--phase", choices=["A", "B"], default="B", help="Phase A=只放寬控制, B=再加 cost_risk 懲罰")
+    parser.add_argument("--timesteps", type=int, default=9_000_000) # 288 * 21 * 48 * 20 = 261,360,000
     parser.add_argument("--n-envs", type=int, default=48)
     parser.add_argument("--lambda-risk", type=float, default=1.0, help="Phase B 時 cost_risk（事件型）的權重")
-    parser.add_argument("--lambda-buffer", type=float, default=0.1, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
+    parser.add_argument("--lambda-buffer", type=float, default=0.01, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
     parser.add_argument("--reward-scale", type=float, default=10.0, help="Phase B 時主線 reward 放大倍數")
     parser.add_argument(
         "--lambda-fee-max",
         type=float,
-        default=0.0,
+        default=0.05,
         help="Phase B 時 cost_fric（手續費摩擦成本）的「懲罰權重」；非每筆交易手續費率（手續費率由環境 transaction_fee 決定）。0=不啟用手續費懲罰",
     )
     parser.add_argument(
         "--fee-anneal-steps",
         type=int,
-        default=2_000_000,
+        default=3_000_000,
         help="手續費懲罰權重從 0 線性升到 lambda_fee_max 所需的步數（<=0 表示不退火，恆為 lambda_fee_max）",
+    )
+    parser.add_argument(
+        "--cost-fric-scale",
+        type=float,
+        default=10_000.0,
+        help="Phase B 時 cost_fric 放大係數；原始 cost_fric=step_fee/equity 約 1e-4~1e-3，乘此係數後與 reward 同數量級，lambda_fee 才有效（預設 100）",
     )
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")
     parser.add_argument("--device", type=str, default="auto")
@@ -845,7 +858,7 @@ def main() -> None:
     parser.add_argument("--no-data-split", action="store_true", help="停用訓練/評估時間切分，訓練與評估皆用完整資料")
     # 順向／regime 輔助 reward（小權重，做對方向加分）
     parser.add_argument("--regime-bonus-weight", type=float, default=0.00003, help="Regime 對齊 bonus 權重（A 多/C 空加分，依 dir_strength 加權）")
-    parser.add_argument("--conviction-bonus-weight", type=float, default=0.1, help="Conviction 順向 bonus 權重（強訊號+大倉+同向加分）")
+    parser.add_argument("--conviction-bonus-weight", type=float, default=0.03, help="Conviction 順向 bonus 權重（強訊號+大倉+同向加分）")
     parser.add_argument("--conviction-min-abs-pos", type=float, default=0.4, help="Conviction 生效最小持倉比例")
     parser.add_argument("--conviction-trend-min-strength", type=float, default=0.5, help="Conviction 生效最小趨勢強度")
     parser.add_argument("--anneal-steps", type=int, default=500_000, help="輔助 reward 退火步數（0=不退火，regime/conviction 全程滿權重）")
@@ -872,7 +885,7 @@ def main() -> None:
         return (
             f"phase_{args.phase}_lr{str(args.lambda_risk).replace('.', '')}_lb{str(args.lambda_buffer).replace('.', '')}"
             f"_rs{str(args.reward_scale).replace('.', '')}_rb{str(args.regime_bonus_weight).replace('.', '')}_cb{str(args.conviction_bonus_weight).replace('.', '')}"
-            f"_lf{str(args.lambda_fee_max).replace('.', '')}_fas{str(args.fee_anneal_steps).replace('.', '')}"
+            f"_lf{str(args.lambda_fee_max).replace('.', '')}_fas{str(args.fee_anneal_steps).replace('.', '')}_cfs{str(args.cost_fric_scale).replace('.', '')}"
         )
     if not (getattr(args, "eval_report_path", "") or "").strip():
         args.eval_report_path = f"logs/{_path_prefix()}_eval.json"
@@ -896,6 +909,7 @@ def main() -> None:
         data_split_enabled=data_split,
         holdout_months=holdout,
         data_mode="train",
+        cost_fric_scale=getattr(args, "cost_fric_scale", 100.0),
     )
     env_kwargs_eval = get_phase_ab_env_kwargs(
         regime_bonus_weight=args.regime_bonus_weight,
@@ -905,6 +919,7 @@ def main() -> None:
         data_split_enabled=data_split,
         holdout_months=holdout,
         data_mode="eval",
+        cost_fric_scale=getattr(args, "cost_fric_scale", 100.0),
     )
 
     eval_env_thunk = make_env(
