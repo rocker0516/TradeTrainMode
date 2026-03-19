@@ -2,12 +2,14 @@ import os
 import csv
 import time
 import logging
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Protocol, Iterator
 import requests
 import pandas as pd
+from trade_data.supabase_client import get_client
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -43,6 +45,107 @@ def upsert_dataframe_to_csv(
 
     combined.to_csv(filename, index=False)
     return combined
+
+
+_SUPABASE_UPSERT_CHUNK_SIZE = 1000
+COINGLASS_SUPABASE_TABLES = [
+    "futures_volume_1d",
+    "fear_greed_index_history_1d",
+    "bitcoin_sth_sopr_index_history_1d",
+]
+
+
+def _normalize_json_value(value: Any) -> Any:
+    """將 NaN/NaT/inf 正規化為可寫入 JSON 的值。"""
+    if pd.isna(value):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def upsert_dataframe_to_supabase(
+    df: pd.DataFrame,
+    table: str,
+    conflict_cols: List[str],
+) -> Optional[str]:
+    """
+    將 DataFrame upsert 到 Supabase，並統一使用 timestamp 欄位。
+
+    Args:
+        df: 來源資料。
+        table: Supabase table 名稱。
+        conflict_cols: upsert 的 conflict key 欄位。
+
+    Returns:
+        成功回傳 "ok"，否則回傳 None。
+    """
+    client = get_client()
+    if client is None:
+        print(f"Supabase upsert skipped for {table} (no client/config).")
+        return None
+
+    payload_df = df.copy()
+    if "time" in payload_df.columns and "timestamp" not in payload_df.columns:
+        payload_df = payload_df.rename(columns={"time": "timestamp"})
+
+    if "timestamp" not in payload_df.columns:
+        print(f"Supabase upsert skipped for {table} (missing timestamp column).")
+        return None
+
+    payload_df["timestamp"] = (
+        pd.to_datetime(payload_df["timestamp"], errors="coerce")
+        .dt.tz_localize(None)
+        .astype(str)
+    )
+    payload_df = payload_df[payload_df["timestamp"] != "NaT"].reset_index(drop=True)
+    if payload_df.empty:
+        print(f"Supabase upsert skipped for {table} (no valid rows).")
+        return None
+
+    rows = payload_df.to_dict(orient="records")
+    for row in rows:
+        for key, value in row.items():
+            row[key] = _normalize_json_value(value)
+
+    conflict = ",".join(conflict_cols)
+    try:
+        for start in range(0, len(rows), _SUPABASE_UPSERT_CHUNK_SIZE):
+            chunk = rows[start : start + _SUPABASE_UPSERT_CHUNK_SIZE]
+            client.table(table).upsert(chunk, on_conflict=conflict).execute()
+        return "ok"
+    except Exception as exc:
+        print(f"Supabase upsert error for {table}: {exc}")
+        return None
+
+
+def verify_coinglass_supabase_tables(
+    tables: Optional[List[str]] = None,
+) -> bool:
+    """
+    驗證 CoinGlass 相關 Supabase 資料表是否可存取。
+
+    Args:
+        tables: 要驗證的表名列表；未提供時使用預設 CoinGlass 三張表。
+
+    Returns:
+        全部成功回傳 True，否則 False。
+    """
+    client = get_client()
+    if client is None:
+        print("Supabase 驗證失敗：無法建立 client。")
+        return False
+
+    targets = tables or COINGLASS_SUPABASE_TABLES
+    all_ok = True
+    for table in targets:
+        try:
+            client.table(table).select("timestamp").limit(1).execute()
+            print(f"Supabase 驗證成功：'{table}' 可存取。")
+        except Exception as exc:
+            all_ok = False
+            print(f"Supabase 驗證失敗：'{table}' 無法存取，原因: {exc}")
+    return all_ok
 
 
 def merge_futures_volume_csvs(
@@ -586,12 +689,13 @@ class CoinGlassClient:
             raise_on_error=False
         )
     
-    def get_funding_rate_vol_weight_history(self, symbol: str, interval: str, limit: int, 
+    def get_funding_rate_vol_weight_history(self, exchange: str, symbol: str, interval: str, limit: int, 
                           start_time: Optional[int] = None, end_time: Optional[int] = None) -> pd.DataFrame:
         """
         Calls the funding rate vol weight history endpoint.
         
         Args:
+            exchange: Exchange name (e.g., 'Binance').
             symbol: Trading pair symbol (e.g., 'BTCUSDT').
             interval: Time interval (e.g., '5m').
             limit: Maximum number of records to return.
@@ -607,6 +711,7 @@ class CoinGlassClient:
         """
         return self._fetch_history_data(
             endpoint="futures/funding-rate/vol-weight-history",
+            exchange=exchange,
             symbol=symbol.replace("USDT", ""),
             interval=interval,
             limit=limit,
@@ -983,7 +1088,7 @@ def run_coinglass_fetch(
                 interval=interval,
                 limit=1000,
                 start_time=current_start_ts,
-                end_time= diff_ms * 1000 + current_start_ts
+                end_time=current_start_ts + diff_ms
             )
             request_count += 1
             #未平倉合約
@@ -993,7 +1098,7 @@ def run_coinglass_fetch(
                 interval=interval,
                 limit=1000,
                 start_time=current_start_ts,
-                end_time= diff_ms * 1000 + current_start_ts
+                end_time=current_start_ts + diff_ms
             )
 
             if len(open_interest) != 0:
@@ -1007,7 +1112,7 @@ def run_coinglass_fetch(
                 interval=interval,
                 limit=1000,
                 start_time=current_start_ts,
-                end_time= diff_ms * 1000 + current_start_ts
+                end_time=current_start_ts + diff_ms
             )
 
             if len(funding_rate) != 0:
@@ -1017,11 +1122,12 @@ def run_coinglass_fetch(
             
             #資金費率未平倉合約權重
             funding_rate_oi_weight = client.get_funding_rate_oi_weight_history(
+                exchange=exchange,
                 symbol=symbol,
                 interval=interval,
                 limit=1000,
                 start_time=current_start_ts,
-                end_time= diff_ms * 1000 + current_start_ts
+                end_time=current_start_ts + diff_ms
             )
             if len(funding_rate_oi_weight) != 0:
                 funding_rate_oi_weight = funding_rate_oi_weight.rename(columns=lambda c: f"funding_rate_oi_weight_{c}" if c != "time" else c)
@@ -1030,11 +1136,12 @@ def run_coinglass_fetch(
             
             #資金費率成交量權重
             funding_rate_vol_weight = client.get_funding_rate_vol_weight_history(
+                exchange=exchange,
                 symbol=symbol,
                 interval=interval,
                 limit=1000,
                 start_time=current_start_ts,
-                end_time= diff_ms * 1000 + current_start_ts
+                end_time=current_start_ts + diff_ms
             )
             if len(funding_rate_vol_weight) != 0:
                 funding_rate_vol_weight = funding_rate_vol_weight.rename(columns=lambda c: f"funding_rate_vol_weight_{c}" if c != "time" else c)
@@ -1048,7 +1155,7 @@ def run_coinglass_fetch(
                 interval=interval,
                 limit=1000,
                 start_time=current_start_ts,
-                end_time= diff_ms * 1000 + current_start_ts
+                end_time=current_start_ts + diff_ms
             )
             if len(global_long_short_account_ratio) != 0:
                 global_long_short_account_ratio = global_long_short_account_ratio.rename(columns=lambda c: f"global_long_short_account_ratio_{c}" if c != "time" else c)
@@ -1062,7 +1169,7 @@ def run_coinglass_fetch(
                 interval=interval,
                 limit=1000,
                 start_time=current_start_ts,
-                end_time= diff_ms * 1000 + current_start_ts
+                end_time=current_start_ts + diff_ms
             )
             if len(top_long_short_account_ratio) != 0:
                 top_long_short_account_ratio = top_long_short_account_ratio.rename(columns=lambda c: f"top_long_short_account_ratio_{c}" if c != "time" else c)
@@ -1076,7 +1183,7 @@ def run_coinglass_fetch(
                 interval=interval,
                 limit=1000,
                 start_time=current_start_ts,
-                end_time= diff_ms * 1000 + current_start_ts
+                end_time=current_start_ts + diff_ms
             )
             if len(top_long_short_position_ratio) != 0:
                 top_long_short_position_ratio = top_long_short_position_ratio.rename(columns=lambda c: f"top_long_short_position_ratio_{c}" if c != "time" else c)
@@ -1090,7 +1197,7 @@ def run_coinglass_fetch(
                 interval=interval,
                 limit=1000,
                 start_time=current_start_ts,
-                end_time= diff_ms * 1000 + current_start_ts
+                end_time=current_start_ts + diff_ms
             )
             if len(liquidation) != 0:
                 liquidation = liquidation.rename(columns=lambda c: f"liquidation_{c}" if c != "time" else c)
@@ -1104,7 +1211,7 @@ def run_coinglass_fetch(
                 interval=interval,
                 limit=1000,
                 start_time=current_start_ts,
-                end_time= diff_ms * 1000 + current_start_ts
+                end_time=current_start_ts + diff_ms
             )
             if len(liquidation_aggregated) != 0:
                 liquidation_aggregated = liquidation_aggregated.rename(columns=lambda c: f"liquidation_aggregated_{c}" if c != "time" else c)
@@ -1118,7 +1225,7 @@ def run_coinglass_fetch(
                 interval=interval,
                 limit=1000,
                 start_time=current_start_ts,
-                end_time= diff_ms * 1000 + current_start_ts
+                end_time=current_start_ts + diff_ms
             )
             if len(ask_bids) != 0:
                 ask_bids = ask_bids.rename(columns=lambda c: f"ask_bids_{c}" if c != "time" else c)
@@ -1132,7 +1239,7 @@ def run_coinglass_fetch(
                 interval=interval,
                 limit=1000,
                 start_time=current_start_ts,
-                end_time= diff_ms * 1000 + current_start_ts
+                end_time=current_start_ts + diff_ms
             )
             if len(aggregated_ask_bids) != 0:
                 aggregated_ask_bids = aggregated_ask_bids.rename(columns=lambda c: f"aggregated_ask_bids_{c}" if c != "time" else c)
@@ -1146,7 +1253,7 @@ def run_coinglass_fetch(
                 interval=interval,
                 limit=1000,
                 start_time=current_start_ts,
-                end_time= diff_ms * 1000 + current_start_ts
+                end_time=current_start_ts + diff_ms
             )
             if len(taker_buy_sell_volume) != 0:
                 taker_buy_sell_volume = taker_buy_sell_volume.rename(columns=lambda c: f"taker_buy_sell_volume_{c}" if c != "time" else c)
@@ -1184,17 +1291,18 @@ def run_coinglass_fetch(
     
     return all_klines
 
-if __name__ == "__main__":
+def main() -> None:
+    """CoinGlass 資料抓取主程式入口。"""
     # Configuration via parameters/env
     API_KEY = os.getenv("COINGLASS_API_KEY", "1e41abd6360a4d1486b770e83982e33a")
     client = CoinGlassClient(api_key=API_KEY)
      # List of trading pairs to fetch
     trading_pairs = [
         'BTCUSDT',
-      #  'ETHUSDT',
-      #  'SOLUSDT',
-      #  'DOGEUSDT',
-      #  '1000PEPEUSDT'
+        'ETHUSDT',
+        'SOLUSDT',
+        'DOGEUSDT',
+        '1000PEPEUSDT'
     ]
     EXCHANGE = "Binance"
     INTERVAL = "1d"
@@ -1238,6 +1346,15 @@ if __name__ == "__main__":
             combined = combined.sort_values(["symbol", "time"]).reset_index(drop=True)
             combined.to_csv(combined_path, index=False)
             print(f"\nCombined futures volume saved to {combined_path} (rows: {len(combined)}, symbols: {combined['symbol'].nunique()})")
+            futures_result = upsert_dataframe_to_supabase(
+                combined,
+                table="futures_volume_1d",
+                conflict_cols=["symbol", "timestamp"],
+            )
+            if futures_result == "ok":
+                print("Supabase upsert done: futures_volume_1d")
+            else:
+                print("Supabase upsert skipped/failed: futures_volume_1d")
         else:
             print("No futures data to save.")
 
@@ -1257,6 +1374,15 @@ if __name__ == "__main__":
                 print(f"Fear & Greed records: {len(fear_greed)}")
                 print(f"Total records: {len(fear_greed)}")
                 print(f"Date range: {fear_greed['time'].min()} to {fear_greed['time'].max()}")
+                fear_greed_result = upsert_dataframe_to_supabase(
+                    fear_greed,
+                    table="fear_greed_index_history_1d",
+                    conflict_cols=["timestamp"],
+                )
+                if fear_greed_result == "ok":
+                    print("Supabase upsert done: fear_greed_index_history_1d")
+                else:
+                    print("Supabase upsert skipped/failed: fear_greed_index_history_1d")
             else:
                 print("No Fear & Greed data fetched")
         except Exception as e:
@@ -1294,6 +1420,15 @@ if __name__ == "__main__":
                 )
                 print(f"Bitcoin STH SOPR data saved to {filename}")
                 print(f"Bitcoin STH SOPR records: {len(bitcoin_sth_sopr)}")
+                sth_result = upsert_dataframe_to_supabase(
+                    bitcoin_sth_sopr,
+                    table="bitcoin_sth_sopr_index_history_1d",
+                    conflict_cols=["timestamp"],
+                )
+                if sth_result == "ok":
+                    print("Supabase upsert done: bitcoin_sth_sopr_index_history_1d")
+                else:
+                    print("Supabase upsert skipped/failed: bitcoin_sth_sopr_index_history_1d")
             else:
                 print("No Bitcoin STH SOPR data fetched")
         except Exception as e:
@@ -1334,5 +1469,7 @@ if __name__ == "__main__":
                 print("No Bitcoin Macro Oscillator data fetched")
         except Exception as e:
             print(f"Error fetching Bitcoin Macro Oscillator data: {str(e)}")
-            
+        
 
+if __name__ == "__main__":
+    main()
