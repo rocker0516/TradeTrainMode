@@ -114,7 +114,7 @@ def test_observer_observation_shapes(make_synth_market) -> None:
 
     assert out["price_seq_target"].shape == (10, md.price_seq_target_features_dim)
     assert out["price_seq_1d_target"].shape == (7, md.price_seq_1d_target_features_dim)
-    assert out["account_state"].shape == (22,)
+    assert out["account_state"].shape == (23,)
     # dtype 必須與 observation_space 一致（預設 float16）
     assert out["price_seq_target"].dtype == obs.observation_space["price_seq_target"].dtype
     assert out["account_state"].dtype == obs.observation_space["account_state"].dtype

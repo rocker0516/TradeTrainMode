@@ -21,30 +21,45 @@ class Config:
     # -------------------------------------------------------------------------
     # 視窗與步數
     # -------------------------------------------------------------------------
-    WINDOW_SIZE: int = 288 * 1.5  # 5m 根數，432 ≈ 1.5 天
-    WINDOW_SIZE_1D: int = 30
-    MIN_EPISODE_STEPS: int = 288 * 31 * 1
-    MAX_EPISODE_STEPS: int = 288 * 31 * 1
+    WINDOW_SIZE: int = 12  # 5m 根數，432 ≈ 1.5 天
+    WINDOW_SIZE_1D: int = 14
+    MIN_EPISODE_STEPS: int = 288 * 21 * 1 # 288 * 21 * 1 = 5760
+    MAX_EPISODE_STEPS: int = 288 * 21 * 1 # 288 * 21 * 1 = 5760
     RISK_BASE_UPDATE_STEPS: int = 288  # 每 N steps 更新 daily_risk_base（用於單步倉位變化上限）
 
     # -------------------------------------------------------------------------
     # 槓桿、餘額與倉位限制
     # -------------------------------------------------------------------------
     LEVERAGE: float = 10.0
-    MIN_BALANCE: float = INITIAL_BALANCE * 0.2  # 最小餘額比例（0.5 = 50%）
-    MIN_POSITION_CHANGE: float = 0.0  # 最小調倉幅度 deadband（0 = 不啟用）
-    MAX_STEP_POS_CHANGE_PCT: float = 0.5  # 單步最大持倉比例變化（0.5 = 50%）
+    MIN_BALANCE: float = INITIAL_BALANCE * 0.6  # 最小餘額比例（0.5 = 50%）
+
+    # -------------------------------------------------------------------------
+    # 調參指南：目標「評估集零 balance_insufficient」＋「平均正收益」
+    # -------------------------------------------------------------------------
+    # 死亡條件（見 trading_env）：new_equity <= min_balance → terminated，
+    # termination_reason == "balance_insufficient"（另強平為 "liq_triggered"）。
+    #
+    # 在隨機起點 + 槓桿下，要同時「幾乎不死」又「平均賺錢」，通常要先**縮曝險**再談報酬：
+    # 1) LEVERAGE：預設 10 偏高，可改 3～5 再訓練（最有效降低觸發 min_balance）。
+    # 2) MAX_STEP_POS_CHANGE_PCT：Phase AB 常在 kwargs 設 0.5，可試 0.25～0.35 減少單步梭哈。
+    # 3) NO_TRADE_ENTRY_THRESHOLD：提高（例如 0.35～0.45）可減少小訊號進出與手續費磨損。
+    # 4) Phase B 訓練：略提高 lambda_buffer（貼近爆倉／緩衝的 dense 懲罰）；lambda_risk 維持對死亡事件敏感。
+    #    cost_fric_scale 與 lambda_fee_max 需平衡：太低易過度交易；太高主線 log-return 被懲罰淹沒。
+    # 5) 驗收：eval JSON 中 termination_reason_counts["balance_insufficient"]==0 且
+    #    summary["profit"]["mean"]>0（或 log_return_sum mean>0）；勿只靠調低 MIN_BALANCE「假裝不死」。
+    MIN_POSITION_CHANGE: float = 0.02  # 最小調倉幅度 deadband（0 = 不啟用）
+    MAX_STEP_POS_CHANGE_PCT: float = 1.0  # 單步最大持倉比例變化（0.5 = 50%）
     MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（供 ActionClipWrapper 等使用）
 
     # No-trade 雙門檻（hysteresis）：空倉時 |action| < ENTRY 不進場；有倉時 |action| < EXIT 易回空倉
-    NO_TRADE_ENTRY_THRESHOLD: float = 0.0
-    NO_TRADE_EXIT_THRESHOLD: float = 0.0
+    NO_TRADE_ENTRY_THRESHOLD: float = 0.4
+    NO_TRADE_EXIT_THRESHOLD: float = 0.02
 
     # -------------------------------------------------------------------------
     # 主線獎勵：順向交易獎勵（Conviction Trend Bonus）
     # -------------------------------------------------------------------------
-    # 順向獎勵權重；>0 啟用「強訊號 + 大倉 + 同向」時加分，建議從小值開始（如 0.1）
-    CONVICTION_TREND_BONUS_WEIGHT: float = 0.3
+    # 順向獎勵權重；>0 啟用「強訊號 + 大倉 + 同向」時加分；主線為 log return，此為輔助小權重＋退火
+    CONVICTION_TREND_BONUS_WEIGHT: float = 0.1
     # trend_score 縮放倍數（(ma50-ma200)/ma200 為小數比，乘上此倍數後再 tanh 算 strength）
     # 例如 scale=10：trend_score=0.05 → strength≈0.46，易通過 min_strength 0.25
     CONVICTION_TREND_SCORE_SCALE: float = 10.0
@@ -52,8 +67,8 @@ class Config:
     CONVICTION_TREND_MIN_STRENGTH: float = 0.35
     # 最小曝險門檻 [0,1]，僅當 abs(position_pct) >= 此值才加分，避免小倉刷分
     CONVICTION_MIN_ABS_POS: float = 0.5
-    # Regime 對齊 bonus 權重：A 狀態多頭加分、C 狀態空頭加分，依 dir_strength 加權；0=不啟用
-    REGIME_ALIGNMENT_BONUS_WEIGHT: float = 0.5
+    # Regime 對齊 bonus 權重：A 狀態多頭加分、C 狀態空頭加分，依 dir_strength 加權；0=不啟用；主線為 log return，此為輔助小權重＋退火
+    REGIME_ALIGNMENT_BONUS_WEIGHT: float = 0.1
 
     # -------------------------------------------------------------------------
     # 手續費與 Fee Limit
@@ -65,7 +80,7 @@ class Config:
     # -------------------------------------------------------------------------
     STOP_LOSS_ATR: float = 2  # 止損距離的 ATR 倍數
     STOP_LOSS_LIQ_BUFFER_PCT: float = 0.2  # 止損相對強平價的安全緩衝（比例）
-    STOP_LOSS_COOLDOWN_STEPS: int = 6  # 止損後冷卻步數（30/5）
+    STOP_LOSS_COOLDOWN_STEPS: int = 0  # 止損後冷卻步數（30/5）
     STOP_LOSS_EVENT_COST: float = 0.02  # 觸發止損時的額外事件成本（比例）
 
     # Stop-Buffer Cost：罰「持倉接近止損卻不撤」（ATR 正規化）
@@ -110,8 +125,7 @@ class Config:
         "price_seq_others",      # 5m 其他標的序列
         "price_seq_1d_target",   # 1d 目標標的序列
         "price_seq_1d_others",   # 1d 其他標的序列
-        "account_state",         # 帳戶狀態（22 維）
-        "context_state",         # 情境狀態（8 維）
+        "account_state",         # 帳戶狀態（含 actual_pos_pct）
         "gate_flags",            # Gate A/B/C multi-hot（1d up, 5m 流動性, 1d down）
         "regime_score",          # [p_up, p_down, dir_strength] 強度分數（與 gate 同頻率）
     )
@@ -188,10 +202,11 @@ class Config:
         "sopr_z",
     )
 
-    # 帳戶狀態：22 維的完整名稱（順序須與 observer 內建一致）；子集由 OBS_ACCOUNT_STATE_COLS 指定
+    # 帳戶狀態：23 維的完整名稱（順序須與 observer 內建一致）；子集由 OBS_ACCOUNT_STATE_COLS 指定
     OBS_ACCOUNT_STATE_NAMES: tuple[str, ...] = (
         "position_side",
         "position_size_norm",
+        "actual_pos_pct",        # 執行後真實倉位比例 [-1, 1]（與 last_final_pos_pct 同口徑）
         "equity_ratio",
         "realized_pnl_ratio",
         "unrealized_pnl_atr",
@@ -213,7 +228,7 @@ class Config:
         "stop_loss_price_ratio",
         "recent_flat_ratio",
     )
-    OBS_ACCOUNT_STATE_COLS: tuple[str, ...] = ()  # 空 = 使用上列全部 22 欄
+    OBS_ACCOUNT_STATE_COLS: tuple[str, ...] = ()  # 空 = 使用上列全部 23 欄
 
     # 情境狀態：8 維的完整名稱；子集由 OBS_CONTEXT_STATE_COLS 指定
     OBS_CONTEXT_STATE_NAMES: tuple[str, ...] = (
@@ -227,3 +242,40 @@ class Config:
         "available_balance_after_norm",
     )
     OBS_CONTEXT_STATE_COLS: tuple[str, ...] = ()  # 空 = 使用上列全部 8 欄
+
+    # -------------------------------------------------------------------------
+    # Data Fetch 服務排程設定
+    # -------------------------------------------------------------------------
+    # True: 啟用週期性補資料服務；False: 僅執行一次
+    DATA_FETCH_SERVICE_ENABLED: bool = True
+    # True: 服務啟動後立即執行一次
+    DATA_FETCH_RUN_ON_STARTUP: bool = True
+    # 每次循環間隔秒數（Binance 5m 資料）
+    BINANCE_FETCH_INTERVAL_SECONDS: int = 300
+    # 每次循環間隔秒數（CoinGlass 1d 資料）
+    COINGLASS_FETCH_INTERVAL_SECONDS: int = 3600
+    # 0 代表無限循環；>0 代表最多執行次數（含啟動時首次執行）
+    DATA_FETCH_MAX_CYCLES: int = 0
+
+    # Binance 抓取設定
+    BINANCE_FETCH_TRADING_PAIRS: tuple[str, ...] = (
+        "BTCUSDT",
+        "ETHUSDT",
+        "SOLUSDT",
+        "DOGEUSDT",
+        "1000PEPEUSDT",
+    )
+    BINANCE_FETCH_INTERVAL: str = "5m"
+    BINANCE_FETCH_LOOKBACK_DAYS: int = 2 * 365
+
+    # CoinGlass 抓取設定
+    COINGLASS_FETCH_TRADING_PAIRS: tuple[str, ...] = (
+        "BTCUSDT",
+        "ETHUSDT",
+        "SOLUSDT",
+        "DOGEUSDT",
+        "1000PEPEUSDT",
+    )
+    COINGLASS_EXCHANGE: str = "Binance"
+    COINGLASS_FETCH_INTERVAL: str = "1d"
+    COINGLASS_FETCH_LOOKBACK_DAYS: int = 365 * 6

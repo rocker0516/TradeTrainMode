@@ -1,16 +1,26 @@
 ============================================================
-E2 Direction Proxy Report (LR + LightGBM)
+E2 Direction Proxy Report (LR + LightGBM, per CNN)
 ============================================================
-Train/Valid/Test: 152167 / 32607 / 32607
-Features: 5*F + 22 = 202 (F=36)
+Train/Valid/Test: 35 / 8 / 7
 
-[Binary] LogisticRegression (L2): Test AUC = 0.5180, Acc = 0.5181, P = 0.5216, R = 0.5843
-[Binary] LightGBM: Test AUC = 0.5267, Acc = 0.5184, P = 0.5213, R = 0.6006
-[3-class] LogisticRegression (L2): Macro-F1 = 0.3369, BalancedAcc = 0.3453, Acc = 0.4981
-[3-class] LightGBM: Macro-F1 = 0.3376, BalancedAcc = 0.3466, Acc = 0.5002
+--- CNN: 5m_target ---
+Features: 7*F = 161 (F=23)
+[Binary] LogisticRegression (L2): Test AUC = 0.1667, Acc = 0.2857, P = 0.6667, R = 0.3333
+[Binary] LightGBM: Test AUC = 0.5000, Acc = 0.8571, P = 0.8571, R = 1.0000
 
---- Sanity Tests ---
-Label shuffle (LightGBM): Test AUC = 0.5084 (expect ~0.5)
-Market shuffle (LightGBM): Test AUC = 0.5018 (expect drop)
+--- CNN: 5m_others ---
+Features: 7*F = 336 (F=48)
+[Binary] LogisticRegression (L2): Test AUC = 0.1667, Acc = 0.2857, P = 1.0000, R = 0.1667
+[Binary] LightGBM: Test AUC = 0.5000, Acc = 0.8571, P = 0.8571, R = 1.0000
+
+--- CNN: 1d_target ---
+Features: 7*F = 63 (F=9)
+[Binary] LogisticRegression (L2): Test AUC = 0.5000, Acc = 0.8571, P = 0.8571, R = 1.0000
+[Binary] LightGBM: Test AUC = 0.5000, Acc = 0.8571, P = 0.8571, R = 1.0000
+
+--- CNN: 1d_others ---
+Features: 7*F = 294 (F=42)
+[Binary] LogisticRegression (L2): Test AUC = 0.5000, Acc = 0.8571, P = 0.8571, R = 1.0000
+[Binary] LightGBM: Test AUC = 0.5000, Acc = 0.8571, P = 0.8571, R = 1.0000
 
 ============================================================

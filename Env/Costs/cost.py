@@ -23,6 +23,7 @@ class CostCalculator:
     公式：
     1. Death Cost: 死亡時 = 1.0 + (剩餘步數/總步數)，未死亡 = 0；越早死懲罰越大（最多 2.0）
     2. Fric Cost : StepFee / Equity (本步手續費佔權益的比例)
+    3. Dense Buffer Cost (cost_risk_dense): 每步 (1 - buffer_to_min_balance_ratio)^2，僅在接近死亡線時變大（方案 B 獨立通道）
     """
 
     def __init__(self, weights: CostWeights | None = None) -> None:
@@ -48,12 +49,15 @@ class CostCalculator:
             episode_steps: （可選）本回合已執行步數（不含本步）；與 episode_max_steps 同時提供時，死亡成本隨剩餘步數加權
             episode_max_steps: （可選）本回合最大步數
             step_fee_add_only: （可選）僅計入「加碼/加曝險」的手續費
+            initial_balance: （可選）初始資金；與 min_balance 同時提供時，計算 buffer_to_min_balance_ratio 以輸出 cost_risk_dense
+            cost_fric_scale: （可選）cost_fric 放大係數，預設 1.0；設為 100~1000 可讓 lambda_fee 懲罰與 reward 同數量級
 
         Returns:
             Dict:
-            - cost: 總正規化成本
+            - cost: 總正規化成本（不含 cost_risk_dense，僅 death + fric）
             - cost_risk: 死亡成本 (0 或 [1.0, 2.0]，剩餘步數越多越大)
-            - cost_fric: 摩擦成本 (目前固定為 0.0)
+            - cost_risk_dense: 每步 dense 懲罰 (1 - buffer_ratio)^2，僅在接近死亡線時變大
+            - cost_fric: 摩擦成本（本步手續費正規化，優先使用 step_fee_add_only）
             - cost_breakdown: 詳細分項
         """
         # 防除以零保護：使用 min_balance 或極小值做為分母下限
@@ -76,20 +80,38 @@ class CostCalculator:
             c_death = 0.0
 
         c_risk = float(c_death)
+
+        # 2. Dense buffer 成本 (cost_risk_dense)：每步 (1 - buffer_to_min_balance_ratio)^2，只在很危險時才變大
+        initial_balance = kwargs.get("initial_balance")
+        if initial_balance is not None and float(initial_balance) > 0:
+            buffer_to_min = (float(equity) - float(min_balance)) / float(initial_balance)
+            buffer_ratio = max(0.0, min(1.0, buffer_to_min))
+            c_dense = (1.0 - buffer_ratio) ** 2
+        else:
+            c_dense = 0.0
+        c_risk_dense = float(c_dense)
         
-        # 2. 摩擦成本 (c_fric)
-        # 目前固定為 0.0，未來可擴充實現
-        c_fric = 0.0
+        # 3. 摩擦成本 (c_fric)
+        # 預設使用本步手續費；若有提供 step_fee_add_only（僅加碼/加曝險）則優先使用
+        # 正規化為「手續費佔當前權益比例」，保持尺度不變性
+        # cost_fric_scale：放大係數，使 cost_fric 與 reward 同數量級（預設 1.0；Phase B 可設 100~1000）
+        step_fee_add_only = kwargs.get("step_fee_add_only")
+        fee_source = step_fee_add_only if step_fee_add_only is not None else step_fee
+        fric_scale = float(kwargs.get("cost_fric_scale", 1.0))
+        fric_scale = max(1e-12, fric_scale)
+        c_fric = (max(0.0, float(fee_source)) / safe_equity) * fric_scale
         
-        # 總成本 (目前只有 cost_risk，因為 cost_fric 為 0)
-        total_cost = c_death
+        # 總成本 (供 Env.info['cost'] 使用；不含 cost_risk_dense，dense 由獨立 lambda 處理)
+        total_cost = c_death + c_fric
         
         return {
-            "cost": float(total_cost),       # 總和 (供 Env.info['cost'] 使用)
-            "cost_risk": float(c_risk),      # 獨立通道 (供多 Lambda 使用)
-            "cost_fric": float(c_fric),      # 摩擦成本通道 (目前固定為 0)
+            "cost": float(total_cost),             # 總和 (death + fric)
+            "cost_risk": float(c_risk),            # 死亡成本通道
+            "cost_risk_dense": float(c_risk_dense),  # dense 緩衝懲罰通道 (方案 B 獨立)
+            "cost_fric": float(c_fric),            # 摩擦成本通道
             "cost_breakdown": {
                 "death_cost": float(c_death),
+                "dense_buffer_cost": float(c_risk_dense),
                 "fric_cost": float(c_fric),
             },
         }
