@@ -3,16 +3,14 @@ import pandas as pd
 from binance.client import Client
 from datetime import datetime, timedelta
 import time
-import math
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-# Binance API Configuration
-API_KEY = 'JFyghzzEKteoSzrDlUbNPAYxyCnFwmwylHyNAkxRJhW4xlPdFcN5b9UgYBwU2o0p'
-API_SECRET = 'N43ec0htdk2Bp14WuTLKmU0mhFsk4mmk8AMZy6PsPTshccVa5PDaOKu2QJ6Ngth1'
+from Env.config import Config
+
 
 def fetch_futures_data(symbol, interval, start_time, end_time, max_retries=3):
-    # Initialize Binance client with API keys
-    client = Client(API_KEY, API_SECRET)
+    # Futures kline 為公開端點，不需要 API Key
+    client = Client()
     
     # Convert dates to milliseconds
     start_ts = int(start_time.timestamp() * 1000)
@@ -130,31 +128,28 @@ def upsert_dataframe_to_csv(
     return combined
 
 def main():
-    # List of trading pairs to fetch
-    trading_pairs = [
-        'BTCUSDT',
-        'ETHUSDT',
-        'SOLUSDT', 
-        'DOGEUSDT',
-        '1000PEPEUSDT'
-    ]
-    
-    # Set parameters
-    interval = Client.KLINE_INTERVAL_5MINUTE  # 15-minute intervals
-    
-    # Calculate date range (5 years)
-    end_time = datetime.now()  # 使用昨天的數據
-    start_time = end_time - timedelta(days=2*365)
-    
+    interval_map: Dict[str, str] = {
+        "5m": Client.KLINE_INTERVAL_5MINUTE,
+        "15m": Client.KLINE_INTERVAL_15MINUTE,
+        "1h": Client.KLINE_INTERVAL_1HOUR,
+        "1d": Client.KLINE_INTERVAL_1DAY,
+    }
+
+    trading_pairs = list(getattr(Config, "BINANCE_FETCH_TRADING_PAIRS", ("BTCUSDT",)))
+    interval_str = str(getattr(Config, "BINANCE_FETCH_INTERVAL", "5m"))
+    interval = interval_map.get(interval_str, Client.KLINE_INTERVAL_5MINUTE)
+    lookback_days = int(getattr(Config, "BINANCE_FETCH_LOOKBACK_DAYS", 2 * 365))
+
+    end_time = datetime.now()
+    start_time = end_time - timedelta(days=lookback_days)
+
     print(f"Fetching data from {start_time} to {end_time}")
-    
-    # Fetch data for each trading pair
+
     for symbol in trading_pairs:
         try:
             print(f"\nFetching {symbol} futures data from {start_time} to {end_time}...")
             df = fetch_futures_data(symbol, interval, start_time, end_time)
-            
-            # Save to CSV
+
             filename = f"Data/{symbol}_futures_volume_5years_5min.csv"
             df = upsert_dataframe_to_csv(
                 df,
@@ -163,8 +158,7 @@ def main():
                 parse_dates=["timestamp"]
             )
             print(f"Data saved to {filename}")
-            
-            # Display basic information
+
             print(f"Total records: {len(df)}")
             print(f"Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
             print("\nVolume Statistics:")
@@ -173,13 +167,49 @@ def main():
             print(f"Average Sell Volume: {format_value(df['sell_volume'].mean())}")
             print(f"Average Volume Ratio: {format_value(df['volume_ratio'].mean())}")
             print(f"Average Long-Short Ratio: {format_value(df['long_short_ratio'].mean())}")
-            
-            # Add a small delay to avoid rate limiting
             time.sleep(1)
-            
         except Exception as e:
             print(f"Error fetching data for {symbol}: {str(e)}")
             continue
 
+
+def run_periodic_service() -> None:
+    """
+    依據 Config 設定定時補資料。
+    """
+    interval_seconds = int(getattr(Config, "BINANCE_FETCH_INTERVAL_SECONDS", 300))
+    run_on_startup = bool(getattr(Config, "DATA_FETCH_RUN_ON_STARTUP", True))
+    max_cycles = int(getattr(Config, "DATA_FETCH_MAX_CYCLES", 0))
+
+    cycle = 0
+    if run_on_startup:
+        cycle += 1
+        print(f"\n[Binance Fetch Service] Cycle {cycle} started.")
+        main()
+        if max_cycles > 0 and cycle >= max_cycles:
+            print("[Binance Fetch Service] Reached max cycles, service stopped.")
+            return
+
+    while True:
+        print(f"[Binance Fetch Service] Sleeping {interval_seconds} seconds...")
+        time.sleep(interval_seconds)
+        cycle += 1
+        print(f"\n[Binance Fetch Service] Cycle {cycle} started.")
+        try:
+            main()
+        except Exception as e:
+            print(f"[Binance Fetch Service] Cycle failed: {e}")
+
+        if max_cycles > 0 and cycle >= max_cycles:
+            print("[Binance Fetch Service] Reached max cycles, service stopped.")
+            return
+
 if __name__ == "__main__":
-    main()
+    service_enabled = bool(getattr(Config, "DATA_FETCH_SERVICE_ENABLED", True))
+    try:
+        if service_enabled:
+            run_periodic_service()
+        else:
+            main()
+    except KeyboardInterrupt:
+        print("\n[Binance Fetch Service] Stopped by user.")

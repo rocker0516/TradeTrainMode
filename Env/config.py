@@ -32,12 +32,27 @@ class Config:
     # -------------------------------------------------------------------------
     LEVERAGE: float = 10.0
     MIN_BALANCE: float = INITIAL_BALANCE * 0.6  # 最小餘額比例（0.5 = 50%）
+
+    # -------------------------------------------------------------------------
+    # 調參指南：目標「評估集零 balance_insufficient」＋「平均正收益」
+    # -------------------------------------------------------------------------
+    # 死亡條件（見 trading_env）：new_equity <= min_balance → terminated，
+    # termination_reason == "balance_insufficient"（另強平為 "liq_triggered"）。
+    #
+    # 在隨機起點 + 槓桿下，要同時「幾乎不死」又「平均賺錢」，通常要先**縮曝險**再談報酬：
+    # 1) LEVERAGE：預設 10 偏高，可改 3～5 再訓練（最有效降低觸發 min_balance）。
+    # 2) MAX_STEP_POS_CHANGE_PCT：Phase AB 常在 kwargs 設 0.5，可試 0.25～0.35 減少單步梭哈。
+    # 3) NO_TRADE_ENTRY_THRESHOLD：提高（例如 0.35～0.45）可減少小訊號進出與手續費磨損。
+    # 4) Phase B 訓練：略提高 lambda_buffer（貼近爆倉／緩衝的 dense 懲罰）；lambda_risk 維持對死亡事件敏感。
+    #    cost_fric_scale 與 lambda_fee_max 需平衡：太低易過度交易；太高主線 log-return 被懲罰淹沒。
+    # 5) 驗收：eval JSON 中 termination_reason_counts["balance_insufficient"]==0 且
+    #    summary["profit"]["mean"]>0（或 log_return_sum mean>0）；勿只靠調低 MIN_BALANCE「假裝不死」。
     MIN_POSITION_CHANGE: float = 0.02  # 最小調倉幅度 deadband（0 = 不啟用）
     MAX_STEP_POS_CHANGE_PCT: float = 1.0  # 單步最大持倉比例變化（0.5 = 50%）
     MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（供 ActionClipWrapper 等使用）
 
     # No-trade 雙門檻（hysteresis）：空倉時 |action| < ENTRY 不進場；有倉時 |action| < EXIT 易回空倉
-    NO_TRADE_ENTRY_THRESHOLD: float = 0.1
+    NO_TRADE_ENTRY_THRESHOLD: float = 0.4
     NO_TRADE_EXIT_THRESHOLD: float = 0.02
 
     # -------------------------------------------------------------------------
@@ -227,3 +242,40 @@ class Config:
         "available_balance_after_norm",
     )
     OBS_CONTEXT_STATE_COLS: tuple[str, ...] = ()  # 空 = 使用上列全部 8 欄
+
+    # -------------------------------------------------------------------------
+    # Data Fetch 服務排程設定
+    # -------------------------------------------------------------------------
+    # True: 啟用週期性補資料服務；False: 僅執行一次
+    DATA_FETCH_SERVICE_ENABLED: bool = True
+    # True: 服務啟動後立即執行一次
+    DATA_FETCH_RUN_ON_STARTUP: bool = True
+    # 每次循環間隔秒數（Binance 5m 資料）
+    BINANCE_FETCH_INTERVAL_SECONDS: int = 300
+    # 每次循環間隔秒數（CoinGlass 1d 資料）
+    COINGLASS_FETCH_INTERVAL_SECONDS: int = 3600
+    # 0 代表無限循環；>0 代表最多執行次數（含啟動時首次執行）
+    DATA_FETCH_MAX_CYCLES: int = 0
+
+    # Binance 抓取設定
+    BINANCE_FETCH_TRADING_PAIRS: tuple[str, ...] = (
+        "BTCUSDT",
+        "ETHUSDT",
+        "SOLUSDT",
+        "DOGEUSDT",
+        "1000PEPEUSDT",
+    )
+    BINANCE_FETCH_INTERVAL: str = "5m"
+    BINANCE_FETCH_LOOKBACK_DAYS: int = 2 * 365
+
+    # CoinGlass 抓取設定
+    COINGLASS_FETCH_TRADING_PAIRS: tuple[str, ...] = (
+        "BTCUSDT",
+        "ETHUSDT",
+        "SOLUSDT",
+        "DOGEUSDT",
+        "1000PEPEUSDT",
+    )
+    COINGLASS_EXCHANGE: str = "Binance"
+    COINGLASS_FETCH_INTERVAL: str = "1d"
+    COINGLASS_FETCH_LOOKBACK_DAYS: int = 365 * 6

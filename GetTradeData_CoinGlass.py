@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Protocol, Iterator
 import requests
 import pandas as pd
+from Env.config import Config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -80,6 +81,85 @@ class CoinGlassClient:
             "accept": "application/json",
             "CG-API-KEY": self._api_key  # CoinGlass API v4 uses CG-API-KEY header
         })
+        self._max_retries = int(os.getenv("COINGLASS_MAX_RETRIES", "6"))
+        self._min_request_interval_seconds = float(os.getenv("COINGLASS_MIN_REQUEST_INTERVAL_SECONDS", "1.0"))
+        self._last_request_time = 0.0
+
+    @staticmethod
+    def _safe_json(response: requests.Response) -> Dict[str, Any]:
+        """Safely parse JSON response."""
+        try:
+            return response.json() if response.content else {}
+        except ValueError:
+            return {}
+
+    def _request_json(
+        self,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        raise_on_error: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Request API data with built-in waiting/retry when rate limited (429).
+        """
+        for attempt in range(self._max_retries + 1):
+            try:
+                elapsed = time.time() - self._last_request_time
+                if elapsed < self._min_request_interval_seconds:
+                    time.sleep(self._min_request_interval_seconds - elapsed)
+
+                response = self._session.get(url, params=params, timeout=10)
+                self._last_request_time = time.time()
+                data = self._safe_json(response)
+
+                api_code = str(data.get("code", ""))
+                api_msg = str(data.get("msg", "")).lower()
+                is_rate_limited = (
+                    response.status_code == 429
+                    or api_code == "429"
+                    or "too many requests" in api_msg
+                )
+
+                if is_rate_limited:
+                    retry_after = response.headers.get("Retry-After")
+                    retry_after_seconds = int(retry_after) if retry_after and retry_after.isdigit() else 0
+                    wait_seconds = max(retry_after_seconds, min(60, 2 ** attempt))
+                    if attempt < self._max_retries:
+                        logger.warning(
+                            "Too Many Requests. Waiting %ss (retry %s/%s)...",
+                            wait_seconds,
+                            attempt + 1,
+                            self._max_retries
+                        )
+                        time.sleep(wait_seconds)
+                        continue
+                    if raise_on_error:
+                        raise CoinGlassRequestError(
+                            f"API returned error code 429: Too Many Requests. Full response: {data}"
+                        )
+                    return {}
+
+                response.raise_for_status()
+                return data
+            except requests.exceptions.RequestException as e:
+                if attempt < self._max_retries:
+                    wait_seconds = min(60, 2 ** attempt)
+                    logger.warning(
+                        "Request failed. Waiting %ss before retry %s/%s. Error: %s",
+                        wait_seconds,
+                        attempt + 1,
+                        self._max_retries,
+                        e
+                    )
+                    time.sleep(wait_seconds)
+                    continue
+                if raise_on_error:
+                    raise CoinGlassRequestError(f"Network error during API call: {e}") from e
+                return {}
+
+        if raise_on_error:
+            raise CoinGlassRequestError("Request failed after retries.")
+        return {}
 
     def _fetch_fear_greed_history(self, raise_on_error: bool = True) -> pd.DataFrame:
         """
@@ -100,33 +180,9 @@ class CoinGlassClient:
 
         try:
             logger.debug(f"Requesting: {url} ")
-            response = self._session.get(url, timeout=10)
-            
-            time.sleep(0.2)
-            
-            # Check HTTP status code
-            if response.status_code == 400:
-                error_data = response.json() if response.content else {}
-                error_msg = error_data.get("msg", "Bad Request (400)")
-                if raise_on_error:
-                    raise CoinGlassRequestError(
-                        f"API returned 400 Bad Request: {error_msg}. "
-                        f"Please check your API key and parameters. Response: {error_data}"
-                    )
-            
-            # Handle rate limit (429 Too Many Requests)
-            if response.status_code == 429:
-                retry_after = response.headers.get("Retry-After", "60")
-                error_data = response.json() if response.content else {}
-                error_msg = error_data.get("msg", "Rate limit exceeded")
-                if raise_on_error:
-                    raise CoinGlassRequestError(
-                        f"API returned 429 Rate Limit Exceeded: {error_msg}. "
-                        f"Please wait {retry_after} seconds before retrying. Response: {error_data}"
-                    )
-            
-            response.raise_for_status()
-            data = response.json()
+            data = self._request_json(url=url, raise_on_error=raise_on_error)
+            if not data:
+                return pd.DataFrame()
             
             # Check API response code (CoinGlass uses code field in response body)
             api_code = data.get("code")
@@ -184,19 +240,9 @@ class CoinGlassClient:
             
             return df
             
-        except requests.exceptions.HTTPError as e:
+        except CoinGlassRequestError:
             if raise_on_error:
-                error_detail = ""
-                try:
-                    error_data = e.response.json() if e.response.content else {}
-                    error_detail = f" Response: {error_data}"
-                except:
-                    error_detail = f" Response text: {e.response.text[:200]}"
-                raise CoinGlassRequestError(f"HTTP error during API call: {e}{error_detail}") from e
-            return pd.DataFrame()
-        except requests.exceptions.RequestException as e:
-            if raise_on_error:
-                raise CoinGlassRequestError(f"Network error during API call: {e}") from e
+                raise
             return pd.DataFrame()
         except ValueError as e:
             if raise_on_error:
@@ -223,33 +269,9 @@ class CoinGlassClient:
 
         try:
             logger.debug(f"Requesting: {url} ")
-            response = self._session.get(url, timeout=10)
-            
-            time.sleep(0.2)
-            
-            # Check HTTP status code
-            if response.status_code == 400:
-                error_data = response.json() if response.content else {}
-                error_msg = error_data.get("msg", "Bad Request (400)")
-                if raise_on_error:
-                    raise CoinGlassRequestError(
-                        f"API returned 400 Bad Request: {error_msg}. "
-                        f"Please check your API key and parameters. Response: {error_data}"
-                    )
-            
-            # Handle rate limit (429 Too Many Requests)
-            if response.status_code == 429:
-                retry_after = response.headers.get("Retry-After", "60")
-                error_data = response.json() if response.content else {}
-                error_msg = error_data.get("msg", "Rate limit exceeded")
-                if raise_on_error:
-                    raise CoinGlassRequestError(
-                        f"API returned 429 Rate Limit Exceeded: {error_msg}. "
-                        f"Please wait {retry_after} seconds before retrying. Response: {error_data}"
-                    )
-            
-            response.raise_for_status()
-            data = response.json()
+            data = self._request_json(url=url, raise_on_error=raise_on_error)
+            if not data:
+                return pd.DataFrame()
             
             # Check API response code (CoinGlass uses code field in response body)
             api_code = data.get("code")
@@ -277,19 +299,9 @@ class CoinGlassClient:
             
             return df
             
-        except requests.exceptions.HTTPError as e:
+        except CoinGlassRequestError:
             if raise_on_error:
-                error_detail = ""
-                try:
-                    error_data = e.response.json() if e.response.content else {}
-                    error_detail = f" Response: {error_data}"
-                except:
-                    error_detail = f" Response text: {e.response.text[:200]}"
-                raise CoinGlassRequestError(f"HTTP error during API call: {e}{error_detail}") from e
-            return pd.DataFrame()
-        except requests.exceptions.RequestException as e:
-            if raise_on_error:
-                raise CoinGlassRequestError(f"Network error during API call: {e}") from e
+                raise
             return pd.DataFrame()
         except ValueError as e:
             if raise_on_error:
@@ -337,33 +349,9 @@ class CoinGlassClient:
 
         try:
             logger.debug(f"Requesting: {url} with params: {params}")
-            response = self._session.get(url, params=params, timeout=10)
-            
-            time.sleep(0.2)
-            
-            # Check HTTP status code
-            if response.status_code == 400:
-                error_data = response.json() if response.content else {}
-                error_msg = error_data.get("msg", "Bad Request (400)")
-                if raise_on_error:
-                    raise CoinGlassRequestError(
-                        f"API returned 400 Bad Request: {error_msg}. "
-                        f"Please check your API key and parameters. Response: {error_data}"
-                    )
-            
-            # Handle rate limit (429 Too Many Requests)
-            if response.status_code == 429:
-                retry_after = response.headers.get("Retry-After", "60")
-                error_data = response.json() if response.content else {}
-                error_msg = error_data.get("msg", "Rate limit exceeded")
-                if raise_on_error:
-                    raise CoinGlassRequestError(
-                        f"API returned 429 Rate Limit Exceeded: {error_msg}. "
-                        f"Please wait {retry_after} seconds before retrying. Response: {error_data}"
-                    )
-            
-            response.raise_for_status()
-            data = response.json()
+            data = self._request_json(url=url, params=params, raise_on_error=raise_on_error)
+            if not data:
+                return pd.DataFrame()
             
             # Check API response code (CoinGlass uses code field in response body)
             api_code = data.get("code")
@@ -381,19 +369,9 @@ class CoinGlassClient:
             
             return pd.DataFrame(data["data"])
             
-        except requests.exceptions.HTTPError as e:
+        except CoinGlassRequestError:
             if raise_on_error:
-                error_detail = ""
-                try:
-                    error_data = e.response.json() if e.response.content else {}
-                    error_detail = f" Response: {error_data}"
-                except:
-                    error_detail = f" Response text: {e.response.text[:200]}"
-                raise CoinGlassRequestError(f"HTTP error during API call: {e}{error_detail}") from e
-            return pd.DataFrame()
-        except requests.exceptions.RequestException as e:
-            if raise_on_error:
-                raise CoinGlassRequestError(f"Network error during API call: {e}") from e
+                raise
             return pd.DataFrame()
         except ValueError as e:
             if raise_on_error:
@@ -429,6 +407,38 @@ class CoinGlassClient:
             start_time=start_time,
             end_time=end_time,
             raise_on_error=True
+        )
+
+           #吃單買賣量歷史資料
+    def get_taker_buy_sell_volume_history(self, exchange: str, symbol: str, interval: str, limit: int, 
+                          start_time: Optional[int] = None, end_time: Optional[int] = None) -> pd.DataFrame:
+        """
+        Calls the taker buy sell volume history endpoint.
+        
+        Args:
+            exchange: Exchange name (e.g., 'Binance').
+            symbol: Trading pair symbol (e.g., 'BTCUSDT').
+            interval: Time interval (e.g., '5m').
+            limit: Maximum number of records to return.
+            start_time: Start timestamp in milliseconds (optional).
+            end_time: End timestamp in milliseconds (optional).
+            
+        Returns:
+            DataFrame of taker buy sell volume data.
+            
+        Raises:
+            CoinGlassRequestError: If HTTP request fails or API returns error code.
+            CoinGlassDataError: If response data cannot be parsed.
+        """
+        return self._fetch_history_data(
+            endpoint="futures/v2/taker-buy-sell-volume/history",
+            exchange=exchange,
+            symbol=symbol,
+            interval=interval,
+            limit=limit,
+            start_time=start_time,
+            end_time=end_time,
+            raise_on_error=False
         )
 
     def get_open_interest_history(self, exchange: str, symbol: str, interval: str, limit: int, 
@@ -1037,12 +1047,27 @@ def run_coinglass_fetch(
                 symbol=symbol,
                 interval=interval,
                 limit=1000,
-                start_time=current_start_ts,
+                start_time=current_start_ts,                
                 end_time= diff_ms * 1000 + current_start_ts
+
             )
             if len(aggregated_ask_bids) != 0:
                 aggregated_ask_bids = aggregated_ask_bids.rename(columns=lambda c: f"aggregated_ask_bids_{c}" if c != "time" else c)
                 history_data = history_data.merge(aggregated_ask_bids, on='time', how='left')
+            request_count += 1
+
+            #吃單買賣量歷史資料
+            taker_buy_sell_volume = client.get_taker_buy_sell_volume_history(
+                exchange=exchange,
+                symbol=symbol,
+                interval=interval,
+                limit=1000,
+                start_time=current_start_ts,                
+                end_time= diff_ms * 1000 + current_start_ts
+            )
+            if len(taker_buy_sell_volume) != 0:
+                taker_buy_sell_volume = taker_buy_sell_volume.rename(columns=lambda c: f"taker_buy_sell_volume_{c}" if c != "time" else c)
+                history_data = history_data.merge(taker_buy_sell_volume, on='time', how='left')
             request_count += 1
 
             #期貨交易總表的歷史數據，包括特定價格範圍內的總買賣價差
@@ -1076,162 +1101,133 @@ def run_coinglass_fetch(
     
     return all_klines
 
-if __name__ == "__main__":
-    # Configuration via parameters/env
-    API_KEY = os.getenv("COINGLASS_API_KEY", "1e41abd6360a4d1486b770e83982e33a")
-    client = CoinGlassClient(api_key=API_KEY)
-     # List of trading pairs to fetch
-    trading_pairs = [
-        'BTCUSDT',
-        'ETHUSDT',
-        'SOLUSDT',
-        'DOGEUSDT',
-        '1000PEPEUSDT'
-    ]
-    EXCHANGE = "Binance"
-    INTERVAL = "1d"
-        # 2. Define Time Range (1 year)
-    diff = timedelta(minutes=15)
-    diff_ms = diff.total_seconds() * 1000
+def run_once() -> None:
+    """
+    依據 Config 進行一次 CoinGlass 補資料。
+    """
+    api_key = os.getenv("COINGLASS_API_KEY", "1e41abd6360a4d1486b770e83982e33a")
+    if not api_key:
+        raise ValueError("Please set COINGLASS_API_KEY environment variable before running.")
+
+    client = CoinGlassClient(api_key=api_key)
+    trading_pairs = list(getattr(Config, "COINGLASS_FETCH_TRADING_PAIRS", ("BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "1000PEPEUSDT")))
+    exchange = str(getattr(Config, "COINGLASS_EXCHANGE", "Binance"))
+    interval = str(getattr(Config, "COINGLASS_FETCH_INTERVAL", "1d"))
+    lookback_days = int(getattr(Config, "COINGLASS_FETCH_LOOKBACK_DAYS", 365 * 6))
+
+    diff = timedelta(days=1)
+    diff_ms = int(diff.total_seconds() * 1000)
     end_dt = datetime.now() - diff
-    start_dt = end_dt - timedelta(days=365 * 3)
+    start_dt = end_dt - timedelta(days=lookback_days)
 
-    if API_KEY == "YOUR_API_KEY_HERE":
-        print("Please set COINGLASS_API_KEY environment variable or edit the script.")
-    else:
-        # Fetch data for each trading pair
-        for symbol in trading_pairs:
-            try:
-                print(f"\nFetching {symbol} futures data from {start_dt} to {end_dt}...")
-                all_klines = run_coinglass_fetch(API_KEY, EXCHANGE, symbol, INTERVAL, start_dt, end_dt, int(diff_ms))
-                
-                # 將字典列表轉換為 DataFrame
-                if all_klines.empty:
-                    print(f"No data fetched for {symbol}")
-                    continue
-                
-                # 按時間戳排序並去重
-                if not all_klines.empty:
-                    all_klines = all_klines.sort_values('time').drop_duplicates(subset=['time'], keep='first')
-                    all_klines = all_klines.reset_index(drop=True)
-
-                all_klines['time'] = pd.to_datetime(all_klines['time'], unit='ms')
-                
-                # Save to CSV
-                filename = f"Data/{symbol}_futures_volume_coinglass_5years_{INTERVAL}.csv"
-                clean_klines = all_klines.dropna()
-                upsert_dataframe_to_csv(
-                    clean_klines,
-                    filename,
-                    key_cols=["time"],
-                    parse_dates=["time"]
-                )
-                print(f"Data saved to {filename}")
-
-                # Add a small delay to avoid rate limiting
-                time.sleep(1)
-            
-                
-            except Exception as e:
-                print(f"Error fetching data for {symbol}: {str(e)}")
-                continue
+    for symbol in trading_pairs:
         try:
-            
-            fear_greed = client._fetch_fear_greed_history()
-                
-            if not fear_greed.empty:
-                # Convert timestamp to datetime if time column exists
-                if 'time' in fear_greed.columns:
-                        fear_greed['time'] = pd.to_datetime(fear_greed['time'], unit='ms')
-                    
-                filename = f"Data/fear_greed_index_history_1d.csv"
-                upsert_dataframe_to_csv(
-                    fear_greed,
-                    filename,
-                    key_cols=["time"],
-                    parse_dates=["time"]
-                )
-                print(f"Fear & Greed data saved to {filename}")
-                print(f"Fear & Greed records: {len(fear_greed)}")
-            else:
-                print("No Fear & Greed data fetched")
-                
-            # Display basic information
-            print(f"Total records: {len(fear_greed)}")
-            print(f"Date range: {fear_greed['time'].min()} to {fear_greed['time'].max()}")
+            print(f"\nFetching {symbol} futures data from {start_dt} to {end_dt}...")
+            all_klines = run_coinglass_fetch(api_key, exchange, symbol, interval, start_dt, end_dt, diff_ms)
 
-            altcoin_season = client._fetch_index_history(endpoint="index/altcoin-season")
-            if not altcoin_season.empty:
-                # Convert timestamp to datetime if time column exists
-                if 'timestamp' in altcoin_season.columns:
-                    altcoin_season['timestamp'] = pd.to_datetime(altcoin_season['timestamp'], unit='ms')
-                    
-                    filename = f"Data/altcoin_season_index_history_1d.csv"
-                    upsert_dataframe_to_csv(
-                        altcoin_season,
-                        filename,
-                        key_cols=["timestamp"],
-                        parse_dates=["timestamp"]
-                    )
-                    print(f"Altcoin Season data saved to {filename}")
-                    print(f"Altcoin Season records: {len(altcoin_season)}")
-                else:
-                    print("No Altcoin Season data fetched")
-                
-                # Display basic information
-                print(f"Total records: {len(altcoin_season)}")
-                print(f"Date range: {altcoin_season['timestamp'].min()} to {altcoin_season['timestamp'].max()}")
+            if all_klines.empty:
+                print(f"No data fetched for {symbol}")
+                continue
 
-            bitcoin_sth_sopr = client._fetch_index_history(endpoint="index/bitcoin-sth-sopr")
-            if not bitcoin_sth_sopr.empty:
-                # Convert timestamp to datetime if time column exists
-                if 'timestamp' in bitcoin_sth_sopr.columns:
-                    bitcoin_sth_sopr['timestamp'] = pd.to_datetime(bitcoin_sth_sopr['timestamp'], unit='ms')
-                    
-                    filename = f"Data/bitcoin_sth_sopr_index_history_1d.csv"
-                    upsert_dataframe_to_csv(
-                        bitcoin_sth_sopr,
-                        filename,
-                        key_cols=["timestamp"],
-                        parse_dates=["timestamp"]
-                    )
-                    print(f"Bitcoin STH SOPR data saved to {filename}")
-                    print(f"Bitcoin STH SOPR records: {len(bitcoin_sth_sopr)}")
+            all_klines = all_klines.sort_values("time").drop_duplicates(subset=["time"], keep="first").reset_index(drop=True)
+            all_klines["time"] = pd.to_datetime(all_klines["time"], unit="ms")
 
-            
-            bitcoin_lth_sopr = client._fetch_index_history(endpoint="index/bitcoin-lth-sopr")
-            if not bitcoin_lth_sopr.empty:
-                # Convert timestamp to datetime if time column exists
-                if 'timestamp' in bitcoin_lth_sopr.columns:
-                    bitcoin_lth_sopr['timestamp'] = pd.to_datetime(bitcoin_lth_sopr['timestamp'], unit='ms')
-                    
-                    filename = f"Data/bitcoin_sth_sopr_index_history_1d.csv"
-                    upsert_dataframe_to_csv(
-                        bitcoin_lth_sopr,
-                        filename,
-                        key_cols=["timestamp"],
-                        parse_dates=["timestamp"]
-                    )
-                    print(f"Bitcoin LTH SOPR data saved to {filename}")
-                    print(f"Bitcoin LTH SOPR records: {len(bitcoin_lth_sopr)}")
-            
-            bitcoin_macro_oscillator = client._fetch_index_history(endpoint="index/bitcoin-macro-oscillator")
-            if not bitcoin_macro_oscillator.empty:
-                # Convert timestamp to datetime if time column exists
-                if 'timestamp' in bitcoin_macro_oscillator.columns:
-                    bitcoin_macro_oscillator['timestamp'] = pd.to_datetime(bitcoin_macro_oscillator['timestamp'], unit='ms')
-                    
-                    filename = f"Data/bitcoin_macro_oscillator_index_history_1d.csv"
-                    upsert_dataframe_to_csv(
-                        bitcoin_macro_oscillator,
-                        filename,
-                        key_cols=["timestamp"],
-                        parse_dates=["timestamp"]
-                    )
-                    print(f"Bitcoin Macro Oscillator data saved to {filename}")
-                    print(f"Bitcoin Macro Oscillator records: {len(bitcoin_macro_oscillator)}")
-                
+            filename = f"Data/{symbol}_futures_volume_coinglass_5years_{interval}.csv"
+            clean_klines = all_klines.dropna()
+            upsert_dataframe_to_csv(
+                clean_klines,
+                filename,
+                key_cols=["time"],
+                parse_dates=["time"]
+            )
+            print(f"Data saved to {filename}")
+            time.sleep(1)
         except Exception as e:
-            print(f"Error fetching Fear & Greed data: {str(e)}")
-            
+            print(f"Error fetching data for {symbol}: {str(e)}")
+            continue
 
+    try:
+        fear_greed = client._fetch_fear_greed_history()
+        if not fear_greed.empty and "time" in fear_greed.columns:
+            fear_greed["time"] = pd.to_datetime(fear_greed["time"], unit="ms")
+            filename = "Data/fear_greed_index_history_1d.csv"
+            upsert_dataframe_to_csv(fear_greed, filename, key_cols=["time"], parse_dates=["time"])
+            print(f"Fear & Greed data saved to {filename}")
+
+        altcoin_season = client._fetch_index_history(endpoint="index/altcoin-season")
+        if not altcoin_season.empty and "timestamp" in altcoin_season.columns:
+            altcoin_season["timestamp"] = pd.to_datetime(altcoin_season["timestamp"], unit="ms")
+            filename = "Data/altcoin_season_index_history_1d.csv"
+            upsert_dataframe_to_csv(altcoin_season, filename, key_cols=["timestamp"], parse_dates=["timestamp"])
+            print(f"Altcoin Season data saved to {filename}")
+
+        bitcoin_sth_sopr = client._fetch_index_history(endpoint="index/bitcoin-sth-sopr")
+        if not bitcoin_sth_sopr.empty and "timestamp" in bitcoin_sth_sopr.columns:
+            bitcoin_sth_sopr["timestamp"] = pd.to_datetime(bitcoin_sth_sopr["timestamp"], unit="ms")
+            filename = "Data/bitcoin_sth_sopr_index_history_1d.csv"
+            upsert_dataframe_to_csv(bitcoin_sth_sopr, filename, key_cols=["timestamp"], parse_dates=["timestamp"])
+            print(f"Bitcoin STH SOPR data saved to {filename}")
+
+        bitcoin_lth_sopr = client._fetch_index_history(endpoint="index/bitcoin-lth-sopr")
+        if not bitcoin_lth_sopr.empty and "timestamp" in bitcoin_lth_sopr.columns:
+            bitcoin_lth_sopr["timestamp"] = pd.to_datetime(bitcoin_lth_sopr["timestamp"], unit="ms")
+            filename = "Data/bitcoin_sth_sopr_index_history_1d.csv"
+            upsert_dataframe_to_csv(bitcoin_lth_sopr, filename, key_cols=["timestamp"], parse_dates=["timestamp"])
+            print(f"Bitcoin LTH SOPR data saved to {filename}")
+
+        bitcoin_macro_oscillator = client._fetch_index_history(endpoint="index/bitcoin-macro-oscillator")
+        if not bitcoin_macro_oscillator.empty and "timestamp" in bitcoin_macro_oscillator.columns:
+            bitcoin_macro_oscillator["timestamp"] = pd.to_datetime(bitcoin_macro_oscillator["timestamp"], unit="ms")
+            filename = "Data/bitcoin_macro_oscillator_index_history_1d.csv"
+            upsert_dataframe_to_csv(
+                bitcoin_macro_oscillator,
+                filename,
+                key_cols=["timestamp"],
+                parse_dates=["timestamp"]
+            )
+            print(f"Bitcoin Macro Oscillator data saved to {filename}")
+    except Exception as e:
+        print(f"Error fetching Fear & Greed data: {str(e)}")
+
+
+def run_periodic_service() -> None:
+    """
+    依據 Config 設定定時補資料。
+    """
+    interval_seconds = int(getattr(Config, "COINGLASS_FETCH_INTERVAL_SECONDS", 3600))
+    run_on_startup = bool(getattr(Config, "DATA_FETCH_RUN_ON_STARTUP", True))
+    max_cycles = int(getattr(Config, "DATA_FETCH_MAX_CYCLES", 0))
+
+    cycle = 0
+    if run_on_startup:
+        cycle += 1
+        print(f"\n[CoinGlass Fetch Service] Cycle {cycle} started.")
+        run_once()
+        if max_cycles > 0 and cycle >= max_cycles:
+            print("[CoinGlass Fetch Service] Reached max cycles, service stopped.")
+            return
+
+    while True:
+        print(f"[CoinGlass Fetch Service] Sleeping {interval_seconds} seconds...")
+        time.sleep(interval_seconds)
+        cycle += 1
+        print(f"\n[CoinGlass Fetch Service] Cycle {cycle} started.")
+        try:
+            run_once()
+        except Exception as e:
+            print(f"[CoinGlass Fetch Service] Cycle failed: {e}")
+
+        if max_cycles > 0 and cycle >= max_cycles:
+            print("[CoinGlass Fetch Service] Reached max cycles, service stopped.")
+            return
+
+
+if __name__ == "__main__":
+    service_enabled = bool(getattr(Config, "DATA_FETCH_SERVICE_ENABLED", True))
+    try:
+        if service_enabled:
+            run_periodic_service()
+        else:
+            run_once()
+    except KeyboardInterrupt:
+        print("\n[CoinGlass Fetch Service] Stopped by user.")

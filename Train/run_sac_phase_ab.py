@@ -847,7 +847,7 @@ def main() -> None:
     parser.add_argument(
         "--cost-fric-scale",
         type=float,
-        default=10_000.0,
+        default=1000.0,
         help="Phase B 時 cost_fric 放大係數；原始 cost_fric=step_fee/equity 約 1e-4~1e-3，乘此係數後與 reward 同數量級，lambda_fee 才有效（預設 100）",
     )
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")
@@ -865,7 +865,7 @@ def main() -> None:
     # 評估參數（可訓練中觸發、訓練後觸發，或 eval-only）
     parser.add_argument("--eval-only", action="store_true", help="只做評估，不進行訓練")
     parser.add_argument("--eval-model-path", type=str, default="", help="評估模型路徑（空則沿用 --save-path）")
-    parser.add_argument("--eval-episodes", type=int, default=100, help="每次評估回合數")
+    parser.add_argument("--eval-episodes", type=int, default=10, help="每次評估回合數")
     parser.add_argument("--eval-seed", type=int, default=42, help="評估用 seed")
     parser.add_argument("--eval-report-path", type=str, default="", help="評估結果 JSON 輸出路徑，空則依 phase/lr/lb/rs/rb/cb 自動產生")
     parser.add_argument("--tb-log", type=str, default="", help="TensorBoard log 目錄，空則依 phase/lr/lb/rs/rb/cb 自動產生或不寫")
