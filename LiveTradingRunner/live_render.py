@@ -234,7 +234,8 @@ class LiveRefreshRenderer:
             ye = np.asarray(list(equity_history)[-take:], dtype=float)
             self._ax_equity.plot(xe, ye, color="tab:green", linewidth=1.2)
         self._ax_equity.set_ylabel("Equity")
-        self._ax_equity.set_xlabel("時間（YYYY-MM-DD HH:MM，資料 timestamp）")
+        # 圖上文字勿用中文：Windows 預設 DejaVu Sans 缺 CJK，tkinter 會洗版 Glyph missing 警告
+        self._ax_equity.set_xlabel("Time (YYYY-MM-DD HH:MM, bar timestamps, typically UTC)")
 
         title = (
             f"{self.symbol} | bar={closed_bar_ts} | equity={paper_equity_usdt:.2f} "

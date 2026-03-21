@@ -35,6 +35,7 @@ from Eval.eval_triggers import (
     MetricTrigger,
     StepTrigger,
 )
+from Eval.phase_ab_env_config import PhaseABEnvConfig
 from Eval.phase_ab_evaluator import PhaseABEvaluator, build_single_env_builder
 
 
@@ -593,14 +594,14 @@ def get_phase_ab_env_kwargs(
         feature_symbols = list(_default_feature_symbols())
 
     if max_episode_steps is None:
-        max_episode_steps = 288 * 31
+        max_episode_steps = int(PhaseABEnvConfig.DEFAULT_MAX_EPISODE_STEPS)
 
     mode = str(data_mode).strip().lower() or "train"
     env_kwargs = dict(
-        env_id=0,
-        random_start=True,
-        window_size=14,
-        window_size_1d=12,
+        env_id=int(PhaseABEnvConfig.ENV_ID),
+        random_start=bool(PhaseABEnvConfig.RANDOM_START),
+        window_size=int(PhaseABEnvConfig.WINDOW_SIZE),
+        window_size_1d=int(PhaseABEnvConfig.WINDOW_SIZE_1D),
         max_episode_steps=max_episode_steps,
         target_symbol=symbol,
         feature_symbols=feature_symbols,
@@ -609,12 +610,12 @@ def get_phase_ab_env_kwargs(
         holdout_months=max(1, int(holdout_months)),
         data_mode=mode,
         # 降低 hard override
-        no_trade_entry_threshold=0.3,
-        no_trade_exit_threshold=0.05,
-        max_step_pos_change_pct=0.5,
-        min_position_change=0.05,
-        trade_freq_window_steps=None,
-        trade_freq_cost_limit=None,
+        no_trade_entry_threshold=float(PhaseABEnvConfig.NO_TRADE_ENTRY_THRESHOLD),
+        no_trade_exit_threshold=float(PhaseABEnvConfig.NO_TRADE_EXIT_THRESHOLD),
+        max_step_pos_change_pct=float(PhaseABEnvConfig.MAX_STEP_POS_CHANGE_PCT),
+        min_position_change=float(PhaseABEnvConfig.MIN_POSITION_CHANGE),
+        trade_freq_window_steps=PhaseABEnvConfig.TRADE_FREQ_WINDOW_STEPS,
+        trade_freq_cost_limit=PhaseABEnvConfig.TRADE_FREQ_COST_LIMIT,
         cost_fric_scale=float(cost_fric_scale),
         # 順向／regime 輔助 reward（小權重）：做對方向加分，主線仍是 log-return
         regime_alignment_bonus_weight=float(regime_bonus_weight),
@@ -625,7 +626,7 @@ def get_phase_ab_env_kwargs(
     # 評估端若沿用預設 min_episode_steps，常會把可選起點範圍壓縮到單一點，
     # 導致每次 reset 都是同一起點。eval 模式改為放寬，確保 random_start 可生效。
     if mode == "eval":
-        env_kwargs["min_episode_steps"] = 1
+        env_kwargs["min_episode_steps"] = int(PhaseABEnvConfig.EVAL_MIN_EPISODE_STEPS)
     return env_kwargs
 
 
@@ -847,7 +848,7 @@ def main() -> None:
     parser.add_argument(
         "--cost-fric-scale",
         type=float,
-        default=1000.0,
+        default=10_000.0,
         help="Phase B 時 cost_fric 放大係數；原始 cost_fric=step_fee/equity 約 1e-4~1e-3，乘此係數後與 reward 同數量級，lambda_fee 才有效（預設 100）",
     )
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")

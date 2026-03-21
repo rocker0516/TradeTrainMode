@@ -26,8 +26,8 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from Env.config import Config
 from Eval.train_config import TrainConfig
+from LiveTradingRunner.live_runner_env_config import LiveRunnerEnvConfig
 from LiveTradingRunner.fee_provider import BinanceFeeRateProvider
 from LiveTradingRunner.live_render import LiveRefreshRenderer
 
@@ -391,7 +391,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Path to SB3 model .zip",
     )
     parser.add_argument("--leverage", type=int, default=10)
-    parser.add_argument("--max_position_pct", type=float, default=float(getattr(TrainConfig, "MAX_POSITION_PCT", 0.7)))
+    parser.add_argument("--max_position_pct", type=float, default=float(getattr(TrainConfig, "MAX_POSITION_PCT", 0.8)))
     parser.add_argument("--poll_interval_sec", type=int, default=10) # 10 seconds poll interval
     parser.add_argument("--deterministic", action="store_true")
 
@@ -512,8 +512,8 @@ def _build_config(args: argparse.Namespace) -> LiveRunnerConfig:
     else:
         feature_symbols = tuple(getattr(TrainConfig, "FEATURE_SYMBOLS", (str(args.symbol),)))
 
-    default_w5m = int(getattr(TrainConfig, "WINDOW_SIZE_5M", 14))
-    default_w1d = int(getattr(TrainConfig, "WINDOW_SIZE_1D", 12))
+    default_w5m = int(getattr(TrainConfig, "WINDOW_SIZE_5M", LiveRunnerEnvConfig.WINDOW_SIZE_5M_DEFAULT))
+    default_w1d = int(getattr(TrainConfig, "WINDOW_SIZE_1D", LiveRunnerEnvConfig.WINDOW_SIZE_1D_DEFAULT))
     w5m = int(getattr(args, "window_size_5m", 0) or 0)
     w1d = int(getattr(args, "window_size_1d", 0) or 0)
 
@@ -534,12 +534,22 @@ def _build_config(args: argparse.Namespace) -> LiveRunnerConfig:
         window_size_5m=int(w5m if w5m > 0 else default_w5m),
         window_size_1d=int(w1d if w1d > 0 else default_w1d),
         # align with Train/run_sac_lag.py wrappers & env_kwargs
-        action_repeat=int(getattr(TrainConfig, "ACTION_REPEAT", 1)),
-        max_step_pos_change_pct=float(getattr(Config, "MAX_STEP_POS_CHANGE_PCT", 0.0)),
-        min_position_change=float(getattr(TrainConfig, "MIN_POSITION_CHANGE", getattr(Config, "MIN_POSITION_CHANGE", 0.0))),
-        no_trade_entry_threshold=float(getattr(TrainConfig, "NO_TRADE_ENTRY_THRESHOLD", getattr(Config, "NO_TRADE_ENTRY_THRESHOLD", 0.0))),
-        no_trade_exit_threshold=float(getattr(TrainConfig, "NO_TRADE_EXIT_THRESHOLD", getattr(Config, "NO_TRADE_EXIT_THRESHOLD", 0.0))),
-        risk_base_update_steps=int(getattr(TrainConfig, "WINDOW_SIZE_5M", getattr(Config, "RISK_BASE_UPDATE_STEPS", 288))),
+        action_repeat=int(getattr(TrainConfig, "ACTION_REPEAT", LiveRunnerEnvConfig.ACTION_REPEAT)),
+        max_step_pos_change_pct=float(
+            getattr(TrainConfig, "MAX_STEP_POS_CHANGE_PCT", LiveRunnerEnvConfig.MAX_STEP_POS_CHANGE_PCT)
+        ),
+        min_position_change=float(
+            getattr(TrainConfig, "MIN_POSITION_CHANGE", LiveRunnerEnvConfig.MIN_POSITION_CHANGE)
+        ),
+        no_trade_entry_threshold=float(
+            getattr(TrainConfig, "NO_TRADE_ENTRY_THRESHOLD", LiveRunnerEnvConfig.NO_TRADE_ENTRY_THRESHOLD)
+        ),
+        no_trade_exit_threshold=float(
+            getattr(TrainConfig, "NO_TRADE_EXIT_THRESHOLD", LiveRunnerEnvConfig.NO_TRADE_EXIT_THRESHOLD)
+        ),
+        risk_base_update_steps=int(
+            getattr(TrainConfig, "WINDOW_SIZE_5M", LiveRunnerEnvConfig.RISK_BASE_UPDATE_STEPS)
+        ),
         render_pos_delta_eps=float(getattr(args, "render_pos_delta_eps", 0.02)),
         render_max_visible_kline_bars=int(max(10, int(getattr(args, "render_max_visible_bars", 500)))),
         render_max_kline_buffer_rows=int(max(50, int(getattr(args, "render_max_kline_buffer_rows", 2000)))),
@@ -555,7 +565,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     # 延遲匯入：避免在單元測試中強制載入重型依賴
     from LiveTradingRunner.runner_core import LiveRunner
 
-    fee_provider = BinanceFeeRateProvider(default_fee_pct=float(getattr(Config, "TRANSACTION_FEE", 0.01)))
+    fee_provider = BinanceFeeRateProvider(default_fee_pct=float(LiveRunnerEnvConfig.DEFAULT_TRANSACTION_FEE_PCT))
     runner = LiveRunner(cfg, fee_provider=fee_provider)
     state_path = str(getattr(args, "state_path", os.path.join(_PROJECT_ROOT, ".live_runner_state.json")))
     state = _load_state(state_path)
@@ -582,64 +592,82 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     run_once_mode = bool(args.once) and (not bool(args.loop))
     if run_once_mode:
-        prev_pos_pct = float(getattr(state, "last_final_pos_pct", 0.0))
-        decision = runner.run_once(state=state)
-        if decision is not None:
-            fee_rate_pct = float(decision.fee_rate_pct) if decision.fee_rate_pct is not None else float(
-                fee_provider.get_fee_rate_percent(symbol=str(cfg.symbol))
-            )
-            _update_paper_equity(
-                state=state,
-                last_price=float(decision.last_price),
-                prev_final_pos_pct=prev_pos_pct,
-                new_final_pos_pct=float(decision.final_pos_pct),
-                fee_rate_pct=fee_rate_pct,
-            )
-            _append_state_csv(csv_path=state_csv_path, decision=decision, state=state, fee_rate_pct=fee_rate_pct)
-            ts_history.append(str(decision.closed_bar_ts))
-            equity_history.append(float(state.paper_equity_usdt))
-            position_history.append(float(decision.final_pos_pct))
-            df_plot = pd.DataFrame(state.kline_session_rows)
-            if not df_plot.empty:
-                df_plot["timestamp"] = pd.to_datetime(df_plot["timestamp"], errors="coerce")
-                df_plot = df_plot.dropna(subset=["timestamp"])
-            gate_labels = _gate_ac_change_labels(state.last_gate_flags, decision.gate_flags)
-            trade_marker = _trade_bs_from_delta(
-                prev_final_pos_pct=prev_pos_pct,
-                new_final_pos_pct=float(decision.final_pos_pct),
-                eps=float(cfg.render_pos_delta_eps),
-            )
-            trade_marker_history.append(trade_marker)
-            gate_labels_rows_history.append(gate_labels)
-            if renderer is not None:
-                renderer.refresh(
-                    closed_bar_ts=str(decision.closed_bar_ts),
-                    paper_equity_usdt=float(state.paper_equity_usdt),
-                    paper_profit_usdt=float(state.paper_equity_usdt - 1000.0),
-                    fee_rate_pct=fee_rate_pct,
-                    final_pos_pct=float(decision.final_pos_pct),
-                    equity_history=list(equity_history),
-                    ts_history=list(ts_history),
-                    df_price=df_plot,
-                    position_history=list(position_history),
-                    trade_marker_history=list(trade_marker_history),
-                    gate_labels_rows_history=list(gate_labels_rows_history),
-                    max_position_pct=float(cfg.max_position_pct),
+        # 預設 argparse：--once 預設 True、--loop 預設 False → 多數人未加參數時只跑 1 次就結束（常被誤以為當掉）
+        print(
+            "[live_loop] 單次模式：本次跑完即結束。若要持續每根新 5m 收盤都跑，請加上參數 `--loop`。",
+            flush=True,
+        )
+        try:
+            prev_pos_pct = float(getattr(state, "last_final_pos_pct", 0.0))
+            decision = runner.run_once(state=state)
+            if decision is not None:
+                fee_rate_pct = float(decision.fee_rate_pct) if decision.fee_rate_pct is not None else float(
+                    fee_provider.get_fee_rate_percent(symbol=str(cfg.symbol))
                 )
-            if decision.gate_flags is not None:
-                state.last_gate_flags = decision.gate_flags
-            print(decision.__dict__)
-            try:
-                _save_state(state_path, state)
-            except OSError:
-                pass
+                _update_paper_equity(
+                    state=state,
+                    last_price=float(decision.last_price),
+                    prev_final_pos_pct=prev_pos_pct,
+                    new_final_pos_pct=float(decision.final_pos_pct),
+                    fee_rate_pct=fee_rate_pct,
+                )
+                _append_state_csv(csv_path=state_csv_path, decision=decision, state=state, fee_rate_pct=fee_rate_pct)
+                ts_history.append(str(decision.closed_bar_ts))
+                equity_history.append(float(state.paper_equity_usdt))
+                position_history.append(float(decision.final_pos_pct))
+                df_plot = pd.DataFrame(state.kline_session_rows)
+                if not df_plot.empty:
+                    df_plot["timestamp"] = pd.to_datetime(df_plot["timestamp"], errors="coerce")
+                    df_plot = df_plot.dropna(subset=["timestamp"])
+                gate_labels = _gate_ac_change_labels(state.last_gate_flags, decision.gate_flags)
+                trade_marker = _trade_bs_from_delta(
+                    prev_final_pos_pct=prev_pos_pct,
+                    new_final_pos_pct=float(decision.final_pos_pct),
+                    eps=float(cfg.render_pos_delta_eps),
+                )
+                trade_marker_history.append(trade_marker)
+                gate_labels_rows_history.append(gate_labels)
+                if renderer is not None:
+                    renderer.refresh(
+                        closed_bar_ts=str(decision.closed_bar_ts),
+                        paper_equity_usdt=float(state.paper_equity_usdt),
+                        paper_profit_usdt=float(state.paper_equity_usdt - 1000.0),
+                        fee_rate_pct=fee_rate_pct,
+                        final_pos_pct=float(decision.final_pos_pct),
+                        equity_history=list(equity_history),
+                        ts_history=list(ts_history),
+                        df_price=df_plot,
+                        position_history=list(position_history),
+                        trade_marker_history=list(trade_marker_history),
+                        gate_labels_rows_history=list(gate_labels_rows_history),
+                        max_position_pct=float(cfg.max_position_pct),
+                    )
+                if decision.gate_flags is not None:
+                    state.last_gate_flags = decision.gate_flags
+                print(decision.__dict__)
+                try:
+                    _save_state(state_path, state)
+                except OSError:
+                    pass
+                if record_fp is not None:
+                    record_fp.write(json.dumps(_tick_decision_json_payload(decision), ensure_ascii=False) + "\n")
+                    record_fp.flush()
+                print("[live_loop] 單次模式：tick 完成，正常結束。", flush=True)
+            else:
+                print(
+                    "[live_loop] 單次模式：無新收盤 5m bar（與 state 中 last_processed 相同），"
+                    "未產生 decision；正常結束。",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"[live_loop] 單次模式錯誤（請看以下訊息或 traceback）: {exc}", flush=True)
+            raise
+        finally:
             if record_fp is not None:
-                record_fp.write(json.dumps(_tick_decision_json_payload(decision), ensure_ascii=False) + "\n")
-                record_fp.flush()
-        if record_fp is not None:
-            record_fp.close()
+                record_fp.close()
         return
 
+    print("[live_loop] 循環模式：持續輪詢（Ctrl+C 結束）。", flush=True)
     startup_force = True
     while True:
         try:
