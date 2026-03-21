@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -19,10 +19,104 @@ from Env.Components.action_processor import ActionProcessor
 from Env.Executors.trade_executor import TradeExecutor
 from Env.config import Config
 from LiveTradingRunner.binance_market_data import LatestBarsResult, fetch_latest_multi_symbol_5m
+from LiveTradingRunner.fee_provider import BinanceFeeRateProvider
 from LiveTradingRunner.live_trading_loop import LiveRunnerConfig, LiveRunnerState, TickDecision
 from LiveTradingRunner.local_1d_loader import load_local_1d_data
 from LiveTradingRunner.obs_builder import LiveObsBuilder
 from LiveTradingRunner.position_sizer import compute_delta_position_qty
+
+
+def extract_closed_target_ohlc(df_5m: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """取得 merged 5m 表中「已收盤」列的目標幣種 OHLC（排除尾端 dummy row）。
+
+    Args:
+        df_5m: `fetch_latest_multi_symbol_5m` 回傳的 merged_plus（最後一列為 dummy）。
+        symbol: 目標交易對，例如 BTCUSDT。
+
+    Returns:
+        欄位為 timestamp/open/high/low/close 的 DataFrame；若資料不足或缺欄則為空表。
+    """
+    if df_5m.shape[0] < 2:
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close"])
+    closed = df_5m.iloc[:-1].copy()
+    pref = str(symbol)
+    o, h, l, c = f"{pref}_open", f"{pref}_high", f"{pref}_low", f"{pref}_close"
+    for col in (o, h, l, c):
+        if col not in closed.columns:
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close"])
+    out = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(closed["timestamp"], errors="coerce"),
+            "open": closed[o].astype(float),
+            "high": closed[h].astype(float),
+            "low": closed[l].astype(float),
+            "close": closed[c].astype(float),
+        }
+    )
+    return out.dropna(subset=["timestamp"]).reset_index(drop=True)
+
+
+def _kline_row_to_dict(row: pd.Series) -> Dict[str, Any]:
+    """將單根 OHLC 列轉成可 JSON 序列化的 dict（timestamp 截斷到秒）。"""
+    ts = row["timestamp"]
+    ts_norm = pd.Timestamp(ts)
+    return {
+        "timestamp": str(ts_norm)[:19],
+        "open": float(row["open"]),
+        "high": float(row["high"]),
+        "low": float(row["low"]),
+        "close": float(row["close"]),
+    }
+
+
+def update_kline_session_buffer(
+    state: LiveRunnerState,
+    *,
+    df_5m: pd.DataFrame,
+    symbol: str,
+    window_size_5m: int,
+    max_buffer_rows: int,
+) -> None:
+    """依本輪 API merged df 更新 state.kline_session_rows（session 內累積繪圖用 K 線）。
+
+    - 緩衝為空時：填入最近 ``window_size_5m`` 根已收盤 K（與 LiveObsBuilder window 對齊）。
+    - 之後每根新收盤 bar：若時間戳與緩衝最後一根不同則 append。
+    - 超過 ``max_buffer_rows`` 時由左側截斷。
+
+    Args:
+        state: 即時 runner 狀態（就地修改 ``kline_session_rows``）。
+        df_5m: merged_plus 5m 寬表。
+        symbol: 目標幣種。
+        window_size_5m: 首次種子視窗長度。
+        max_buffer_rows: session 緩衝列數上限。
+    """
+    closed_df = extract_closed_target_ohlc(df_5m, symbol)
+    if closed_df.empty:
+        return
+    w = int(max(1, window_size_5m))
+    w_eff = int(min(w, len(closed_df)))
+    buf = state.kline_session_rows
+    if not buf:
+        tail = closed_df.iloc[-w_eff:]
+        state.kline_session_rows = [_kline_row_to_dict(tail.iloc[i]) for i in range(len(tail))]
+    else:
+        last_closed = _kline_row_to_dict(closed_df.iloc[-1])
+        if buf[-1].get("timestamp") != last_closed["timestamp"]:
+            buf.append(last_closed)
+    mb = int(max(1, max_buffer_rows))
+    if len(state.kline_session_rows) > mb:
+        state.kline_session_rows = state.kline_session_rows[-mb:]
+
+
+def _gate_flags_tuple_from_obs(obs: dict) -> Optional[Tuple[float, float, float]]:
+    """由 obs 取出 gate_flags (A,B,C) 三元組；缺漏時回傳 None。"""
+    raw = obs.get("gate_flags")
+    if raw is None:
+        return None
+    arr = np.asarray(raw).reshape(-1)
+    if arr.size < 3:
+        return None
+    return (float(arr[0]), float(arr[1]), float(arr[2]))
 
 
 def _build_account_and_context_obs_named(obs: dict) -> Dict[str, Dict[str, float]]:
@@ -97,6 +191,19 @@ class LiveRunner:
     """Live runner 核心類別（後續 todo 會補齊實作）。"""
 
     config: LiveRunnerConfig
+    # 若提供：每步以 Binance Futures ``futures_commission_rate``（需 API Key）取得 taker 費率；失敗則回退 Config
+    fee_provider: Optional[BinanceFeeRateProvider] = None
+
+    def _resolve_live_fee_rate_percent(self) -> float:
+        """本步使用的手續費率（百分比，與 ``Config.TRANSACTION_FEE`` 同口徑）。
+
+        Returns:
+            優先 ``fee_provider.get_fee_rate_percent``（幣安）；未注入 provider 或全失敗時為 ``Config.TRANSACTION_FEE``。
+        """
+        prov = self.fee_provider
+        if prov is not None:
+            return float(prov.get_fee_rate_percent(symbol=str(self.config.symbol)))
+        return float(getattr(Config, "TRANSACTION_FEE", 0.01))
 
     @staticmethod
     def _spaces_from_obs(obs: dict) -> tuple[gym.Space, gym.Space]:
@@ -114,7 +221,7 @@ class LiveRunner:
         act_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
         return obs_space, act_space
 
-    def run_once(self, *, state: LiveRunnerState) -> Optional[TickDecision]:
+    def run_once(self, *, state: LiveRunnerState, force: bool = False) -> Optional[TickDecision]:
         """執行單次 tick。
 
         Returns:
@@ -122,6 +229,7 @@ class LiveRunner:
             - 否則回傳 TickDecision（不代表一定有下單；由 enable_trade_api/dry_run 決定）。
         """
         cfg = self.config
+        fee_pct_live = self._resolve_live_fee_rate_percent()
 
         # --- lazy init (avoid heavy imports in module import time) ---
         if not hasattr(self, "_df_1d"):
@@ -143,7 +251,7 @@ class LiveRunner:
 
         closed_ts = pd.Timestamp(latest.latest_closed_bar_ts)
         closed_ts64 = np.datetime64(closed_ts.to_datetime64())
-        if state.last_processed_closed_ts is not None and closed_ts64 == state.last_processed_closed_ts:
+        if (not bool(force)) and state.last_processed_closed_ts is not None and closed_ts64 == state.last_processed_closed_ts:
             return None
 
         equity = None
@@ -182,7 +290,7 @@ class LiveRunner:
         init_balance = float(equity) if equity is not None else float(getattr(Config, "INITIAL_BALANCE", 1000.0))
         exec_for_action = TradeExecutor(
             initial_balance=float(init_balance),
-            fee_rate=float(getattr(Config, "TRANSACTION_FEE", 0.01)),
+            fee_rate=float(fee_pct_live),
             leverage=float(cfg.leverage),
             min_trade_qty=0.0,  # live 端以交易所 filters 控制最小可成交單位
             maintenance_margin_rate=float(getattr(Config, "MAINTENANCE_MARGIN_RATE", 0.005)),
@@ -203,6 +311,7 @@ class LiveRunner:
             window_size_1d=cfg.window_size_1d,
             leverage=float(cfg.leverage),
             obs_dtype="float32",
+            fee_rate_percent=float(fee_pct_live),
         )
         obs_result = obs_builder.build(
             df_5m=latest.df_5m,
@@ -298,6 +407,21 @@ class LiveRunner:
 
         state.last_processed_closed_ts = closed_ts64
 
+        gate_tuple = _gate_flags_tuple_from_obs(obs_result.obs)
+        max_buf = int(
+            max(
+                100,
+                int(getattr(cfg, "render_max_kline_buffer_rows", 2000) or 2000),
+            )
+        )
+        update_kline_session_buffer(
+            state,
+            df_5m=latest.df_5m,
+            symbol=str(cfg.symbol),
+            window_size_5m=int(cfg.window_size_5m),
+            max_buffer_rows=max_buf,
+        )
+
         return TickDecision(
             closed_bar_ts=str(latest.latest_closed_bar_ts),
             last_price=float(latest.latest_closed_price),
@@ -310,6 +434,8 @@ class LiveRunner:
             target_position_qty=float(target_qty) if target_qty is not None else None,
             delta_qty=float(delta_qty) if delta_qty is not None else None,
             obs_account_context_named=obs_named,
+            gate_flags=gate_tuple,
+            fee_rate_pct=float(fee_pct_live),
         )
 
     @staticmethod

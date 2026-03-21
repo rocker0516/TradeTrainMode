@@ -9,14 +9,17 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
 import time
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Sequence, Tuple
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+import pandas as pd
 
 # 確保可用 `python -m LiveTradingRunner.live_trading_loop` 直接執行
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -25,6 +28,8 @@ if _PROJECT_ROOT not in sys.path:
 
 from Env.config import Config
 from Eval.train_config import TrainConfig
+from LiveTradingRunner.fee_provider import BinanceFeeRateProvider
+from LiveTradingRunner.live_render import LiveRefreshRenderer
 
 
 @dataclass
@@ -62,6 +67,10 @@ class LiveRunnerConfig:
     print_account_info: bool = False
     print_open_positions: bool = False
     print_obs_account_context: bool = False
+    # ---- live matplotlib render ----
+    render_pos_delta_eps: float = 0.02
+    render_max_visible_kline_bars: int = 500
+    render_max_kline_buffer_rows: int = 2000
 
 
 @dataclass
@@ -76,6 +85,14 @@ class LiveRunnerState:
     steps_since_risk_base_update: int = 0
     # 用於 action_repeat：非決策 step 時沿用上一個 final_pos_pct
     last_final_pos_pct: float = 0.0
+    # ---- paper trading state (market_state 以外，供 CSV / render) ----
+    paper_equity_usdt: float = 1000.0
+    last_mark_price: Optional[float] = None
+    cumulative_fee_usdt: float = 0.0
+    # ---- live render：K 線 session 緩衝（與 API merged df 同源）----
+    kline_session_rows: List[Dict[str, Union[str, float]]] = field(default_factory=list)
+    # 上一輪 obs 的 gate_flags（A/B/C），供偵測 A/C 變化；None 表示尚未初始化
+    last_gate_flags: Optional[Tuple[float, float, float]] = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +111,9 @@ class TickDecision:
     delta_qty: Optional[float]
     # debug: named account/context obs snapshot（對齊 Env/Components/observer.py 的欄位順序）
     obs_account_context_named: Optional[Dict[str, Dict[str, float]]] = None
+    gate_flags: Optional[Tuple[float, float, float]] = None
+    # 本步實際用於 obs／紙上損益／圖表標題的手續費率（百分比）；與幣安 API 或 fallback 一致
+    fee_rate_pct: Optional[float] = None
 
 
 def _state_to_json(state: LiveRunnerState) -> Dict[str, Any]:
@@ -105,6 +125,15 @@ def _state_to_json(state: LiveRunnerState) -> Dict[str, Any]:
         "risk_base_usdt": float(state.risk_base_usdt) if state.risk_base_usdt is not None else None,
         "steps_since_risk_base_update": int(getattr(state, "steps_since_risk_base_update", 0)),
         "last_final_pos_pct": float(getattr(state, "last_final_pos_pct", 0.0)),
+        "paper_equity_usdt": float(getattr(state, "paper_equity_usdt", 1000.0)),
+        "last_mark_price": float(state.last_mark_price) if state.last_mark_price is not None else None,
+        "cumulative_fee_usdt": float(getattr(state, "cumulative_fee_usdt", 0.0)),
+        "kline_session_rows": list(getattr(state, "kline_session_rows", []) or []),
+        "last_gate_flags": (
+            None
+            if getattr(state, "last_gate_flags", None) is None
+            else [float(x) for x in getattr(state, "last_gate_flags", ())]
+        ),
     }
 
 
@@ -122,6 +151,33 @@ def _state_from_json(payload: Dict[str, Any]) -> LiveRunnerState:
         last_final_pos_pct = float(payload.get("last_final_pos_pct", 0.0) or 0.0)
     except (TypeError, ValueError):
         last_final_pos_pct = 0.0
+    try:
+        paper_equity_usdt = float(payload.get("paper_equity_usdt", 1000.0) or 1000.0)
+    except (TypeError, ValueError):
+        paper_equity_usdt = 1000.0
+    last_mark_raw = payload.get("last_mark_price", None)
+    try:
+        last_mark_price = None if last_mark_raw is None else float(last_mark_raw)
+    except (TypeError, ValueError):
+        last_mark_price = None
+    try:
+        cumulative_fee_usdt = float(payload.get("cumulative_fee_usdt", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        cumulative_fee_usdt = 0.0
+
+    klines_raw = payload.get("kline_session_rows", [])
+    kline_session_rows: List[Dict[str, Union[str, float]]] = []
+    if isinstance(klines_raw, list):
+        for item in klines_raw:
+            if isinstance(item, dict):
+                kline_session_rows.append(dict(item))
+    lgf_raw = payload.get("last_gate_flags", None)
+    last_gate_flags: Optional[Tuple[float, float, float]] = None
+    if isinstance(lgf_raw, (list, tuple)) and len(lgf_raw) >= 3:
+        try:
+            last_gate_flags = (float(lgf_raw[0]), float(lgf_raw[1]), float(lgf_raw[2]))
+        except (TypeError, ValueError):
+            last_gate_flags = None
 
     if raw is None:
         return LiveRunnerState(
@@ -130,6 +186,11 @@ def _state_from_json(payload: Dict[str, Any]) -> LiveRunnerState:
             risk_base_usdt=risk_base_usdt_f,
             steps_since_risk_base_update=steps_since_risk,
             last_final_pos_pct=last_final_pos_pct,
+            paper_equity_usdt=paper_equity_usdt,
+            last_mark_price=last_mark_price,
+            cumulative_fee_usdt=cumulative_fee_usdt,
+            kline_session_rows=kline_session_rows,
+            last_gate_flags=last_gate_flags,
         )
     try:
         return LiveRunnerState(
@@ -138,6 +199,11 @@ def _state_from_json(payload: Dict[str, Any]) -> LiveRunnerState:
             risk_base_usdt=risk_base_usdt_f,
             steps_since_risk_base_update=steps_since_risk,
             last_final_pos_pct=last_final_pos_pct,
+            paper_equity_usdt=paper_equity_usdt,
+            last_mark_price=last_mark_price,
+            cumulative_fee_usdt=cumulative_fee_usdt,
+            kline_session_rows=kline_session_rows,
+            last_gate_flags=last_gate_flags,
         )
     except (TypeError, ValueError):
         return LiveRunnerState(
@@ -146,7 +212,149 @@ def _state_from_json(payload: Dict[str, Any]) -> LiveRunnerState:
             risk_base_usdt=risk_base_usdt_f,
             steps_since_risk_base_update=steps_since_risk,
             last_final_pos_pct=last_final_pos_pct,
+            paper_equity_usdt=paper_equity_usdt,
+            last_mark_price=last_mark_price,
+            cumulative_fee_usdt=cumulative_fee_usdt,
+            kline_session_rows=kline_session_rows,
+            last_gate_flags=last_gate_flags,
         )
+
+
+def _append_state_csv(
+    *,
+    csv_path: str,
+    decision: TickDecision,
+    state: LiveRunnerState,
+    fee_rate_pct: float,
+) -> None:
+    """Append market_state 以外狀態紀錄到 CSV。"""
+    os.makedirs(os.path.dirname(os.path.abspath(csv_path)), exist_ok=True)
+    fieldnames = [
+        "timestamp",
+        "closed_bar_ts",
+        "last_price",
+        "paper_equity_usdt",
+        "paper_profit_usdt",
+        "cumulative_fee_usdt",
+        "fee_rate_pct",
+        "action_raw",
+        "action_clipped",
+        "target_pos_pct",
+        "final_pos_pct",
+        "decision_step",
+    ]
+    row = {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "closed_bar_ts": str(decision.closed_bar_ts),
+        "last_price": float(decision.last_price),
+        "paper_equity_usdt": float(state.paper_equity_usdt),
+        "paper_profit_usdt": float(state.paper_equity_usdt - 1000.0),
+        "cumulative_fee_usdt": float(state.cumulative_fee_usdt),
+        "fee_rate_pct": float(fee_rate_pct),
+        "action_raw": float(decision.action_raw),
+        "action_clipped": float(decision.action_clipped),
+        "target_pos_pct": float(decision.target_pos_pct),
+        "final_pos_pct": float(decision.final_pos_pct),
+        "decision_step": int(getattr(state, "decision_step", 0)),
+    }
+    file_exists = os.path.exists(csv_path)
+    with open(csv_path, "a", newline="", encoding="utf-8") as fp:
+        writer = csv.DictWriter(fp, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def _trade_bs_from_delta(*, prev_final_pos_pct: float, new_final_pos_pct: float, eps: float) -> Optional[str]:
+    """依淨倉位變化決定價格圖最後一根上的 B/S 標記（不區分翻倉語意）。
+
+    Args:
+        prev_final_pos_pct: 本步前之 effective 倉位比例。
+        new_final_pos_pct: 本步後之 effective 倉位比例。
+        eps: 門檻 ``pos_delta_eps``；若 ``|Δ| < eps`` 則不標記。
+
+    Returns:
+        ``\"B\"``、``\"S\"`` 或 ``None``。
+    """
+    delta = float(new_final_pos_pct) - float(prev_final_pos_pct)
+    if delta > float(eps):
+        return "B"
+    if delta < -float(eps):
+        return "S"
+    return None
+
+
+def _tick_decision_json_payload(decision: TickDecision) -> Dict[str, Any]:
+    """將 ``TickDecision`` 轉成可 ``json.dumps`` 的 dict（tuple → list）。"""
+    d: Dict[str, Any] = dict(decision.__dict__)
+    gf = d.get("gate_flags")
+    if isinstance(gf, tuple):
+        d["gate_flags"] = [float(x) for x in gf]
+    return d
+
+
+def _gate_ac_change_labels(
+    prev: Optional[Tuple[float, float, float]],
+    curr: Optional[Tuple[float, float, float]],
+) -> List[str]:
+    """僅在 gate_A（index 0）或 gate_C（index 2）變化時產生文字標籤；忽略 gate_B。
+
+    Args:
+        prev: 上一輪 ``gate_flags``；``None`` 時不產生標籤（避免首步洗版）。
+        curr: 本輪 ``gate_flags``。
+
+    Returns:
+        例如 ``[\"A:0→1\", \"C:0→-1\"]``。
+    """
+    if prev is None or curr is None:
+        return []
+
+    def _i_gate_a(v: float) -> int:
+        return int(round(float(v)))
+
+    def _i_gate_c(v: float) -> int:
+        return int(round(float(v)))
+
+    labels: List[str] = []
+    if abs(float(curr[0]) - float(prev[0])) > 1e-6:
+        labels.append(f"A:{_i_gate_a(prev[0])}→{_i_gate_a(curr[0])}")
+    if abs(float(curr[2]) - float(prev[2])) > 1e-6:
+        labels.append(f"C:{_i_gate_c(prev[2])}→{_i_gate_c(curr[2])}")
+    return labels
+
+
+def _update_paper_equity(
+    *,
+    state: LiveRunnerState,
+    last_price: float,
+    prev_final_pos_pct: float,
+    new_final_pos_pct: float,
+    fee_rate_pct: float,
+) -> None:
+    """更新紙上資金：先計算持倉收益，再扣除調倉手續費。"""
+    prev_price = state.last_mark_price
+    equity = max(1e-8, float(getattr(state, "paper_equity_usdt", 1000.0)))
+    if prev_price is not None and prev_price > 0:
+        price_ret = (float(last_price) - float(prev_price)) / float(prev_price)
+        equity = equity * (1.0 + float(prev_final_pos_pct) * float(price_ret))
+    turnover = abs(float(new_final_pos_pct) - float(prev_final_pos_pct))
+    fee_paid = max(0.0, equity * turnover * (float(fee_rate_pct) / 100.0))
+    equity = max(1e-8, equity - fee_paid)
+    state.paper_equity_usdt = float(equity)
+    state.cumulative_fee_usdt = float(getattr(state, "cumulative_fee_usdt", 0.0) + fee_paid)
+    state.last_mark_price = float(last_price)
+
+
+def _sleep_with_idle(*, total_seconds: float, renderer: Optional[LiveRefreshRenderer]) -> None:
+    """Sleep while keeping GUI event loop responsive."""
+    remain = float(max(0.0, total_seconds))
+    slice_sec = 0.1
+    while remain > 0.0:
+        if renderer is not None:
+            renderer.idle()
+        step = slice_sec if remain > slice_sec else remain
+        time.sleep(step)
+        remain -= step
 
 
 def _load_state(state_path: str) -> LiveRunnerState:
@@ -179,7 +387,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default=str(getattr(TrainConfig, "MODEL_PATH", "models/sac_lag_BTCUSDT/best_model/best_model.zip")),
+        default=str(getattr(TrainConfig, "MODEL_PATH", "models/best_model.zip")),
         help="Path to SB3 model .zip",
     )
     parser.add_argument("--leverage", type=int, default=10)
@@ -190,35 +398,53 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     # ---- safety switches ----
     parser.add_argument(
         "--enable_trade_api",
-        default=bool(getattr(TrainConfig, "ENABLE_TRADE_API", True)),
-        action="store_true",
+        default=bool(getattr(TrainConfig, "ENABLE_TRADE_API", False)),
+        action=argparse.BooleanOptionalAction,
         help="Enable real trading API calls (account/positions/orders). Default OFF for safety.",
     )
     parser.add_argument(
         "--dry_run",
         default=bool(getattr(TrainConfig, "DRY_RUN", True)),
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         help="If set, do not place real orders even when --enable_trade_api is ON.",
     )
     parser.add_argument(
         "--print_account_info",
-        default=bool(getattr(TrainConfig, "PRINT_ACCOUNT_INFO", True)),
-        action="store_true",
+        default=bool(getattr(TrainConfig, "PRINT_ACCOUNT_INFO", False)),
+        action=argparse.BooleanOptionalAction,
         help="Debug: print account summary each tick (only when --enable_trade_api).",
     )
     parser.add_argument(
         "--print_open_positions",
-        default=bool(getattr(TrainConfig, "PRINT_OPEN_POSITIONS", True)),
-        action="store_true",
+        default=bool(getattr(TrainConfig, "PRINT_OPEN_POSITIONS", False)),
+        action=argparse.BooleanOptionalAction,
         help="Debug: print open positions each tick (only when --enable_trade_api).",
     )
     parser.add_argument(
         "--print_obs_account_context",
-        default=True,
-        action="store_true",
+        default=False,
+        action=argparse.BooleanOptionalAction,
         help="Debug: print obs values for account_state/cost_state each tick.",
     )
     parser.add_argument("--default_min_notional_usdt", type=float, default=10.0)
+    parser.add_argument(
+        "--feature_symbols_csv",
+        type=str,
+        default="",
+        help="Comma-separated feature symbols override. Empty = use TrainConfig.FEATURE_SYMBOLS.",
+    )
+    parser.add_argument(
+        "--window_size_5m",
+        type=int,
+        default=0,
+        help="Override live obs 5m window size. 0 = use default source.",
+    )
+    parser.add_argument(
+        "--window_size_1d",
+        type=int,
+        default=0,
+        help="Override live obs 1d window size. 0 = use default source.",
+    )
     parser.add_argument(
         "--state_path",
         type=str,
@@ -230,6 +456,36 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=str,
         default="",
         help="If set, write tick outputs as JSONL into this directory (safe to stop/restart).",
+    )
+    parser.add_argument(
+        "--state_csv_path",
+        type=str,
+        default=os.path.join(_PROJECT_ROOT, "logs", "live_state_history.csv"),
+        help="Append-only CSV path for non-market_state live states.",
+    )
+    parser.add_argument(
+        "--render",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Open one refresh window for live chart/PNL.",
+    )
+    parser.add_argument(
+        "--render_max_visible_bars",
+        type=int,
+        default=500,
+        help="Max closed 5m bars shown on live price chart (tail of session buffer).",
+    )
+    parser.add_argument(
+        "--render_max_kline_buffer_rows",
+        type=int,
+        default=2000,
+        help="Max rows persisted in session K-line buffer (state JSON).",
+    )
+    parser.add_argument(
+        "--render_pos_delta_eps",
+        type=float,
+        default=0.02,
+        help="Min |Δfinal_pos_pct| to annotate B/S on the decision bar.",
     )
 
     # ---- mode ----
@@ -247,6 +503,20 @@ def _build_config(args: argparse.Namespace) -> LiveRunnerConfig:
     model_path = str(args.model)
     if not os.path.isabs(model_path):
         model_path = os.path.abspath(os.path.join(_PROJECT_ROOT, model_path))
+    if str(getattr(args, "feature_symbols_csv", "")).strip():
+        feature_symbols = tuple(
+            part.strip().upper()
+            for part in str(args.feature_symbols_csv).split(",")
+            if part.strip()
+        )
+    else:
+        feature_symbols = tuple(getattr(TrainConfig, "FEATURE_SYMBOLS", (str(args.symbol),)))
+
+    default_w5m = int(getattr(TrainConfig, "WINDOW_SIZE_5M", 14))
+    default_w1d = int(getattr(TrainConfig, "WINDOW_SIZE_1D", 12))
+    w5m = int(getattr(args, "window_size_5m", 0) or 0)
+    w1d = int(getattr(args, "window_size_1d", 0) or 0)
+
     return LiveRunnerConfig(
         symbol=str(args.symbol),
         model_path=str(model_path),
@@ -260,9 +530,9 @@ def _build_config(args: argparse.Namespace) -> LiveRunnerConfig:
         print_open_positions=bool(getattr(args, "print_open_positions", True)),
         print_obs_account_context=bool(getattr(args, "print_obs_account_context", False)),
         default_min_notional_usdt=float(args.default_min_notional_usdt),
-        feature_symbols=tuple(getattr(TrainConfig, "FEATURE_SYMBOLS", (str(args.symbol),))),
-        window_size_5m=int(getattr(TrainConfig, "WINDOW_SIZE_5M", 288)),
-        window_size_1d=int(getattr(TrainConfig, "WINDOW_SIZE_1D", 14)),
+        feature_symbols=feature_symbols,
+        window_size_5m=int(w5m if w5m > 0 else default_w5m),
+        window_size_1d=int(w1d if w1d > 0 else default_w1d),
         # align with Train/run_sac_lag.py wrappers & env_kwargs
         action_repeat=int(getattr(TrainConfig, "ACTION_REPEAT", 1)),
         max_step_pos_change_pct=float(getattr(Config, "MAX_STEP_POS_CHANGE_PCT", 0.0)),
@@ -270,6 +540,9 @@ def _build_config(args: argparse.Namespace) -> LiveRunnerConfig:
         no_trade_entry_threshold=float(getattr(TrainConfig, "NO_TRADE_ENTRY_THRESHOLD", getattr(Config, "NO_TRADE_ENTRY_THRESHOLD", 0.0))),
         no_trade_exit_threshold=float(getattr(TrainConfig, "NO_TRADE_EXIT_THRESHOLD", getattr(Config, "NO_TRADE_EXIT_THRESHOLD", 0.0))),
         risk_base_update_steps=int(getattr(TrainConfig, "WINDOW_SIZE_5M", getattr(Config, "RISK_BASE_UPDATE_STEPS", 288))),
+        render_pos_delta_eps=float(getattr(args, "render_pos_delta_eps", 0.02)),
+        render_max_visible_kline_bars=int(max(10, int(getattr(args, "render_max_visible_bars", 500)))),
+        render_max_kline_buffer_rows=int(max(50, int(getattr(args, "render_max_kline_buffer_rows", 2000)))),
     )
 
 
@@ -282,49 +555,165 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     # 延遲匯入：避免在單元測試中強制載入重型依賴
     from LiveTradingRunner.runner_core import LiveRunner
 
-    runner = LiveRunner(cfg)
+    fee_provider = BinanceFeeRateProvider(default_fee_pct=float(getattr(Config, "TRANSACTION_FEE", 0.01)))
+    runner = LiveRunner(cfg, fee_provider=fee_provider)
     state_path = str(getattr(args, "state_path", os.path.join(_PROJECT_ROOT, ".live_runner_state.json")))
     state = _load_state(state_path)
 
     record_dir = str(getattr(args, "record_dir", "")).strip()
+    state_csv_path = str(getattr(args, "state_csv_path", os.path.join(_PROJECT_ROOT, "logs", "live_state_history.csv")))
+    render_enabled = bool(getattr(args, "render", True))
+    hist_max = int(max(100, int(cfg.render_max_visible_kline_bars) + 64))
+    renderer = LiveRefreshRenderer(
+        symbol=str(cfg.symbol),
+        max_visible_bars=int(cfg.render_max_visible_kline_bars),
+        data_dir=os.path.join(_PROJECT_ROOT, "Data"),
+    ) if render_enabled else None
+    equity_history: deque[float] = deque(maxlen=hist_max)
+    ts_history: deque[str] = deque(maxlen=hist_max)
+    position_history: deque[float] = deque(maxlen=hist_max)
+    # 與 equity 同長：每步一筆，供價格圖在每根對應 K 上持續顯示 B/S 與 GATE A/C
+    trade_marker_history: deque[Optional[str]] = deque(maxlen=hist_max)
+    gate_labels_rows_history: deque[List[str]] = deque(maxlen=hist_max)
     record_fp = None
     if record_dir:
         os.makedirs(record_dir, exist_ok=True)
         record_fp = open(os.path.join(record_dir, "ticks.jsonl"), "a", encoding="utf-8")
 
-    if bool(args.once):
+    run_once_mode = bool(args.once) and (not bool(args.loop))
+    if run_once_mode:
+        prev_pos_pct = float(getattr(state, "last_final_pos_pct", 0.0))
         decision = runner.run_once(state=state)
         if decision is not None:
+            fee_rate_pct = float(decision.fee_rate_pct) if decision.fee_rate_pct is not None else float(
+                fee_provider.get_fee_rate_percent(symbol=str(cfg.symbol))
+            )
+            _update_paper_equity(
+                state=state,
+                last_price=float(decision.last_price),
+                prev_final_pos_pct=prev_pos_pct,
+                new_final_pos_pct=float(decision.final_pos_pct),
+                fee_rate_pct=fee_rate_pct,
+            )
+            _append_state_csv(csv_path=state_csv_path, decision=decision, state=state, fee_rate_pct=fee_rate_pct)
+            ts_history.append(str(decision.closed_bar_ts))
+            equity_history.append(float(state.paper_equity_usdt))
+            position_history.append(float(decision.final_pos_pct))
+            df_plot = pd.DataFrame(state.kline_session_rows)
+            if not df_plot.empty:
+                df_plot["timestamp"] = pd.to_datetime(df_plot["timestamp"], errors="coerce")
+                df_plot = df_plot.dropna(subset=["timestamp"])
+            gate_labels = _gate_ac_change_labels(state.last_gate_flags, decision.gate_flags)
+            trade_marker = _trade_bs_from_delta(
+                prev_final_pos_pct=prev_pos_pct,
+                new_final_pos_pct=float(decision.final_pos_pct),
+                eps=float(cfg.render_pos_delta_eps),
+            )
+            trade_marker_history.append(trade_marker)
+            gate_labels_rows_history.append(gate_labels)
+            if renderer is not None:
+                renderer.refresh(
+                    closed_bar_ts=str(decision.closed_bar_ts),
+                    paper_equity_usdt=float(state.paper_equity_usdt),
+                    paper_profit_usdt=float(state.paper_equity_usdt - 1000.0),
+                    fee_rate_pct=fee_rate_pct,
+                    final_pos_pct=float(decision.final_pos_pct),
+                    equity_history=list(equity_history),
+                    ts_history=list(ts_history),
+                    df_price=df_plot,
+                    position_history=list(position_history),
+                    trade_marker_history=list(trade_marker_history),
+                    gate_labels_rows_history=list(gate_labels_rows_history),
+                    max_position_pct=float(cfg.max_position_pct),
+                )
+            if decision.gate_flags is not None:
+                state.last_gate_flags = decision.gate_flags
             print(decision.__dict__)
             try:
                 _save_state(state_path, state)
             except OSError:
                 pass
             if record_fp is not None:
-                record_fp.write(json.dumps(decision.__dict__, ensure_ascii=False) + "\n")
+                record_fp.write(json.dumps(_tick_decision_json_payload(decision), ensure_ascii=False) + "\n")
                 record_fp.flush()
         if record_fp is not None:
             record_fp.close()
         return
 
+    startup_force = True
     while True:
         try:
-            decision = runner.run_once(state=state)
+            prev_pos_pct = float(getattr(state, "last_final_pos_pct", 0.0))
+            decision = runner.run_once(state=state, force=startup_force)
+            startup_force = False
             if decision is not None:
+                fee_rate_pct = float(decision.fee_rate_pct) if decision.fee_rate_pct is not None else float(
+                    fee_provider.get_fee_rate_percent(symbol=str(cfg.symbol))
+                )
+                _update_paper_equity(
+                    state=state,
+                    last_price=float(decision.last_price),
+                    prev_final_pos_pct=prev_pos_pct,
+                    new_final_pos_pct=float(decision.final_pos_pct),
+                    fee_rate_pct=fee_rate_pct,
+                )
+                _append_state_csv(csv_path=state_csv_path, decision=decision, state=state, fee_rate_pct=fee_rate_pct)
+                ts_history.append(str(decision.closed_bar_ts))
+                equity_history.append(float(state.paper_equity_usdt))
+                position_history.append(float(decision.final_pos_pct))
+                df_plot = pd.DataFrame(state.kline_session_rows)
+                if not df_plot.empty:
+                    df_plot["timestamp"] = pd.to_datetime(df_plot["timestamp"], errors="coerce")
+                    df_plot = df_plot.dropna(subset=["timestamp"])
+                gate_labels = _gate_ac_change_labels(state.last_gate_flags, decision.gate_flags)
+                trade_marker = _trade_bs_from_delta(
+                    prev_final_pos_pct=prev_pos_pct,
+                    new_final_pos_pct=float(decision.final_pos_pct),
+                    eps=float(cfg.render_pos_delta_eps),
+                )
+                trade_marker_history.append(trade_marker)
+                gate_labels_rows_history.append(gate_labels)
+                if renderer is not None:
+                    renderer.refresh(
+                        closed_bar_ts=str(decision.closed_bar_ts),
+                        paper_equity_usdt=float(state.paper_equity_usdt),
+                        paper_profit_usdt=float(state.paper_equity_usdt - 1000.0),
+                        fee_rate_pct=fee_rate_pct,
+                        final_pos_pct=float(decision.final_pos_pct),
+                        equity_history=list(equity_history),
+                        ts_history=list(ts_history),
+                        df_price=df_plot,
+                        position_history=list(position_history),
+                        trade_marker_history=list(trade_marker_history),
+                        gate_labels_rows_history=list(gate_labels_rows_history),
+                        max_position_pct=float(cfg.max_position_pct),
+                    )
+                if decision.gate_flags is not None:
+                    state.last_gate_flags = decision.gate_flags
                 print(decision.__dict__)
                 try:
                     _save_state(state_path, state)
                 except OSError:
                     pass
                 if record_fp is not None:
-                    record_fp.write(json.dumps(decision.__dict__, ensure_ascii=False) + "\n")
+                    record_fp.write(json.dumps(_tick_decision_json_payload(decision), ensure_ascii=False) + "\n")
                     record_fp.flush()
-            time.sleep(cfg.poll_interval_sec)
+            else:
+                # 無新 bar：只維持視窗事件循環，不重畫圖，避免閃爍
+                if renderer is not None:
+                    renderer.idle()
+            _sleep_with_idle(total_seconds=float(cfg.poll_interval_sec), renderer=renderer)
         except KeyboardInterrupt:
             print("使用者中斷，結束。")
             if record_fp is not None:
                 record_fp.close()
             return
+        except Exception as exc:
+            # 網路/DNS 等暫時性錯誤不應讓 loop 終止；等待後自動重試
+            print(f"[live_loop] transient error: {exc}", flush=True)
+            if renderer is not None:
+                renderer.idle()
+            _sleep_with_idle(total_seconds=float(cfg.poll_interval_sec), renderer=renderer)
 
 
 if __name__ == "__main__":

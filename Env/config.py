@@ -47,13 +47,13 @@ class Config:
     #    cost_fric_scale 與 lambda_fee_max 需平衡：太低易過度交易；太高主線 log-return 被懲罰淹沒。
     # 5) 驗收：eval JSON 中 termination_reason_counts["balance_insufficient"]==0 且
     #    summary["profit"]["mean"]>0（或 log_return_sum mean>0）；勿只靠調低 MIN_BALANCE「假裝不死」。
-    MIN_POSITION_CHANGE: float = 0.02  # 最小調倉幅度 deadband（0 = 不啟用）
-    MAX_STEP_POS_CHANGE_PCT: float = 1.0  # 單步最大持倉比例變化（0.5 = 50%）
+    MIN_POSITION_CHANGE: float = 0.05  # 最小調倉幅度 deadband（0 = 不啟用）
+    MAX_STEP_POS_CHANGE_PCT: float = 0.5  # 單步最大持倉比例變化（0.5 = 50%）
     MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（供 ActionClipWrapper 等使用）
 
     # No-trade 雙門檻（hysteresis）：空倉時 |action| < ENTRY 不進場；有倉時 |action| < EXIT 易回空倉
-    NO_TRADE_ENTRY_THRESHOLD: float = 0.4
-    NO_TRADE_EXIT_THRESHOLD: float = 0.02
+    NO_TRADE_ENTRY_THRESHOLD: float = 0.3
+    NO_TRADE_EXIT_THRESHOLD: float = 0.05
 
     # -------------------------------------------------------------------------
     # 主線獎勵：順向交易獎勵（Conviction Trend Bonus）

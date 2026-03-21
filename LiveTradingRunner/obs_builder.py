@@ -60,6 +60,7 @@ class LiveObsBuilder:
         window_size_1d: int,
         leverage: float,
         obs_dtype: str = "float32",
+        fee_rate_percent: Optional[float] = None,
     ) -> None:
         self.target_symbol = str(target_symbol)
         self.feature_symbols = tuple(feature_symbols)
@@ -67,6 +68,8 @@ class LiveObsBuilder:
         self.window_size_1d = int(window_size_1d)
         self.leverage = float(leverage)
         self.obs_dtype = str(obs_dtype)
+        # 與 Config.TRANSACTION_FEE 同單位（百分比，0.04 = 0.04%）；None 時沿用 Config（訓練對齊）
+        self._fee_rate_percent = None if fee_rate_percent is None else float(fee_rate_percent)
 
     def build(
         self,
@@ -109,9 +112,14 @@ class LiveObsBuilder:
 
         # executor：用 Env 內同款邏輯生成 account/cost/risk 特徵
         init_balance = float(equity_usdt) if equity_usdt is not None else float(Config.INITIAL_BALANCE)
+        fee_for_obs = (
+            float(self._fee_rate_percent)
+            if self._fee_rate_percent is not None
+            else float(getattr(Config, "TRANSACTION_FEE", 0.01))
+        )
         executor = TradeExecutor(
             initial_balance=init_balance,
-            fee_rate=float(getattr(Config, "TRANSACTION_FEE", 0.01)),
+            fee_rate=fee_for_obs,
             leverage=float(self.leverage),
             min_trade_qty=0.001,
             maintenance_margin_rate=float(getattr(Config, "MAINTENANCE_MARGIN_RATE", 0.005)),

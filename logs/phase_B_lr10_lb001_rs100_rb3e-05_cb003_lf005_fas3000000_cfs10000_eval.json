@@ -1,0 +1,267 @@
+{
+  "timestamp": "2026-03-20T19:42:20.776024Z",
+  "reason": "training_end",
+  "step": 9000000,
+  "episodes": 10,
+  "deterministic": true,
+  "results": [
+    {
+      "episode_log_return_sum": 1.9870164793630476,
+      "final_balance": 7293.7402432324525,
+      "episode_cost_risk_sum": 0.0,
+      "episode_cost_risk_dense_sum": 1400.2186878654782,
+      "override_rate": 0.0,
+      "tracking_error": 0.1899219565816636,
+      "execution_rate": 0.41207437275985664,
+      "episode_index": 0,
+      "episode_steps": 8928,
+      "termination_reason": "max_steps_reached",
+      "profit": 6293.7402432324525,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.624064482560718,
+      "episode_trade_count": 3679,
+      "total_fees": 3960.116625512163,
+      "episode_start_timestamp": "2024-04-19 03:05:00"
+    },
+    {
+      "episode_log_return_sum": 5.324285854816443,
+      "final_balance": 205261.72144050678,
+      "episode_cost_risk_sum": 0.0,
+      "episode_cost_risk_dense_sum": 164.37509976923488,
+      "override_rate": 0.0,
+      "tracking_error": 0.19279334356937955,
+      "execution_rate": 0.46830197132616486,
+      "episode_index": 1,
+      "episode_steps": 8928,
+      "termination_reason": "max_steps_reached",
+      "profit": 204261.72144050678,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.2744786190587679,
+      "episode_trade_count": 4181,
+      "total_fees": 71534.70168872565,
+      "episode_start_timestamp": "2025-11-13 18:30:00"
+    },
+    {
+      "episode_log_return_sum": 4.487737803356561,
+      "final_balance": 88920.06351207077,
+      "episode_cost_risk_sum": 0.0,
+      "episode_cost_risk_dense_sum": 100.99879759757528,
+      "override_rate": 0.0,
+      "tracking_error": 0.21214009536198797,
+      "execution_rate": 0.5017921146953405,
+      "episode_index": 2,
+      "episode_steps": 8928,
+      "termination_reason": "max_steps_reached",
+      "profit": 87920.06351207077,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.23074193973063234,
+      "episode_trade_count": 4480,
+      "total_fees": 27924.068394985065,
+      "episode_start_timestamp": "2024-08-18 16:45:00"
+    },
+    {
+      "episode_log_return_sum": 3.3341228749948524,
+      "final_balance": 28053.765769641697,
+      "episode_cost_risk_sum": 0.0,
+      "episode_cost_risk_dense_sum": 70.07544704763643,
+      "override_rate": 0.0,
+      "tracking_error": 0.18665848883798714,
+      "execution_rate": 0.4754704301075269,
+      "episode_index": 3,
+      "episode_steps": 8928,
+      "termination_reason": "max_steps_reached",
+      "profit": 27053.765769641697,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.40693250055979757,
+      "episode_trade_count": 4245,
+      "total_fees": 12853.11126681626,
+      "episode_start_timestamp": "2024-05-14 19:20:00"
+    },
+    {
+      "episode_log_return_sum": -0.5125130144432036,
+      "final_balance": 598.988419299615,
+      "episode_cost_risk_sum": 1.9483646953405018,
+      "episode_cost_risk_dense_sum": 298.7631084152414,
+      "override_rate": 0.0,
+      "tracking_error": 0.1629247217183232,
+      "execution_rate": 0.3188720173535792,
+      "episode_index": 4,
+      "episode_steps": 461,
+      "termination_reason": "balance_insufficient",
+      "profit": -401.011580700385,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.40557000943190097,
+      "episode_trade_count": 147,
+      "total_fees": 69.81349267589295,
+      "episode_start_timestamp": "2024-04-11 02:05:00"
+    },
+    {
+      "episode_log_return_sum": 5.749618273249803,
+      "final_balance": 314070.7481942886,
+      "episode_cost_risk_sum": 0.0,
+      "episode_cost_risk_dense_sum": 72.5418801288771,
+      "override_rate": 0.0,
+      "tracking_error": 0.19342338419640626,
+      "execution_rate": 0.4662858422939068,
+      "episode_index": 5,
+      "episode_steps": 8928,
+      "termination_reason": "max_steps_reached",
+      "profit": 313070.7481942886,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.2608181645499464,
+      "episode_trade_count": 4163,
+      "total_fees": 98285.17802869108,
+      "episode_start_timestamp": "2025-11-12 23:10:00"
+    },
+    {
+      "episode_log_return_sum": -0.5139360598654946,
+      "final_balance": 598.1366377771659,
+      "episode_cost_risk_sum": 1.8472222222222223,
+      "episode_cost_risk_dense_sum": 628.6493356515366,
+      "override_rate": 0.0,
+      "tracking_error": 0.16523345668460174,
+      "execution_rate": 0.31085043988269795,
+      "episode_index": 6,
+      "episode_steps": 1364,
+      "termination_reason": "balance_insufficient",
+      "profit": -401.8633622228341,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.5056282041870626,
+      "episode_trade_count": 424,
+      "total_fees": 203.17683611234125,
+      "episode_start_timestamp": "2024-03-27 22:15:00"
+    },
+    {
+      "episode_log_return_sum": 4.436528077563826,
+      "final_balance": 84481.12000997095,
+      "episode_cost_risk_sum": 0.0,
+      "episode_cost_risk_dense_sum": 39.5758299842666,
+      "override_rate": 0.0,
+      "tracking_error": 0.20606055678704333,
+      "execution_rate": 0.4717741935483871,
+      "episode_index": 7,
+      "episode_steps": 8928,
+      "termination_reason": "max_steps_reached",
+      "profit": 83481.12000997095,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.2925656312424843,
+      "episode_trade_count": 4212,
+      "total_fees": 32559.876387483157,
+      "episode_start_timestamp": "2025-01-26 20:05:00"
+    },
+    {
+      "episode_log_return_sum": -0.5295081013725135,
+      "final_balance": 588.8945748774311,
+      "episode_cost_risk_sum": 1.456429211469534,
+      "episode_cost_risk_dense_sum": 1602.587920498818,
+      "override_rate": 0.0,
+      "tracking_error": 0.16723932914717368,
+      "execution_rate": 0.34494127343910985,
+      "episode_index": 8,
+      "episode_steps": 4853,
+      "termination_reason": "balance_insufficient",
+      "profit": -411.10542512256893,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.6549893035573534,
+      "episode_trade_count": 1674,
+      "total_fees": 884.9644607455912,
+      "episode_start_timestamp": "2024-02-04 22:00:00"
+    },
+    {
+      "episode_log_return_sum": 7.053639438522,
+      "final_balance": 1157062.145675791,
+      "episode_cost_risk_sum": 0.0,
+      "episode_cost_risk_dense_sum": 65.66188088878631,
+      "override_rate": 0.0,
+      "tracking_error": 0.22426366978069756,
+      "execution_rate": 0.46449372759856633,
+      "episode_index": 9,
+      "episode_steps": 8928,
+      "termination_reason": "max_steps_reached",
+      "profit": 1156062.145675791,
+      "initial_balance": 1000.0,
+      "episode_max_dd": 0.24337060235408112,
+      "episode_trade_count": 4147,
+      "total_fees": 419742.84203243506,
+      "episode_start_timestamp": "2024-07-25 19:15:00"
+    }
+  ],
+  "summary": {
+    "episode_log_return_sum": {
+      "mean": 3.081699162618532,
+      "std": 2.681149430640834,
+      "min": -0.5295081013725135,
+      "max": 7.053639438522
+    },
+    "final_balance": {
+      "mean": 188692.93244774564,
+      "std": 337550.0709026319,
+      "min": 588.8945748774311,
+      "max": 1157062.145675791
+    },
+    "episode_cost_risk_sum": {
+      "mean": 0.5252016129032258,
+      "std": 0.8106277586155782,
+      "min": 0.0,
+      "max": 1.9483646953405018
+    },
+    "episode_cost_risk_dense_sum": {
+      "mean": 444.344798784745,
+      "std": 556.0761952272012,
+      "min": 39.5758299842666,
+      "max": 1602.587920498818
+    },
+    "override_rate": {
+      "mean": 0.0,
+      "std": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    "tracking_error": {
+      "mean": 0.19006590026652642,
+      "std": 0.019537849318963962,
+      "min": 0.1629247217183232,
+      "max": 0.22426366978069756
+    },
+    "execution_rate": {
+      "mean": 0.42348563830051356,
+      "std": 0.06827756863795643,
+      "min": 0.31085043988269795,
+      "max": 0.5017921146953405
+    },
+    "episode_steps": {
+      "mean": 6917.4,
+      "std": 3241.6768253482637,
+      "min": 461.0,
+      "max": 8928.0
+    },
+    "profit": {
+      "mean": 187692.93244774564,
+      "std": 337550.0709026319,
+      "min": -411.10542512256893,
+      "max": 1156062.145675791
+    },
+    "episode_max_dd": {
+      "mean": 0.3899159457232745,
+      "std": 0.15009808826637722,
+      "min": 0.23074193973063234,
+      "max": 0.6549893035573534
+    },
+    "episode_trade_count": {
+      "mean": 3135.2,
+      "std": 1615.0609771770228,
+      "min": 147.0,
+      "max": 4480.0
+    },
+    "total_fees": {
+      "mean": 66801.78492141822,
+      "std": 121802.32837359312,
+      "min": 69.81349267589295,
+      "max": 419742.84203243506
+    }
+  },
+  "termination_reason_counts": {
+    "max_steps_reached": 7,
+    "balance_insufficient": 3
+  }
+}

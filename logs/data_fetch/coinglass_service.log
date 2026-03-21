@@ -1,0 +1,11 @@
+2026-03-21 04:33:04,883 | INFO | Cycle 1 started
+2026-03-21 04:33:04,998 | INFO | Fetching BTCUSDT from 2026-03-20 00:00:00 to 2026-03-20 04:33:04.883685
+2026-03-21 04:33:17,877 | INFO | Saved Data/BTCUSDT_futures_volume_coinglass_5years_1d.csv
+2026-03-21 04:33:18,887 | INFO | Fetching ETHUSDT from 2026-03-20 00:00:00 to 2026-03-20 04:33:04.883685
+2026-03-21 04:33:31,588 | INFO | Saved Data/ETHUSDT_futures_volume_coinglass_5years_1d.csv
+2026-03-21 04:33:32,603 | INFO | Fetching SOLUSDT from 2026-03-20 00:00:00 to 2026-03-20 04:33:04.883685
+2026-03-21 04:33:45,276 | INFO | Saved Data/SOLUSDT_futures_volume_coinglass_5years_1d.csv
+2026-03-21 04:33:46,287 | INFO | Fetching DOGEUSDT from 2026-03-20 00:00:00 to 2026-03-20 04:33:04.883685
+2026-03-21 04:33:58,949 | INFO | Saved Data/DOGEUSDT_futures_volume_coinglass_5years_1d.csv
+2026-03-21 04:33:59,958 | INFO | 1000PEPEUSDT is up to date, skip.
+2026-03-21 04:34:04,478 | INFO | Sleeping 86400s
