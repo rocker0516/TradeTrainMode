@@ -30,6 +30,7 @@ from Eval.train_config import TrainConfig
 from LiveTradingRunner.live_runner_env_config import LiveRunnerEnvConfig
 from LiveTradingRunner.fee_provider import BinanceFeeRateProvider
 from LiveTradingRunner.live_render import LiveRefreshRenderer
+from LiveTradingRunner.render_history_utils import gate_ac_change_labels, trade_bs_from_delta
 
 
 @dataclass
@@ -265,25 +266,6 @@ def _append_state_csv(
         writer.writerow(row)
 
 
-def _trade_bs_from_delta(*, prev_final_pos_pct: float, new_final_pos_pct: float, eps: float) -> Optional[str]:
-    """依淨倉位變化決定價格圖最後一根上的 B/S 標記（不區分翻倉語意）。
-
-    Args:
-        prev_final_pos_pct: 本步前之 effective 倉位比例。
-        new_final_pos_pct: 本步後之 effective 倉位比例。
-        eps: 門檻 ``pos_delta_eps``；若 ``|Δ| < eps`` 則不標記。
-
-    Returns:
-        ``\"B\"``、``\"S\"`` 或 ``None``。
-    """
-    delta = float(new_final_pos_pct) - float(prev_final_pos_pct)
-    if delta > float(eps):
-        return "B"
-    if delta < -float(eps):
-        return "S"
-    return None
-
-
 def _tick_decision_json_payload(decision: TickDecision) -> Dict[str, Any]:
     """將 ``TickDecision`` 轉成可 ``json.dumps`` 的 dict（tuple → list）。"""
     d: Dict[str, Any] = dict(decision.__dict__)
@@ -291,36 +273,6 @@ def _tick_decision_json_payload(decision: TickDecision) -> Dict[str, Any]:
     if isinstance(gf, tuple):
         d["gate_flags"] = [float(x) for x in gf]
     return d
-
-
-def _gate_ac_change_labels(
-    prev: Optional[Tuple[float, float, float]],
-    curr: Optional[Tuple[float, float, float]],
-) -> List[str]:
-    """僅在 gate_A（index 0）或 gate_C（index 2）變化時產生文字標籤；忽略 gate_B。
-
-    Args:
-        prev: 上一輪 ``gate_flags``；``None`` 時不產生標籤（避免首步洗版）。
-        curr: 本輪 ``gate_flags``。
-
-    Returns:
-        例如 ``[\"A:0→1\", \"C:0→-1\"]``。
-    """
-    if prev is None or curr is None:
-        return []
-
-    def _i_gate_a(v: float) -> int:
-        return int(round(float(v)))
-
-    def _i_gate_c(v: float) -> int:
-        return int(round(float(v)))
-
-    labels: List[str] = []
-    if abs(float(curr[0]) - float(prev[0])) > 1e-6:
-        labels.append(f"A:{_i_gate_a(prev[0])}→{_i_gate_a(curr[0])}")
-    if abs(float(curr[2]) - float(prev[2])) > 1e-6:
-        labels.append(f"C:{_i_gate_c(prev[2])}→{_i_gate_c(curr[2])}")
-    return labels
 
 
 def _update_paper_equity(
@@ -619,8 +571,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 if not df_plot.empty:
                     df_plot["timestamp"] = pd.to_datetime(df_plot["timestamp"], errors="coerce")
                     df_plot = df_plot.dropna(subset=["timestamp"])
-                gate_labels = _gate_ac_change_labels(state.last_gate_flags, decision.gate_flags)
-                trade_marker = _trade_bs_from_delta(
+                gate_labels = gate_ac_change_labels(state.last_gate_flags, decision.gate_flags)
+                trade_marker = trade_bs_from_delta(
                     prev_final_pos_pct=prev_pos_pct,
                     new_final_pos_pct=float(decision.final_pos_pct),
                     eps=float(cfg.render_pos_delta_eps),
@@ -693,8 +645,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 if not df_plot.empty:
                     df_plot["timestamp"] = pd.to_datetime(df_plot["timestamp"], errors="coerce")
                     df_plot = df_plot.dropna(subset=["timestamp"])
-                gate_labels = _gate_ac_change_labels(state.last_gate_flags, decision.gate_flags)
-                trade_marker = _trade_bs_from_delta(
+                gate_labels = gate_ac_change_labels(state.last_gate_flags, decision.gate_flags)
+                trade_marker = trade_bs_from_delta(
                     prev_final_pos_pct=prev_pos_pct,
                     new_final_pos_pct=float(decision.final_pos_pct),
                     eps=float(cfg.render_pos_delta_eps),

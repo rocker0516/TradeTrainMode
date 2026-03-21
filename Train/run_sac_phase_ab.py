@@ -37,6 +37,10 @@ from Eval.eval_triggers import (
 )
 from Eval.phase_ab_env_config import PhaseABEnvConfig
 from Eval.phase_ab_evaluator import PhaseABEvaluator, build_single_env_builder
+from Eval.post_train_holdout_rollout import (
+    post_train_max_episode_steps_cap,
+    run_holdout_rollout_and_show_live_render,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -848,7 +852,7 @@ def main() -> None:
     parser.add_argument(
         "--cost-fric-scale",
         type=float,
-        default=10_000.0,
+        default=1000.0,
         help="Phase B 時 cost_fric 放大係數；原始 cost_fric=step_fee/equity 約 1e-4~1e-3，乘此係數後與 reward 同數量級，lambda_fee 才有效（預設 100）",
     )
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")
@@ -879,6 +883,18 @@ def main() -> None:
     parser.add_argument("--eval-trigger-mode", choices=["any", "all"], default="any", help="多條件組合模式")
     parser.add_argument("--eval-metric-rule", action="append", default=[], help="內建 metric 規則，例如 log_return_sum_mean>=0.2")
     parser.add_argument("--eval-expression", type=str, default="", help="自訂評估條件式，例如 step>=5_000_000 and log_return_sum_mean>0")
+    parser.add_argument(
+        "--post-train-holdout-render",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="訓練結束後在 holdout/eval 設定上跑單一 episode 並顯示與 live 相同版面的圖表（無 GUI 時請用 --no-post-train-holdout-render）",
+    )
+    parser.add_argument(
+        "--post-train-render-max-bars",
+        type=int,
+        default=2000,
+        help="訓練後 holdout 圖表價格區最多顯示的 5m K 線根數（上限）",
+    )
     args = parser.parse_args()
 
     # 路徑預設：依 phase/lr/lb/rs/rb/cb/lf/fas 產生（不可在 add_argument 時用 args，故在此補上）
@@ -1008,6 +1024,37 @@ def main() -> None:
     model.save(args.save_path)
     vec_env.close()
     print(f"Model saved to {args.save_path}")
+
+    if bool(getattr(args, "post_train_holdout_render", True)):
+        _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        _cap = post_train_max_episode_steps_cap(data_split=data_split, holdout_months=holdout)
+        _post_env_kwargs = {
+            **env_kwargs_eval,
+            "random_start": False,
+            "max_episode_steps": int(_cap),
+        }
+        _post_thunk = make_env(
+            phase=args.phase,
+            lambda_risk=args.lambda_risk,
+            lambda_buffer=args.lambda_buffer,
+            reward_scale=args.reward_scale,
+            lambda_fee_max=args.lambda_fee_max,
+            fee_anneal_steps=args.fee_anneal_steps,
+            action_repeat=args.action_repeat,
+            anneal_steps=args.anneal_steps,
+            seed=None,
+            **_post_env_kwargs,
+        )
+        run_holdout_rollout_and_show_live_render(
+            model=model,
+            env_thunk=_post_thunk,
+            data_split=data_split,
+            holdout_months=holdout,
+            deterministic=bool(args.eval_deterministic),
+            seed=int(args.eval_seed),
+            project_root=_project_root,
+            max_visible_bars=int(max(100, getattr(args, "post_train_render_max_bars", 2000))),
+        )
 
 
 if __name__ == "__main__":
