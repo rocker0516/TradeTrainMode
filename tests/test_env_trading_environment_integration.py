@@ -4,9 +4,51 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from Env.trading_env import TradingEnvironment
+
+
+def _trend_1d_for_regime_gate(df_1d: pd.DataFrame, *, bull: bool) -> None:
+    """
+    調整 1d 收盤趨勢，使 EMA12 與 EMA48 分離，讓 `get_gate_flags` 進入 Gate A（bull）或 Gate C（bear）。
+    否則 neutral 會觸發 `_apply_regime_action_projection` 把 action 壓成 0，整合測試無法開倉。
+    """
+    n = len(df_1d)
+    if bull:
+        close = 100.0 + np.linspace(0.0, 80.0, n, dtype=np.float64)
+    else:
+        close = 180.0 - np.linspace(0.0, 80.0, n, dtype=np.float64)
+    open_ = np.concatenate([[close[0]], close[:-1]])
+    high = np.maximum(open_, close) + 2.0
+    low = np.minimum(open_, close) - 2.0
+    df_1d.loc[:, "close"] = close
+    df_1d.loc[:, "open"] = open_
+    df_1d.loc[:, "high"] = high
+    df_1d.loc[:, "low"] = low
+
+
+# 需對應 1d 趨勢的情境（其餘維持 flat 1d 即可）
+_SCENARIOS_BULL_1D: frozenset[str] = frozenset(
+    {
+        "open_long_and_hold",
+        "open_long_then_reduce",
+        "open_long_then_close",
+        "flip_allowed",
+        "max_step_change_limits_build_up",
+        "stop_loss_triggers",
+        "stop_loss_cooldown_forces_no_trade_next_step",
+        "liquidation_triggers_terminated",
+        "balance_insufficient_terminated",
+        "fee_tracking_updates_last_step_fee",
+        "action_effects_cached_in_next_observation",
+        "reward_positive_when_next_close_up",
+        "cost_stop_missing_when_stop_disabled",
+        "mark_to_market_uses_next_close",
+    }
+)
+_SCENARIOS_BEAR_1D: frozenset[str] = frozenset({"open_short_and_hold"})
 
 
 @dataclass(frozen=True)
@@ -74,11 +116,8 @@ def _scenarios() -> List[Scenario]:
         Scenario(
             name="flip_allowed",
             actions=[1.0, -1.0],
-            # Flip budget 機制移除後：至少應標記 is_flip，且不應因 budget 強制阻擋。
-            #（此情境會另外在 env_kwargs 把 stop_loss_atr=0，避免止損干擾）
-            # 注意：由於 ActionProcessor 的 max_step_pos_change_pct 限制，flip 可能會先「縮倉到 0」，
-            # 需要下一步才會真正開到反向倉位；因此這裡只驗證會平倉而不是被 budget 阻擋。
-            expect={"is_flip": True, "pos_zero": True, "done": False},
+            # Gate A 下 action=-1 會被投影成 0（平倉），不會在單步內反手到空單；驗證最後為空倉即可。
+            expect={"pos_zero": True, "done": False},
         ),
         Scenario(
             name="max_step_change_limits_build_up",
@@ -152,7 +191,8 @@ def _scenarios() -> List[Scenario]:
         Scenario(
             name="cost_stop_missing_when_stop_disabled",
             actions=[1.0],
-            expect={"cost_stop_missing": True},
+            # stop_loss_atr=0：止損機制關閉；僅驗證能持倉且 cost_breakdown 為現行三通道
+            expect={"opened_with_stop_disabled": True},
         ),
         Scenario(
             name="mark_to_market_uses_next_close",
@@ -166,6 +206,10 @@ def _scenarios() -> List[Scenario]:
 def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_data, make_synth_market, monkeypatch) -> None:
     # 預設行情：close=100，high=101，low=99，ATR≈2（足以穩定產生 stop distance）
     market = make_synth_market(n_5m=120, n_1d=60, start_price=100.0, step_5m=0.0, spread_5m=1.0)
+    if sc.name in _SCENARIOS_BULL_1D:
+        _trend_1d_for_regime_gate(market.df_1d, bull=True)
+    elif sc.name in _SCENARIOS_BEAR_1D:
+        _trend_1d_for_regime_gate(market.df_1d, bull=False)
 
     # 情境調整（用 index 11 觸發 stop/liq 等）
     trigger_idx = int(sc.window_size + 1)
@@ -259,19 +303,15 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
             "is_flip",
             "risk_budget",
             "current_dd",
-            # cost / breakdown（供 Lagrangian 或解析使用）
             "cost",
-            # multi-lambda channels（訓練端會用到）
             "cost_risk",
+            "cost_risk_dense",
             "cost_fric",
-            "cost_sl_buf",
-            "cost_sl_event",
             "cost_breakdown",
         ):
             assert k in info
         assert isinstance(info["cost_breakdown"], dict)
-        # 核心分項 key
-        for k in ("death_cost", "stop_loss_event_cost", "fric_cost", "sl_buf_cost", "stop_missing_cost"):
+        for k in ("death_cost", "dense_buffer_cost", "fric_cost"):
             assert k in info["cost_breakdown"]
 
     # --- position checks ---
@@ -353,9 +393,10 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
         # new_equity 是用 idx+1 close 計算；此情境把 idx=11 close 設成 110
         assert float(info["equity"]) == pytest.approx(env.executor.equity(110.0), abs=1e-6)
 
-    # --- cost: stop missing when stop disabled ---
-    if sc.expect.get("cost_stop_missing"):
-        assert float(info["cost"]) >= 0.0
-        assert float(info["cost_breakdown"]["stop_missing_cost"]) == 1.0
+    # --- 止損關閉時仍能進場持倉（cost 為現行 CostCalculator 輸出）---
+    if sc.expect.get("opened_with_stop_disabled"):
+        assert abs(float(env.executor.position.size)) > 1e-12
+        bd = info.get("cost_breakdown", {})
+        assert "dense_buffer_cost" in bd and "fric_cost" in bd
 
 

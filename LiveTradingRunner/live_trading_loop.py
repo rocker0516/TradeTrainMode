@@ -115,6 +115,11 @@ class TickDecision:
     gate_flags: Optional[Tuple[float, float, float]] = None
     # 本步實際用於 obs／紙上損益／圖表標題的手續費率（百分比）；與幣安 API 或 fallback 一致
     fee_rate_pct: Optional[float] = None
+    # 與訓練 reward 對齊：regime ∈ {-1,0,1}、conviction_strength = |tanh(scale*trend_score)|
+    regime_indicator: float = 0.0
+    conviction_strength: float = 0.0
+    # 5m：tanh(scale×trend) 帶符號；圖表用（reward 只用絕對值當 strength）
+    trend_tanh_signed: float = 0.0
 
 
 def _state_to_json(state: LiveRunnerState) -> Dict[str, Any]:
@@ -537,6 +542,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     # 與 equity 同長：每步一筆，供價格圖在每根對應 K 上持續顯示 B/S 與 GATE A/C
     trade_marker_history: deque[Optional[str]] = deque(maxlen=hist_max)
     gate_labels_rows_history: deque[List[str]] = deque(maxlen=hist_max)
+    gate_regime_history: deque[float] = deque(maxlen=hist_max)
+    conviction_strength_history: deque[float] = deque(maxlen=hist_max)
+    trend_tanh_signed_history: deque[float] = deque(maxlen=hist_max)
+    gate_b_liquidity_history: deque[float] = deque(maxlen=hist_max)
     record_fp = None
     if record_dir:
         os.makedirs(record_dir, exist_ok=True)
@@ -579,6 +588,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 )
                 trade_marker_history.append(trade_marker)
                 gate_labels_rows_history.append(gate_labels)
+                gate_regime_history.append(float(decision.regime_indicator))
+                conviction_strength_history.append(float(decision.conviction_strength))
+                trend_tanh_signed_history.append(float(decision.trend_tanh_signed))
+                _gb = (
+                    float(decision.gate_flags[1])
+                    if decision.gate_flags is not None and len(decision.gate_flags) >= 2
+                    else 0.0
+                )
+                gate_b_liquidity_history.append(_gb)
                 if renderer is not None:
                     renderer.refresh(
                         closed_bar_ts=str(decision.closed_bar_ts),
@@ -593,6 +611,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         trade_marker_history=list(trade_marker_history),
                         gate_labels_rows_history=list(gate_labels_rows_history),
                         max_position_pct=float(cfg.max_position_pct),
+                        gate_regime_history=list(gate_regime_history),
+                        conviction_strength_history=list(conviction_strength_history),
+                        trend_tanh_signed_history=list(trend_tanh_signed_history),
+                        gate_b_liquidity_history=list(gate_b_liquidity_history),
                     )
                 if decision.gate_flags is not None:
                     state.last_gate_flags = decision.gate_flags
@@ -653,6 +675,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 )
                 trade_marker_history.append(trade_marker)
                 gate_labels_rows_history.append(gate_labels)
+                gate_regime_history.append(float(decision.regime_indicator))
+                conviction_strength_history.append(float(decision.conviction_strength))
+                trend_tanh_signed_history.append(float(decision.trend_tanh_signed))
+                _gb = (
+                    float(decision.gate_flags[1])
+                    if decision.gate_flags is not None and len(decision.gate_flags) >= 2
+                    else 0.0
+                )
+                gate_b_liquidity_history.append(_gb)
                 if renderer is not None:
                     renderer.refresh(
                         closed_bar_ts=str(decision.closed_bar_ts),
@@ -667,6 +698,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         trade_marker_history=list(trade_marker_history),
                         gate_labels_rows_history=list(gate_labels_rows_history),
                         max_position_pct=float(cfg.max_position_pct),
+                        gate_regime_history=list(gate_regime_history),
+                        conviction_strength_history=list(conviction_strength_history),
+                        trend_tanh_signed_history=list(trend_tanh_signed_history),
+                        gate_b_liquidity_history=list(gate_b_liquidity_history),
                     )
                 if decision.gate_flags is not None:
                     state.last_gate_flags = decision.gate_flags

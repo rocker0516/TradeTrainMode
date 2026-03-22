@@ -436,6 +436,9 @@ class LiveRunner:
             obs_account_context_named=obs_named,
             gate_flags=gate_tuple,
             fee_rate_pct=float(fee_pct_live),
+            regime_indicator=float(getattr(obs_result, "regime_indicator", 0.0)),
+            conviction_strength=float(getattr(obs_result, "conviction_strength", 0.0)),
+            trend_tanh_signed=float(getattr(obs_result, "trend_tanh_signed", 0.0)),
         )
 
     @staticmethod

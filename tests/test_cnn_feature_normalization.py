@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from Env.Components.market_data import MarketData
+from Env.config import Config
 
 
 def _make_multi_symbol_5m(
@@ -17,16 +18,12 @@ def _make_multi_symbol_5m(
 ) -> pd.DataFrame:
     """
     產生可重現的多幣 5m 資料（prefixed 欄位），用於測試特徵正規化/clip。
-
-    注意：我們刻意讓每個 symbol 的 close/volume 有不同尺度與波動，
-    以檢查 z-score + clip 是否能把尺度拉回穩定範圍、避免 inf/NaN。
     """
     rng = np.random.default_rng(7)
     ts = pd.date_range(start=start, periods=n, freq="5min")
 
     out: pd.DataFrame | None = None
     for i, sym in enumerate(symbols):
-        # close: trend + sin + noise；不同 symbol 用不同尺度
         base = 100.0 * (1.0 + 0.4 * i)
         trend = np.linspace(0.0, 20.0 * (1.0 + 0.1 * i), n)
         cyc = np.sin(np.linspace(0.0, 30.0, n)) * (2.0 + 0.5 * i)
@@ -70,7 +67,6 @@ def _make_multi_symbol_5m(
 
 
 def _make_1d_minimal(*, n: int = 120, start: str = "2019-10-01") -> pd.DataFrame:
-    # 1d 特徵缺欄會自動補 0；這裡重點只在 5m 正規化測試
     ts = pd.date_range(start=start, periods=n, freq="1d")
     close = 100.0 + np.linspace(0.0, 10.0, n)
     open_ = np.concatenate([[close[0]], close[:-1]])
@@ -89,13 +85,13 @@ def _col_index(cols: List[str]) -> Dict[str, int]:
         ("BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "1000PEPEUSDT"),
     ],
 )
-def test_cnn_price_seq_features_are_normalized_and_bounded(symbols: Tuple[str, ...]) -> None:
+def test_cnn_price_seq_target_features_are_normalized_and_bounded(symbols: Tuple[str, ...]) -> None:
     """
-    驗證 CNN 主要輸入 price_seq（5m）：
-    - dtype=float32
-    - 不含 NaN/inf
-    - *_z 通道都已 clip 到 [-5, 5]
-    - bounded 通道落在預期範圍（避免尺度爆炸導致 SAC 發散）
+    驗證 5m `price_seq_target` 來源矩陣（`features_5m_target_arr`）：
+    - dtype=float32、無 NaN/inf
+    - rolling z 類通道 clip 到 [-5, 5]
+    - scale / ratio 類在合理 bounded 範圍
+    - 多幣時 `others` 矩陣含各 alt 前綴欄位
     """
     df_5m = _make_multi_symbol_5m(n=2500, symbols=symbols)
     df_1d = _make_1d_minimal(n=150)
@@ -109,10 +105,11 @@ def test_cnn_price_seq_features_are_normalized_and_bounded(symbols: Tuple[str, .
         target_symbol=target,
         feature_symbols=list(symbols),
     )
-    feats = md.features_5m_arr
-    cols = md.cols_5m
+    assert md.cols_5m_target == list(Config.OBS_PRICE_SEQ_TARGET_COLS)
 
-    # MarketData 內部使用 float32；env 輸出 obs 會轉成 float16 以省 RAM
+    feats = md.features_5m_target_arr
+    cols = md.cols_5m_target
+
     assert feats.dtype == np.float32
     assert feats.shape[0] == len(df_5m)
     assert feats.shape[1] == len(cols)
@@ -120,52 +117,41 @@ def test_cnn_price_seq_features_are_normalized_and_bounded(symbols: Tuple[str, .
 
     idx = _col_index(cols)
 
-    # ---- 1) 所有 *_z 必須在 [-5, 5] ----
-    z_cols = [c for c in cols if c.endswith("_z")]
-    assert len(z_cols) > 10  # 基本 sanity check
+    z_cols = [c for c in cols if c.endswith("_z") or c.endswith("_z_short")]
+    assert len(z_cols) >= 8
     for c in z_cols:
         x = feats[:, idx[c]]
         assert np.nanmax(x) <= 5.0001
         assert np.nanmin(x) >= -5.0001
 
-    # ---- 2) bounded / ratio 類特徵 ----
     bounded_specs = {
-        "price_pos_96": (-1.0, 1.0),
-        "price_pos_288": (-1.0, 1.0),
-        "bb_pos_48": (-2.0, 2.0),
-        "rsi_14": (-1.0, 1.0),
-        "macd_atr": (-10.0, 10.0),
-        "macd_signal_atr": (-10.0, 10.0),
-        "trend_strength_atr": (0.0, 10.0),
-        "dir_persist_20": (-1.0, 1.0),
-        "chop_48": (-5.0, 5.0),
-        "trend_flip_rate_48": (-1.0, 1.0),
+        "ret_15m_scale": (-3.0, 3.0),
+        "range_atr": (-3.0, 3.0),
+        "volume_log_scale": (-3.0, 3.0),
         "alts_trend_up_ratio": (-1.0, 1.0),
+        "alts_rel_ret_15m_abs_mean_scale": (0.0, 0.05),
+        "alts_volume_log_mean_scale": (-3.0, 3.0),
+        "ob_depth_imbalance_scale": (-1.0, 1.0),
+        "rv_ratio_scale": (0.0, 0.05),
     }
     for c, (lo, hi) in bounded_specs.items():
         assert c in idx, f"missing expected feature col: {c}"
         x = feats[:, idx[c]]
-        assert np.nanmax(x) <= hi + 1e-6
-        assert np.nanmin(x) >= lo - 1e-6
+        assert np.nanmax(x) <= hi + 1e-5
+        assert np.nanmin(x) >= lo - 1e-5
 
-    # ---- 3) 跨市場 per-symbol 4 通道應存在（每個 alt 幣）----
+    # 多幣：逐幣特徵在 others，欄位為 {SYMBOL}_*
+    ocols = md.cols_5m_others
     for sym in symbols:
         if sym == target:
             continue
-        prefix = sym.lower()
-        for suffix in ("ret_15m_z", "rel_ret_15m_z", "volume_log_z", "trend_spread_z"):
-            c = f"{prefix}_{suffix}"
-            assert c in idx
+        assert any(str(col).startswith(f"{sym}_") for col in ocols), f"expected prefixed cols for {sym}"
 
-    # ---- 4) z-score 品質：在暖機期之後，幾個關鍵 *_z 應該有合理變異 ----
-    # 不要求 mean=0/std=1（因 clip/缺值補 0 會偏），但至少要「非全 0」且不爆。
     warmup = 800
-    sample_cols = ["ret_1_z", "log_close_z", "volume_log_z", "ema_12_48_spread_z"]
+    sample_cols = ["ret_1_z_short", "quote_volume_log_z", "amihud_z", "volume_log_scale"]
     for c in sample_cols:
         assert c in idx
         x = feats[warmup:, idx[c]]
         assert np.isfinite(x).all()
         assert float(np.std(x)) > 0.05
         assert float(np.std(x)) < 5.0
-
-

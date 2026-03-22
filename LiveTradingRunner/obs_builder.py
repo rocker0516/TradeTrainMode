@@ -20,6 +20,12 @@ from Env.Components.market_data import MarketData
 from Env.Components.observer import TradingObserver
 from Env.Executors.trade_executor import TradeExecutor
 
+from LiveTradingRunner.render_history_utils import (
+    conviction_strength_from_trend_score,
+    gate_flags_to_regime_indicator,
+    trend_tanh_signed_from_trend_score,
+)
+
 
 def _default_last_action_effects() -> Dict[str, float]:
     """與 `TradingEnvironment.reset()` 初始化欄位對齊（全部歸零）。"""
@@ -46,6 +52,12 @@ class LiveObsBuildResult:
     obs: Dict[str, np.ndarray]
     step_idx: int
     current_price: float
+    # 與訓練 reward 對齊，供 Live 圖表 GATE/conviction 子圖使用
+    regime_indicator: float = 0.0
+    conviction_strength: float = 0.0
+    trend_score: float = 0.0
+    # 與 conviction 同源，保留符號供圖表顯示 5m 細微波動（reward 仍用 abs）
+    trend_tanh_signed: float = 0.0
 
 
 class LiveObsBuilder:
@@ -178,7 +190,21 @@ class LiveObsBuilder:
             last_action_effects=_default_last_action_effects(),
         )
 
-        # 觀測型別：SB3 允許 numpy arrays；這裡直接回傳 dict
-        return LiveObsBuildResult(obs=obs, step_idx=step_idx, current_price=current_price)
+        trend_score_live = float(metrics.get("trend_score", 0.0))
+        gf_live = market_data.get_gate_flags(step_idx)
+        regime_ind = float(gate_flags_to_regime_indicator(gf_live))
+        scale_live = float(getattr(Config, "CONVICTION_TREND_SCORE_SCALE", 10.0))
+        conv_strength = float(conviction_strength_from_trend_score(trend_score_live, scale=scale_live))
+        tanh_signed = float(trend_tanh_signed_from_trend_score(trend_score_live, scale=scale_live))
+
+        return LiveObsBuildResult(
+            obs=obs,
+            step_idx=step_idx,
+            current_price=current_price,
+            regime_indicator=regime_ind,
+            conviction_strength=conv_strength,
+            trend_score=trend_score_live,
+            trend_tanh_signed=tanh_signed,
+        )
 
 

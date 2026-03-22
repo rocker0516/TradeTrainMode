@@ -173,6 +173,9 @@ class TradingEnvironment(gym.Env):
             conviction_min_abs_pos=float(kwargs.get("conviction_min_abs_pos", Config.CONVICTION_MIN_ABS_POS)),
             conviction_trend_score_scale=float(kwargs.get("conviction_trend_score_scale", getattr(Config, "CONVICTION_TREND_SCORE_SCALE", 10.0))),
             regime_alignment_bonus_weight=float(kwargs.get("regime_alignment_bonus_weight", getattr(Config, "REGIME_ALIGNMENT_BONUS_WEIGHT", 0.0))),
+            neutral_trade_penalty_weight=float(
+                kwargs.get("neutral_trade_penalty_weight", getattr(Config, "NEUTRAL_TRADE_PENALTY_WEIGHT", 0.0))
+            ),
         )
         
         # Tracker
@@ -261,6 +264,7 @@ class TradingEnvironment(gym.Env):
         self.episode_log_return_sum = 0.0
         # Regime 對齊 bonus 本回合累計（主線 STATS 分解用）
         self.episode_regime_alignment_bonus_sum = 0.0
+        self.episode_neutral_trade_penalty_sum = 0.0
         # 本回合 cost_risk 累計（供 TensorBoard / 輔助主線比對照）
         self.episode_cost_risk_sum = 0.0
         # 本回合 cost_risk_dense 累計（dense 緩衝懲罰，方案 B 獨立通道）
@@ -481,6 +485,7 @@ class TradingEnvironment(gym.Env):
         self.episode_conviction_bonus_sum = 0.0
         self.episode_log_return_sum = 0.0
         self.episode_regime_alignment_bonus_sum = 0.0
+        self.episode_neutral_trade_penalty_sum = 0.0
         self.episode_cost_risk_sum = 0.0
         self.episode_cost_risk_dense_sum = 0.0
 
@@ -785,6 +790,7 @@ class TradingEnvironment(gym.Env):
         episode_conviction_bonus_sum: float = 0.0,
         episode_log_return_sum: float = 0.0,
         episode_regime_alignment_bonus_sum: float = 0.0,
+        episode_neutral_trade_penalty_sum: float = 0.0,
         episode_cost_risk_sum: float = 0.0,
         episode_cost_risk_dense_sum: float = 0.0,
         terminated: bool = False,
@@ -809,6 +815,7 @@ class TradingEnvironment(gym.Env):
             episode_conviction_bonus_sum: 本回合順向交易獎勵累計（主線 STATS 用）
             episode_log_return_sum: 本回合純對數報酬累計 = log(E_final/E_init)（STATS Est. ROI 用）
             episode_regime_alignment_bonus_sum: 本回合 regime 對齊 bonus 累計（STATS 分解用）
+            episode_neutral_trade_penalty_sum: 本回合中性區成交 penalty 累計（≤0）
             episode_cost_risk_sum: 本回合 cost_risk 累計（TensorBoard 用）
             episode_cost_risk_dense_sum: 本回合 cost_risk_dense 累計（dense 緩衝懲罰）
             terminated: Gymnasium terminated（自然終止）
@@ -846,6 +853,7 @@ class TradingEnvironment(gym.Env):
             info["episode_conviction_bonus_sum"] = float(episode_conviction_bonus_sum)
             info["episode_log_return_sum"] = float(episode_log_return_sum)
             info["episode_regime_alignment_bonus_sum"] = float(episode_regime_alignment_bonus_sum)
+            info["episode_neutral_trade_penalty_sum"] = float(episode_neutral_trade_penalty_sum)
             info["episode_cost_risk_sum"] = float(episode_cost_risk_sum)
             info["episode_cost_risk_dense_sum"] = float(episode_cost_risk_dense_sum)
             info["fees_to_equity_ratio"] = (
@@ -1423,6 +1431,15 @@ class TradingEnvironment(gym.Env):
         self.episode_regime_alignment_bonus_sum += float(
             np.nan_to_num(_reg, nan=0.0, posinf=0.0, neginf=0.0)
         )
+        _neu = float(
+            np.nan_to_num(
+                getattr(self.reward_calculator, "last_neutral_trade_penalty", 0.0),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
+        )
+        self.episode_neutral_trade_penalty_sum += _neu
 
         # 9. Cost / Constraint（成本線）
         # 我們使用「當下價格」計算風險訊號（含 stop_loss_missing / 距離爆倉 / margin_ratio 等），
@@ -1487,6 +1504,7 @@ class TradingEnvironment(gym.Env):
             episode_conviction_bonus_sum=float(self.episode_conviction_bonus_sum),
             episode_log_return_sum=float(self.episode_log_return_sum),
             episode_regime_alignment_bonus_sum=float(self.episode_regime_alignment_bonus_sum),
+            episode_neutral_trade_penalty_sum=float(self.episode_neutral_trade_penalty_sum),
             episode_cost_risk_sum=float(self.episode_cost_risk_sum),
             episode_cost_risk_dense_sum=float(self.episode_cost_risk_dense_sum),
             terminated=bool(terminated),
@@ -1516,9 +1534,11 @@ class TradingEnvironment(gym.Env):
         # Reward 分解（供訓練端退火與 episode_stats）：主線 log_return、輔助 regime/conviction
         _reg = float(getattr(self.reward_calculator, "last_regime_alignment_bonus", 0.0))
         _conv = float(getattr(self.reward_calculator, "last_conviction_bonus", 0.0))
-        info["reward_log_return"] = float(reward) - _reg - _conv
+        _neu = float(getattr(self.reward_calculator, "last_neutral_trade_penalty", 0.0))
+        info["reward_log_return"] = float(reward) - _reg - _conv - _neu
         info["reward_regime_bonus"] = _reg
         info["reward_conviction_bonus"] = _conv
+        info["reward_neutral_trade_penalty"] = _neu
         # 更新空倉滑窗與 recent_flat_ratio（供下一步 obs，實盤可算）
         if getattr(self, "_flat_deque", None) is not None:
             self._flat_deque.append(1.0 if is_flat else 0.0)

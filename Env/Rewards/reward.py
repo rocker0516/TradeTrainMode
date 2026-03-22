@@ -26,9 +26,12 @@ class RewardCalculator:
     last_conviction_bonus: float = 0.0
     last_conviction_active: bool = False
     last_regime_alignment_bonus: float = 0.0
+    last_neutral_trade_penalty: float = 0.0
 
     # Regime 對齊 bonus（A 多加分、C 空加分，依 dir_strength 加權）；0 表示不啟用
     regime_alignment_bonus_weight: float = 0.0
+    # 中性區（無 Gate A、無 Gate C，regime_dir=0）且本步有成交時，自 reward 扣除此權重；與 regime_alignment 分開，0=不啟用
+    neutral_trade_penalty_weight: float = 0.0
 
     def compute(
         self,
@@ -47,6 +50,7 @@ class RewardCalculator:
         self.last_conviction_bonus = 0.0
         self.last_conviction_active = False
         self.last_regime_alignment_bonus = 0.0
+        self.last_neutral_trade_penalty = 0.0
 
         safe_last = max(last_equity, 1e-8)
         safe_new = max(new_equity, 1e-8)
@@ -70,6 +74,20 @@ class RewardCalculator:
                     np.nan_to_num(regime_bonus, nan=0.0, posinf=0.0, neginf=0.0)
                 )
                 reward += float(regime_bonus)
+
+        # §5c：盤整／中性（regime_dir=0）仍成交 → 小額負向 shaping（不依賴 regime_alignment_bonus_weight）
+        w_nt = float(getattr(self, "neutral_trade_penalty_weight", 0.0))
+        if w_nt > 0.0 and "gate_flags" in kwargs:
+            gf = kwargs["gate_flags"]
+            if hasattr(gf, "__len__") and len(gf) >= 3:
+                gate_A = float(gf[0])
+                gate_C = float(gf[2])
+                regime_dir = 1.0 if gate_A >= 0.5 else (-1.0 if gate_C <= -0.5 else 0.0)
+                if regime_dir == 0.0 and bool(kwargs.get("traded", False)):
+                    penalty = -w_nt
+                    self.last_neutral_trade_penalty = float(penalty)
+                    reward += float(penalty)
+
         reward = float(np.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0))
         return reward
     
@@ -90,6 +108,7 @@ def create_default_calculator(
     conviction_min_abs_pos: float = 0.15,
     conviction_trend_score_scale: float = 10.0,
     regime_alignment_bonus_weight: float = 0.0,
+    neutral_trade_penalty_weight: float = 0.0,
 ) -> RewardCalculator:
     """
     工廠函數：建立 reward calculator。
@@ -98,14 +117,17 @@ def create_default_calculator(
     - 預設仍是「純 log-return」(conviction_trend_bonus_weight=0) => 不改變現有行為。
     - 若 conviction_trend_bonus_weight > 0，則啟用「強訊號 + 大倉 + 同向」的 conviction bonus。
     - regime_alignment_bonus_weight > 0：啟用 regime 對齊 bonus（A 多加分、C 空加分，依 dir_strength 加權）。
+    - neutral_trade_penalty_weight > 0：中性區（無 A/C gate）且本步 traded 時扣固定小額（與 regime bonus 分開）。
     """
     w_reg = float(regime_alignment_bonus_weight)
+    w_nt = float(neutral_trade_penalty_weight)
     if float(conviction_trend_bonus_weight) <= 0.0:
         calc = RewardCalculator(
             c_liq=0.0,
             fee_limit_penalty=0.0,
             base_log_ret_weight=base_log_ret_weight,
             regime_alignment_bonus_weight=w_reg,
+            neutral_trade_penalty_weight=w_nt,
         )
         return calc
     calc = ConvictionTrendRewardCalculator(
@@ -117,6 +139,7 @@ def create_default_calculator(
         conviction_min_abs_pos=float(conviction_min_abs_pos),
         conviction_trend_score_scale=float(conviction_trend_score_scale),
         regime_alignment_bonus_weight=w_reg,
+        neutral_trade_penalty_weight=w_nt,
     )
     return calc
 

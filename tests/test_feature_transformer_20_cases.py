@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from Env.Components.market_data import MarketData
-from Env.feature_transformer import FeatureTransformer
+from Env.config import Config
 
 
 @dataclass(frozen=True)
@@ -149,20 +149,21 @@ def test_feature_shapes_are_fixed_and_safe(case: Case) -> None:
         feature_symbols=[case.target_symbol],
     )
 
-    # 5m 必須固定 shape（對於同一組 feature_symbols），且 cols 必須與 transformer 輸出一致
-    assert md.price_seq_features_dim == len(md.cols_5m)
-    assert md.price_seq_features_dim > 0
+    # 5m target 必須固定 shape（對於同一組 feature_symbols），且 cols 與 Config 約定一致
+    assert md.price_seq_target_features_dim == len(md.cols_5m_target)
+    assert md.price_seq_target_features_dim > 0
+    assert md.cols_5m_target == list(Config.OBS_PRICE_SEQ_TARGET_COLS)
 
-    # 1d 必須固定 15 通道（11 symbol-specific + 4 macro）
-    assert md.features_1d_dim == 15
-    spec = FeatureTransformer().get_spec()
-    assert md.cols_1d == list(spec.price_seq_1d_cols)
+    # 1d target 通道數 = OBS_PRICE_SEQ_1D_TARGET_COLS（macro 等在 others）
+    n_1d_tgt = len(Config.OBS_PRICE_SEQ_1D_TARGET_COLS)
+    assert md.features_1d_dim == n_1d_tgt
+    assert md.cols_1d == list(Config.OBS_PRICE_SEQ_1D_TARGET_COLS)
 
     # 任意 step 的序列 shape 必須一致
     seq_5m_target, _ = md.get_price_seq(40)
     seq_1d_target, _ = md.get_1d_seq(40, window_size_1d=10)
     assert seq_5m_target.shape == (32, md.price_seq_target_features_dim)
-    assert seq_1d_target.shape == (10, 15)
+    assert seq_1d_target.shape == (10, n_1d_tgt)
     # MarketData 內部特徵矩陣使用 float32（計算穩定）；env 輸出 obs 可能轉成 float16 以省 RAM
     assert seq_5m_target.dtype == np.float32
     assert seq_1d_target.dtype == np.float32
@@ -203,7 +204,9 @@ def test_feature_symbols_expands_5m_dim_but_keeps_shape_fixed() -> None:
         feature_symbols=[sym_main] + alts,
     )
 
-    assert md_multi.price_seq_features_dim > md_single.price_seq_features_dim
+    # 多幣時 target 維度不變；跨市摘要在 target 內，逐幣細節在 others
+    assert md_multi.price_seq_target_features_dim == md_single.price_seq_target_features_dim
+    assert md_multi.price_seq_others_features_dim > md_single.price_seq_others_features_dim
     seq_target, _ = md_multi.get_price_seq(100)
     assert seq_target.shape == (64, md_multi.price_seq_target_features_dim)
     assert seq_target.dtype == np.float32

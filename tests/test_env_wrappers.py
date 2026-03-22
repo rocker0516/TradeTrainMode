@@ -8,9 +8,23 @@ from Env.wrappers import ActionRepeatWrapper
 from Env.trading_env import TradingEnvironment
 
 
+def _ramp_1d_close_bull(df_1d) -> None:
+    """讓 1d EMA12>EMA48，使 Gate A 生效，regime projection 允許做多（否則 neutral 會把 action 壓成 0）。"""
+    n = len(df_1d)
+    close = 100.0 + np.linspace(0.0, 80.0, n, dtype=np.float64)
+    open_ = np.concatenate([[close[0]], close[:-1]])
+    high = np.maximum(open_, close) + 2.0
+    low = np.minimum(open_, close) - 2.0
+    df_1d["close"] = close
+    df_1d["open"] = open_
+    df_1d["high"] = high
+    df_1d["low"] = low
+
+
 def test_action_repeat_wrapper_breaks_on_stop_loss(patch_env_load_data, make_synth_market, monkeypatch) -> None:
     """repeat 期間若觸發止損，wrapper 必須提早 break，避免持續重複下單。"""
     market = make_synth_market(n_5m=80, n_1d=40, start_price=100.0, step_5m=0.0, spread_5m=1.0)
+    _ramp_1d_close_bull(market.df_1d)
 
     # 避免一開始 ATR 被 prev_close=0 污染（前 14 根會偏大），讓環境從較後面的 step 開始。
     # 讓 step=(window_size+1)=21 觸發止損：entry≈100, atr≈2 => stop≈96；設 low 明顯低於 stop
@@ -46,7 +60,7 @@ def test_action_repeat_wrapper_breaks_on_stop_loss(patch_env_load_data, make_syn
 
 
 def test_action_repeat_wrapper_accumulates_cost_channels_and_breakdown() -> None:
-    """repeat>1 時，wrapper 必須累積 cost_* 與 cost_breakdown，避免 λ 更新視窗看到 0。"""
+    """repeat>1 時，wrapper 累積 cost / cost_risk / cost_fric / cost_risk_dense 與 cost_breakdown（與現行 Env 一致）。"""
 
     class DummyEnv(gym.Env):
         def __init__(self) -> None:
@@ -65,10 +79,9 @@ def test_action_repeat_wrapper_accumulates_cost_channels_and_breakdown() -> None
             info = {
                 "cost": 1.0,
                 "cost_risk": 0.1,
+                "cost_risk_dense": 0.05,
                 "cost_fric": 0.2,
-                "cost_sl_buf": 0.3,
-                "cost_sl_event": 0.4,
-                "cost_breakdown": {"death_cost": 0.1, "fric_cost": 0.2, "sl_buf_cost": 0.3},
+                "cost_breakdown": {"death_cost": 0.1, "dense_buffer_cost": 0.05, "fric_cost": 0.2},
             }
             terminated = False
             truncated = False
@@ -83,11 +96,10 @@ def test_action_repeat_wrapper_accumulates_cost_channels_and_breakdown() -> None
     assert info["cost"] == pytest.approx(3.0)
     assert info["cost_risk"] == pytest.approx(0.3)
     assert info["cost_fric"] == pytest.approx(0.6)
-    assert info["cost_sl_buf"] == pytest.approx(0.9)
-    assert info["cost_sl_event"] == pytest.approx(1.2)
+    assert info["cost_risk_dense"] == pytest.approx(0.15)
     assert isinstance(info.get("cost_breakdown"), dict)
     assert info["cost_breakdown"]["death_cost"] == pytest.approx(0.3)
     assert info["cost_breakdown"]["fric_cost"] == pytest.approx(0.6)
-    assert info["cost_breakdown"]["sl_buf_cost"] == pytest.approx(0.9)
+    assert info["cost_breakdown"]["dense_buffer_cost"] == pytest.approx(0.15)
 
 

@@ -1,7 +1,8 @@
 """Simple refresh renderer for live loop.
 
-單一視窗刷新顯示（三子圖）：
-- 上：session/API 同源 OHLC（蠟燭優先；無資料時可 fallback 本機 CSV）+ B/S + GATE A/C 變化標籤
+單一視窗刷新顯示（四子圖）：
+- 上：OHLC + B/S + GATE A/C 變化標籤（僅在變化時顯示文字）
+- 次：日線 A/C regime（階梯、跨日才變）+ reward 用 |tanh(scale×trend)| + 可選 5m signed tanh、Gate B 流動性帶
 - 中：倉位曲線 ``final_pos_pct``
 - 下：紙上資金曲線
 """
@@ -9,8 +10,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, Sequence
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -25,19 +26,20 @@ class LiveRefreshRenderer:
     symbol: str
     max_visible_bars: int
     data_dir: str
+    _ax_conv_r: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._max_visible = int(max(10, self.max_visible_bars))
         self._csv_path = os.path.join(self.data_dir, f"{self.symbol}_futures_volume_5years_5min.csv")
         plt.ion()
         self._fig, axes = plt.subplots(
-            nrows=3,
+            nrows=4,
             ncols=1,
-            figsize=(13, 9),
+            figsize=(13, 11),
             sharex=True,
-            gridspec_kw={"height_ratios": [3, 1, 1]},
+            gridspec_kw={"height_ratios": [3, 1, 1, 1]},
         )
-        self._ax_price, self._ax_pos, self._ax_equity = axes
+        self._ax_price, self._ax_gate_conv, self._ax_pos, self._ax_equity = axes
         self._fig.tight_layout(pad=1.2)
 
     def _load_recent_klines_csv_fallback(self) -> pd.DataFrame:
@@ -163,9 +165,81 @@ class LiveRefreshRenderer:
             take,
         )
 
+    def _draw_gate_and_conviction(
+        self,
+        xp: np.ndarray,
+        regime_tail: np.ndarray,
+        strength_tail: np.ndarray,
+        trend_signed_tail: Optional[np.ndarray] = None,
+        gate_b_tail: Optional[np.ndarray] = None,
+    ) -> None:
+        """日線 A/C regime（左）+ |tanh|（右）；可選 5m signed tanh、Gate B（每根 5m 更新）。"""
+        self._ax_gate_conv.clear()
+        if self._ax_conv_r is not None:
+            try:
+                self._ax_conv_r.remove()
+            except Exception:
+                pass
+            self._ax_conv_r = None
+        if xp.size == 0:
+            self._ax_gate_conv.set_ylabel("GATE / conv")
+            return
+        if gate_b_tail is not None and len(gate_b_tail) == len(xp):
+            gb = np.clip(np.asarray(gate_b_tail, dtype=float), 0.0, 1.0)
+            self._ax_gate_conv.fill_between(
+                xp,
+                -1.14,
+                -1.14 + 0.13 * gb,
+                step="post",
+                color="seagreen",
+                alpha=0.32,
+                label="Gate B liq (5m)",
+            )
+        self._ax_gate_conv.step(
+            xp,
+            regime_tail,
+            where="post",
+            color="navy",
+            linewidth=1.4,
+            label="1d A/C regime (+1=A / -1=C / 0=N)",
+        )
+        if trend_signed_tail is not None and len(trend_signed_tail) == len(xp):
+            self._ax_gate_conv.plot(
+                xp,
+                np.asarray(trend_signed_tail, dtype=float),
+                color="darkcyan",
+                linestyle=":",
+                linewidth=1.15,
+                alpha=0.9,
+                label="tanh(scale×trend) 5m signed",
+            )
+        self._ax_gate_conv.axhline(0.0, color="gray", linewidth=0.6, linestyle="--", alpha=0.6)
+        self._ax_gate_conv.set_ylim(-1.15, 1.15)
+        self._ax_gate_conv.set_ylabel("Regime / 5m trend")
+        self._ax_gate_conv.set_title(
+            "Navy step=1d Gate A/C (piecewise by day); green=Gate B liq (5m); "
+            "cyan dotted=tanh(scale*trend) signed; right axis=|tanh| (reward strength)",
+            fontsize=8,
+        )
+        self._ax_gate_conv.legend(loc="upper left", fontsize=6)
+
+        ax_r = self._ax_gate_conv.twinx()
+        self._ax_conv_r = ax_r
+        ax_r.plot(
+            xp,
+            strength_tail,
+            color="darkorange",
+            linewidth=1.1,
+            alpha=0.95,
+            label="|tanh(scale*trend)|",
+        )
+        ax_r.set_ylim(0.0, 1.05)
+        ax_r.set_ylabel("Conv strength")
+        ax_r.legend(loc="upper right", fontsize=7)
+
     def _apply_datetime_xaxis(self) -> None:
-        """三圖共用實際日期時間刻度（與資料 timestamp 一致，通常為交易所 UTC）。"""
-        for ax in (self._ax_price, self._ax_pos, self._ax_equity):
+        """四圖共用實際日期時間刻度（與資料 timestamp 一致，通常為交易所 UTC）。"""
+        for ax in (self._ax_price, self._ax_gate_conv, self._ax_pos, self._ax_equity):
             ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=5, maxticks=16))
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d %H:%M"))
 
@@ -184,6 +258,10 @@ class LiveRefreshRenderer:
         trade_marker_history: Sequence[Optional[str]],
         gate_labels_rows_history: Sequence[Sequence[str]],
         max_position_pct: float,
+        gate_regime_history: Optional[Sequence[float]] = None,
+        conviction_strength_history: Optional[Sequence[float]] = None,
+        trend_tanh_signed_history: Optional[Sequence[float]] = None,
+        gate_b_liquidity_history: Optional[Sequence[float]] = None,
     ) -> None:
         """Refresh one window with latest chart and PnL state.
 
@@ -200,6 +278,10 @@ class LiveRefreshRenderer:
             trade_marker_history: 每步 ``B`` / ``S`` / ``None``，與 equity 等長。
             gate_labels_rows_history: 每步 GATE A/C 變化字串列表（可空），與 equity 等長。
             max_position_pct: 中圖 Y 軸對稱範圍參考。
+            gate_regime_history: 每步 regime -1/0/1（與 reward gate 語意一致）；缺省則以 0 填滿。
+            conviction_strength_history: 每步 |tanh(scale*trend_score)|；缺省則以 0 填滿。
+            trend_tanh_signed_history: 每步 tanh(scale×trend) 帶符號（5m）；缺省不畫點線。
+            gate_b_liquidity_history: 每步 Gate B 0/1（5m 流動性）；缺省不畫綠帶。
         """
         _ = ts_history
         df_use = df_price.copy()
@@ -212,10 +294,55 @@ class LiveRefreshRenderer:
         h_eq = len(equity_history)
         h_m = len(trade_marker_history)
         h_g = len(gate_labels_rows_history)
-        h_align = int(min(h_eq, h_m, h_g))
-        take = int(min(h_align, n_price)) if (n_price > 0 and h_align > 0) else 0
+
+        gr = list(gate_regime_history) if gate_regime_history is not None else []
+        cv = list(conviction_strength_history) if conviction_strength_history is not None else []
+        if len(gr) < h_eq:
+            gr = [0.0] * (h_eq - len(gr)) + gr
+        if len(cv) < h_eq:
+            cv = [0.0] * (h_eq - len(cv)) + cv
+        if len(gr) > h_eq:
+            gr = gr[-h_eq:]
+        if len(cv) > h_eq:
+            cv = cv[-h_eq:]
+
+        tt: List[float] = []
+        if trend_tanh_signed_history is not None:
+            tt = list(trend_tanh_signed_history)
+            if len(tt) < h_eq:
+                tt = [0.0] * (h_eq - len(tt)) + tt
+            if len(tt) > h_eq:
+                tt = tt[-h_eq:]
+        gb: List[float] = []
+        if gate_b_liquidity_history is not None:
+            gb = list(gate_b_liquidity_history)
+            if len(gb) < h_eq:
+                gb = [0.0] * (h_eq - len(gb)) + gb
+            if len(gb) > h_eq:
+                gb = gb[-h_eq:]
+
+        align_parts = [h_eq, h_m, h_g, n_price, len(gr), len(cv)]
+        if trend_tanh_signed_history is not None:
+            align_parts.append(len(tt))
+        if gate_b_liquidity_history is not None:
+            align_parts.append(len(gb))
+        h_align = int(min(align_parts)) if (n_price > 0 and h_eq > 0) else 0
+        take = h_align
 
         self._draw_price(df_use, trade_marker_history, gate_labels_rows_history, take)
+
+        if take > 0:
+            ts_tail = pd.to_datetime(df_use["timestamp"].iloc[-take:])
+            xp = mdates.date2num(ts_tail)
+            y_reg = np.asarray(gr[-take:], dtype=float)
+            y_cv = np.asarray(cv[-take:], dtype=float)
+            y_tt = (
+                np.asarray(tt[-take:], dtype=float) if trend_tanh_signed_history is not None else None
+            )
+            y_gb = np.asarray(gb[-take:], dtype=float) if gate_b_liquidity_history is not None else None
+            self._draw_gate_and_conviction(xp, y_reg, y_cv, y_tt, y_gb)
+        else:
+            self._draw_gate_and_conviction(np.array([]), np.array([]), np.array([]))
 
         self._ax_pos.clear()
 
@@ -230,11 +357,11 @@ class LiveRefreshRenderer:
 
         self._ax_equity.clear()
         if take > 0:
-            xe = xp
+            ts_tail = pd.to_datetime(df_use["timestamp"].iloc[-take:])
+            xp = mdates.date2num(ts_tail)
             ye = np.asarray(list(equity_history)[-take:], dtype=float)
-            self._ax_equity.plot(xe, ye, color="tab:green", linewidth=1.2)
+            self._ax_equity.plot(xp, ye, color="tab:green", linewidth=1.2)
         self._ax_equity.set_ylabel("Equity")
-        # 圖上文字勿用中文：Windows 預設 DejaVu Sans 缺 CJK，tkinter 會洗版 Glyph missing 警告
         self._ax_equity.set_xlabel("Time (YYYY-MM-DD HH:MM, bar timestamps, typically UTC)")
 
         title = (

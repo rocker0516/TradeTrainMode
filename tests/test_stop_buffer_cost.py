@@ -1,3 +1,10 @@
+"""
+CostCalculator 契約測試（對齊 `Env/Costs/cost.py` 現行 API）。
+
+舊版曾輸出 cost_sl_buf / stop_missing_cost 等通道；目前已收斂為
+death + fric（合併為 cost）以及獨立的 cost_risk_dense。
+"""
+
 from __future__ import annotations
 
 import pytest
@@ -5,77 +12,54 @@ import pytest
 from Env.Costs.cost import CostCalculator
 
 
-def test_stop_buffer_cost_flat_is_zero() -> None:
+def test_alive_flat_equity_dense_and_fric_channels() -> None:
+    """存活、遠離死亡線：cost_risk=0，dense 為 (1-buffer)^2，fric 依手續費。"""
     calc = CostCalculator()
     out = calc.compute(
         liq_triggered=False,
         equity=10_000.0,
         min_balance=1.0,
-        step_fee=0.0,
-        has_position=False,
-        current_price=100.0,
-        stop_loss_price=90.0,
-        atr=5.0,
-        stop_buffer_d_min=0.3,
-        stop_buffer_d_scale=0.3,
+        step_fee=10.0,
+        initial_balance=10_000.0,
+        cost_fric_scale=1.0,
     )
-    assert out["cost_sl_buf"] == pytest.approx(0.0)
-    assert out["cost_breakdown"]["sl_buf_cost"] == pytest.approx(0.0)
-    assert out["cost_breakdown"]["stop_missing_cost"] == pytest.approx(0.0)
+    assert out["cost_risk"] == pytest.approx(0.0)
+    assert out["cost_fric"] == pytest.approx(10.0 / 10_000.0)
+    assert out["cost"] == pytest.approx(out["cost_risk"] + out["cost_fric"])
+    assert "dense_buffer_cost" in out["cost_breakdown"]
+    assert "death_cost" in out["cost_breakdown"]
+    assert "fric_cost" in out["cost_breakdown"]
+    assert out["cost_breakdown"]["death_cost"] == pytest.approx(0.0)
+    assert out["cost_breakdown"]["fric_cost"] == pytest.approx(out["cost_fric"])
 
 
-def test_stop_buffer_cost_missing_stop_is_one_when_in_position() -> None:
+def test_death_sets_cost_risk_and_death_breakdown() -> None:
+    """權益低於 min_balance：死亡成本為正，且寫入 cost_breakdown["death_cost"]。"""
     calc = CostCalculator()
     out = calc.compute(
         liq_triggered=False,
-        equity=10_000.0,
+        equity=0.5,
         min_balance=1.0,
         step_fee=0.0,
-        has_position=True,
-        current_price=100.0,
-        stop_loss_price=0.0,  # missing
-        atr=5.0,
-        stop_buffer_d_min=0.3,
-        stop_buffer_d_scale=0.3,
+        episode_steps=0,
+        episode_max_steps=100,
+        initial_balance=10_000.0,
     )
-    assert out["cost_sl_buf"] == pytest.approx(1.0)
-    assert out["cost_breakdown"]["stop_missing_cost"] == pytest.approx(1.0)
-    assert out["cost_breakdown"]["sl_buf_cost"] == pytest.approx(0.0)
+    assert out["cost_risk"] >= 1.0
+    assert out["cost_breakdown"]["death_cost"] == pytest.approx(out["cost_risk"])
+    assert out["cost"] == pytest.approx(out["cost_risk"] + out["cost_fric"])
 
 
-def test_stop_buffer_cost_formula_clip_and_threshold() -> None:
+def test_cost_fric_uses_cost_fric_scale() -> None:
     calc = CostCalculator()
-    # d_t = |P-SL|/ATR = |100-99|/5 = 0.2
-    # d_min = 0.3, d_scale = 0.3 => cost = (0.3-0.2)/0.3 = 1/3
     out = calc.compute(
         liq_triggered=False,
-        equity=10_000.0,
+        equity=1_000.0,
         min_balance=1.0,
-        step_fee=0.0,
-        has_position=True,
-        current_price=100.0,
-        stop_loss_price=99.0,
-        atr=5.0,
-        stop_buffer_d_min=0.3,
-        stop_buffer_d_scale=0.3,
+        step_fee=5.0,
+        initial_balance=10_000.0,
+        cost_fric_scale=100.0,
     )
-    assert out["cost_breakdown"]["stop_missing_cost"] == pytest.approx(0.0)
-    assert out["cost_breakdown"]["sl_buf_cost"] == pytest.approx(1.0 / 3.0)
-    assert out["cost_sl_buf"] == pytest.approx(1.0 / 3.0)
-
-    # 距離足夠安全：d_t >= d_min -> 0
-    out2 = calc.compute(
-        liq_triggered=False,
-        equity=10_000.0,
-        min_balance=1.0,
-        step_fee=0.0,
-        has_position=True,
-        current_price=100.0,
-        stop_loss_price=98.0,  # d_t=0.4
-        atr=5.0,
-        stop_buffer_d_min=0.3,
-        stop_buffer_d_scale=0.3,
-    )
-    assert out2["cost_sl_buf"] == pytest.approx(0.0)
-
-
+    expected = (5.0 / 1_000.0) * 100.0
+    assert out["cost_fric"] == pytest.approx(expected)
+    assert out["cost_breakdown"]["fric_cost"] == pytest.approx(expected)

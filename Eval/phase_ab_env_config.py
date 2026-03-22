@@ -26,4 +26,7 @@ class PhaseABEnvConfig:
     TRADE_FREQ_WINDOW_STEPS: None | int = None
     TRADE_FREQ_COST_LIMIT: None | float = None
 
+    # §5c：中性區仍成交時主線固定扣分（與 regime_alignment 分開）；0=關閉
+    NEUTRAL_TRADE_PENALTY_WEIGHT: float = 0.01
+
     EVAL_MIN_EPISODE_STEPS: int = 1

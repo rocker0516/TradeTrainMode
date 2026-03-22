@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
+
+import numpy as np
 
 
 def trade_bs_from_delta(
@@ -58,3 +60,58 @@ def gate_ac_change_labels(
     if abs(float(curr[2]) - float(prev[2])) > 1e-6:
         labels.append(f"C:{_i_gate_c(prev[2])}→{_i_gate_c(curr[2])}")
     return labels
+
+
+def gate_flags_to_regime_indicator(
+    gate_flags: Optional[Union[Tuple[float, ...], List[float], np.ndarray]],
+) -> float:
+    """
+    與 `Env/Rewards/reward.py` regime_dir 一致：Gate A 多=+1、Gate C 空=-1、否則 0（中性）。
+
+    Args:
+        gate_flags: ``(gate_A, gate_B, gate_C)``；缺漏時視為 0。
+
+    Returns:
+        -1.0、0.0 或 1.0。
+    """
+    if gate_flags is None:
+        return 0.0
+    arr = np.asarray(gate_flags, dtype=np.float64).reshape(-1)
+    if arr.size < 3:
+        return 0.0
+    gate_a = float(arr[0])
+    gate_c = float(arr[2])
+    if gate_a >= 0.5:
+        return 1.0
+    if gate_c <= -0.5:
+        return -1.0
+    return 0.0
+
+
+def trend_tanh_signed_from_trend_score(trend_score: float, *, scale: float) -> float:
+    """
+    與 reward 使用相同縮放：``tanh(scale * clip(trend_score, -5, 5))``（帶正負號，反映 5m 多空傾向）。
+
+    Args:
+        trend_score: ``MarketData.get_market_metrics`` 的 ``trend_score``（5m 收盤上 (MA50-MA200)/MA200）。
+        scale: ``conviction_trend_score_scale``（須與訓練 env 一致）。
+
+    Returns:
+        (-1, 1) 的 signed tanh。
+    """
+    scaled = float(scale) * float(np.clip(float(trend_score), -5.0, 5.0))
+    return float(np.tanh(scaled))
+
+
+def conviction_strength_from_trend_score(trend_score: float, *, scale: float) -> float:
+    """
+    與 `ConvictionTrendRewardCalculator` 一致：``strength = |tanh(scale * clip(trend_score, -5, 5))|``。
+
+    Args:
+        trend_score: ``MarketData.get_market_metrics`` 的 ``trend_score``（MA 趨勢小數比）。
+        scale: ``conviction_trend_score_scale``（須與訓練 env 一致）。
+
+    Returns:
+        [0, 1] 的趨勢強度。
+    """
+    return float(abs(trend_tanh_signed_from_trend_score(trend_score, scale=scale)))

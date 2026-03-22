@@ -36,6 +36,7 @@ _PHASE_AB_KWARGS_REQUIRED_KEYS: frozenset[str] = frozenset(
         "cost_fric_scale",
         "regime_alignment_bonus_weight",
         "conviction_trend_bonus_weight",
+        "neutral_trade_penalty_weight",
         "conviction_min_abs_pos",
         "conviction_trend_min_strength",
     }
@@ -81,6 +82,7 @@ def test_phase_ab_numeric_anchors() -> None:
 def test_phase_ab_env_config_fields_mirror_documented_recipe() -> None:
     assert PhaseABEnvConfig.WINDOW_SIZE == 14
     assert PhaseABEnvConfig.WINDOW_SIZE_1D == 12
-    assert PhaseABEnvConfig.NO_TRADE_ENTRY_THRESHOLD == 0.3
+    assert PhaseABEnvConfig.NO_TRADE_ENTRY_THRESHOLD == 0.2
     assert PhaseABEnvConfig.MAX_STEP_POS_CHANGE_PCT == 0.4
     assert PhaseABEnvConfig.DEFAULT_MAX_EPISODE_STEPS == 288 * 31
+    assert PhaseABEnvConfig.NEUTRAL_TRADE_PENALTY_WEIGHT == 0.0

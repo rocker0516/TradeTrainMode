@@ -143,7 +143,8 @@ class RiskOnlyPenaltyWrapper(gym.Wrapper):
 class RewardAnnealWrapper(gym.Wrapper):
     """
     依 info 的 reward_log_return / reward_regime_bonus / reward_conviction_bonus 重組 reward：
-    reward = reward_log_return + anneal_factor * (reward_regime_bonus + reward_conviction_bonus)。
+    reward = reward_log_return + anneal_factor * (reward_regime_bonus + reward_conviction_bonus)
+    + reward_neutral_trade_penalty（中性區成交懲罰不參與退火，恆併入）。
     anneal_factor 從 1 線性降到 0（anneal_steps 步內）；anneal_steps<=0 表示不退火（恆為 1）。
     training_timestep 由 PhaseABStatsCallback 每步寫入，供計算 factor。
     """
@@ -157,12 +158,13 @@ class RewardAnnealWrapper(gym.Wrapper):
         r_log = float(info.get("reward_log_return", reward))
         r_reg = float(info.get("reward_regime_bonus", 0.0))
         r_conv = float(info.get("reward_conviction_bonus", 0.0))
+        r_neu = float(info.get("reward_neutral_trade_penalty", 0.0))
         step = int(getattr(self, "training_timestep", 0))
         if self.anneal_steps > 0 and step >= 0:
             factor = max(0.0, 1.0 - float(step) / float(self.anneal_steps))
         else:
             factor = 1.0
-        reward_new = r_log + factor * (r_reg + r_conv)
+        reward_new = r_log + factor * (r_reg + r_conv) + r_neu
         info["reward_anneal_factor"] = float(factor)
         return obs, float(reward_new), terminated, truncated, info
 
@@ -576,6 +578,7 @@ def get_phase_ab_env_kwargs(
     max_episode_steps: Optional[int] = None,
     regime_bonus_weight: float = 0.0,
     conviction_bonus_weight: float = 0.0,
+    neutral_trade_penalty_weight: float = 0.0,
     conviction_min_abs_pos: float = 0.2,
     conviction_trend_min_strength: float = 0.25,
     data_split_enabled: bool = True,
@@ -624,6 +627,7 @@ def get_phase_ab_env_kwargs(
         # 順向／regime 輔助 reward（小權重）：做對方向加分，主線仍是 log-return
         regime_alignment_bonus_weight=float(regime_bonus_weight),
         conviction_trend_bonus_weight=float(conviction_bonus_weight),
+        neutral_trade_penalty_weight=float(neutral_trade_penalty_weight),
         conviction_min_abs_pos=float(conviction_min_abs_pos),
         conviction_trend_min_strength=float(conviction_trend_min_strength),
     )
@@ -832,7 +836,7 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase A/B SAC 訓練")
     parser.add_argument("--phase", choices=["A", "B"], default="B", help="Phase A=只放寬控制, B=再加 cost_risk 懲罰")
-    parser.add_argument("--timesteps", type=int, default=9_000_000) # 288 * 21 * 48 * 20 = 261,360,000
+    parser.add_argument("--timesteps", type=int, default=1_000_000) # 288 * 21 * 48 * 20 = 261,360,000
     parser.add_argument("--n-envs", type=int, default=48)
     parser.add_argument("--lambda-risk", type=float, default=1.0, help="Phase B 時 cost_risk（事件型）的權重")
     parser.add_argument("--lambda-buffer", type=float, default=0.01, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
@@ -863,6 +867,12 @@ def main() -> None:
     parser.add_argument("--no-data-split", action="store_true", help="停用訓練/評估時間切分，訓練與評估皆用完整資料")
     # 順向／regime 輔助 reward（小權重，做對方向加分）
     parser.add_argument("--regime-bonus-weight", type=float, default=0.00003, help="Regime 對齊 bonus 權重（A 多/C 空加分，依 dir_strength 加權）")
+    parser.add_argument(
+        "--neutral-trade-penalty-weight",
+        type=float,
+        default=float(PhaseABEnvConfig.NEUTRAL_TRADE_PENALTY_WEIGHT),
+        help="中性區（無 Gate A/C）且本步成交時，主線 reward 固定扣分（不隨 regime/conviction 退火）",
+    )
     parser.add_argument("--conviction-bonus-weight", type=float, default=0.03, help="Conviction 順向 bonus 權重（強訊號+大倉+同向加分）")
     parser.add_argument("--conviction-min-abs-pos", type=float, default=0.4, help="Conviction 生效最小持倉比例")
     parser.add_argument("--conviction-trend-min-strength", type=float, default=0.5, help="Conviction 生效最小趨勢強度")
@@ -897,11 +907,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # 路徑預設：依 phase/lr/lb/rs/rb/cb/lf/fas 產生（不可在 add_argument 時用 args，故在此補上）
+    # 路徑預設：依 phase/lr/lb/rs/rb/cb/ntp/lf/fas 產生（不可在 add_argument 時用 args，故在此補上）
     def _path_prefix() -> str:
         return (
             f"phase_{args.phase}_lr{str(args.lambda_risk).replace('.', '')}_lb{str(args.lambda_buffer).replace('.', '')}"
             f"_rs{str(args.reward_scale).replace('.', '')}_rb{str(args.regime_bonus_weight).replace('.', '')}_cb{str(args.conviction_bonus_weight).replace('.', '')}"
+            f"_ntp{str(args.neutral_trade_penalty_weight).replace('.', '')}"
             f"_lf{str(args.lambda_fee_max).replace('.', '')}_fas{str(args.fee_anneal_steps).replace('.', '')}_cfs{str(args.cost_fric_scale).replace('.', '')}"
         )
     if not (getattr(args, "eval_report_path", "") or "").strip():
@@ -921,6 +932,7 @@ def main() -> None:
     env_kwargs_train = get_phase_ab_env_kwargs(
         regime_bonus_weight=args.regime_bonus_weight,
         conviction_bonus_weight=args.conviction_bonus_weight,
+        neutral_trade_penalty_weight=args.neutral_trade_penalty_weight,
         conviction_min_abs_pos=args.conviction_min_abs_pos,
         conviction_trend_min_strength=args.conviction_trend_min_strength,
         data_split_enabled=data_split,
@@ -931,6 +943,7 @@ def main() -> None:
     env_kwargs_eval = get_phase_ab_env_kwargs(
         regime_bonus_weight=args.regime_bonus_weight,
         conviction_bonus_weight=args.conviction_bonus_weight,
+        neutral_trade_penalty_weight=args.neutral_trade_penalty_weight,
         conviction_min_abs_pos=args.conviction_min_abs_pos,
         conviction_trend_min_strength=args.conviction_trend_min_strength,
         data_split_enabled=data_split,

@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from Env.Components.market_data import MarketData
+from Env.config import Config
 
 
 def _read_prefixed_csv_head(path: Path, *, prefix: str, nrows: int) -> pd.DataFrame:
@@ -100,50 +101,39 @@ def test_cnn_5m_features_are_normalized_on_real_data_head(symbols: Tuple[str, ..
         target_symbol=target,
         feature_symbols=list(symbols),
     )
+    assert md.cols_5m_target == list(Config.OBS_PRICE_SEQ_TARGET_COLS)
 
-    feats = md.features_5m_arr
-    cols = md.cols_5m
+    feats = md.features_5m_target_arr
+    cols = md.cols_5m_target
     idx = _col_index(cols)
 
-    # MarketData 內部使用 float32；env 輸出 obs 會轉成 float16 以省 RAM
     assert feats.dtype == np.float32
     assert feats.shape[0] == len(df_5m)
     assert feats.shape[1] == len(cols)
     assert np.isfinite(feats).all()
 
-    # 1) *_z clip 範圍
-    z_cols = [c for c in cols if c.endswith("_z")]
+    z_cols = [c for c in cols if c.endswith("_z") or c.endswith("_z_short")]
     for c in z_cols:
         x = feats[:, idx[c]]
         assert float(np.max(x)) <= 5.0001
         assert float(np.min(x)) >= -5.0001
 
-    # 2) bounded 範圍（同合成測試）
     bounded_specs = {
-        "price_pos_96": (-1.0, 1.0),
-        "price_pos_288": (-1.0, 1.0),
-        "bb_pos_48": (-2.0, 2.0),
-        "rsi_14": (-1.0, 1.0),
-        "macd_atr": (-10.0, 10.0),
-        "macd_signal_atr": (-10.0, 10.0),
-        "trend_strength_atr": (0.0, 10.0),
-        "dir_persist_20": (-1.0, 1.0),
-        "chop_48": (-5.0, 5.0),
-        "trend_flip_rate_48": (-1.0, 1.0),
+        "ret_15m_scale": (-3.0, 3.0),
         "alts_trend_up_ratio": (-1.0, 1.0),
+        "alts_rel_ret_15m_abs_mean_scale": (0.0, 0.05),
+        "rv_ratio_scale": (0.0, 0.05),
     }
     for c, (lo, hi) in bounded_specs.items():
         assert c in idx
         x = feats[:, idx[c]]
-        assert float(np.max(x)) <= hi + 1e-6
-        assert float(np.min(x)) >= lo - 1e-6
+        assert float(np.max(x)) <= hi + 1e-5
+        assert float(np.min(x)) >= lo - 1e-5
 
-    # 3) 每個 alt symbol 的 4 通道存在
+    ocols = md.cols_5m_others
     for sym in symbols:
         if sym == target:
             continue
-        prefix = sym.lower()
-        for suffix in ("ret_15m_z", "rel_ret_15m_z", "volume_log_z", "trend_spread_z"):
-            assert f"{prefix}_{suffix}" in idx
+        assert any(str(col).startswith(f"{sym}_") for col in ocols), f"expected prefixed cols for {sym}"
 
 

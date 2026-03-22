@@ -13,9 +13,16 @@ import numpy as np
 import pandas as pd
 from stable_baselines3 import SAC
 
+from Env.config import Config
 from Env.trading_env import TradingEnvironment
 from LiveTradingRunner.live_render import LiveRefreshRenderer
-from LiveTradingRunner.render_history_utils import gate_ac_change_labels, trade_bs_from_delta
+from LiveTradingRunner.render_history_utils import (
+    conviction_strength_from_trend_score,
+    gate_ac_change_labels,
+    gate_flags_to_regime_indicator,
+    trade_bs_from_delta,
+    trend_tanh_signed_from_trend_score,
+)
 
 
 def post_train_max_episode_steps_cap(*, data_split: bool, holdout_months: int) -> int:
@@ -162,6 +169,10 @@ def run_holdout_rollout_and_show_live_render(
         position_history: List[float] = []
         trade_marker_history: List[Optional[str]] = []
         gate_labels_rows_history: List[List[str]] = []
+        gate_regime_history: List[float] = []
+        conviction_strength_history: List[float] = []
+        trend_tanh_signed_history: List[float] = []
+        gate_b_liquidity_history: List[float] = []
         prev_gate: Optional[Tuple[float, float, float]] = None
         prev_pos: float = 0.0
         obs_curr: Any = obs
@@ -177,6 +188,38 @@ def run_holdout_rollout_and_show_live_render(
             obs_next, _reward, terminated, truncated, info = env.step(action)
             info_d = info if isinstance(info, dict) else {}
             base = unwrap_to_trading_env(env)
+
+            _df5 = getattr(base.market_data, "df_5m", None)
+            _md_len = int(len(_df5)) if _df5 is not None else 0
+            _step_idx = int(getattr(base, "_last_executed_step_idx", 0))
+            if _md_len > 0:
+                _step_idx = max(0, min(_step_idx, _md_len - 1))
+                _met = base.market_data.get_market_metrics(_step_idx)
+                _ts = float(_met.get("trend_score", 0.0))
+                _gf = base.market_data.get_gate_flags(_step_idx)
+                _scale = float(
+                    getattr(
+                        getattr(base, "reward_calculator", None),
+                        "conviction_trend_score_scale",
+                        getattr(Config, "CONVICTION_TREND_SCORE_SCALE", 10.0),
+                    )
+                )
+                gate_regime_history.append(gate_flags_to_regime_indicator(_gf))
+                conviction_strength_history.append(
+                    conviction_strength_from_trend_score(_ts, scale=_scale)
+                )
+                trend_tanh_signed_history.append(
+                    trend_tanh_signed_from_trend_score(_ts, scale=_scale)
+                )
+                _gfa = np.asarray(_gf, dtype=np.float64).reshape(-1)
+                gate_b_liquidity_history.append(
+                    float(_gfa[1]) if _gfa.size >= 2 else 0.0
+                )
+            else:
+                gate_regime_history.append(0.0)
+                conviction_strength_history.append(0.0)
+                trend_tanh_signed_history.append(0.0)
+                gate_b_liquidity_history.append(0.0)
 
             eq = float(info_d.get("equity", float("nan")))
             if np.isfinite(eq):
@@ -272,6 +315,10 @@ def run_holdout_rollout_and_show_live_render(
             trade_marker_history=list(tm_deque),
             gate_labels_rows_history=list(gl_deque),
             max_position_pct=max_pos,
+            gate_regime_history=gate_regime_history,
+            conviction_strength_history=conviction_strength_history,
+            trend_tanh_signed_history=trend_tanh_signed_history,
+            gate_b_liquidity_history=gate_b_liquidity_history,
         )
 
         import matplotlib.pyplot as plt
