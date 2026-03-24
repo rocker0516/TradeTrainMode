@@ -3,6 +3,7 @@ E2 特徵訊號分析：(1) LightGBM feature importance 對應欄位名；(2) �
 
 - 對四路 CNN（5m_target, 5m_others, 1d_target, 1d_others）分別跑同一套時間切分與標籤。
 - 輸出：importance 表/圖、per-channel 指標表/圖，存於 --out_dir，檔名含 cnn_key。
+- 若 --enable_sideway_auc：另存盤整二分類 AUC 表，並輸出 e2_sideway_auc_per_channel_combined.png、e2_sideway_auc_overall_by_cnn.png。
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import roc_auc_score
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -43,6 +45,64 @@ import lightgbm as lgb
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+
+def build_sideway_labels(
+    close_arr: np.ndarray,
+    atr_ratio_arr: np.ndarray,
+    valid_indices: np.ndarray,
+    *,
+    lookback_l: int = 24,
+    theta_er: float = 0.30,
+    rw_max: float = 3.8,
+    rp_low: float = 0.2,
+    rp_high: float = 0.8,
+    slope_k: int = 6,
+    slope_abs_max: float = 0.30,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """
+    建立盤整二分類標籤（1=盤整，0=非盤整）。
+
+    盤整條件（同時滿足）：
+    1) ER_L = |C_t - C_{t-L}| / (sum_{i=t-L+1..t}|C_i-C_{i-1}| + eps) < theta_er
+    2) RW_L = (HH_L - LL_L) / (ATR_L + eps) < rw_max
+    3) rp_low < RP_L = (C_t - LL_L)/(HH_L - LL_L + eps) < rp_high
+    4) |Slope| < slope_abs_max, Slope=(EMA12_t-EMA12_{t-k})/(ATR_L+eps)
+
+    ATR_L 使用 atr_ratio_arr * close 的 rolling mean(L) 近似。
+    """
+    close_s = pd.Series(np.asarray(close_arr, dtype=np.float64))
+    atr_ratio_s = pd.Series(np.asarray(atr_ratio_arr, dtype=np.float64))
+    abs_diff = close_s.diff().abs().fillna(0.0)
+    vol_l = abs_diff.rolling(window=int(lookback_l), min_periods=int(lookback_l)).sum()
+    direction_l = (close_s - close_s.shift(int(lookback_l))).abs()
+    er_l = direction_l / (vol_l + float(eps))
+
+    hh_l = close_s.rolling(window=int(lookback_l), min_periods=int(lookback_l)).max()
+    ll_l = close_s.rolling(window=int(lookback_l), min_periods=int(lookback_l)).min()
+    atr_price = (atr_ratio_s * close_s.abs()).replace([np.inf, -np.inf], np.nan)
+    atr_l = atr_price.rolling(window=int(lookback_l), min_periods=int(lookback_l)).mean()
+    rw_l = (hh_l - ll_l) / (atr_l + float(eps))
+    rp_l = (close_s - ll_l) / ((hh_l - ll_l) + float(eps))
+
+    ema12 = close_s.ewm(span=12, adjust=False).mean()
+    slope = (ema12 - ema12.shift(int(slope_k))) / (atr_l + float(eps))
+
+    mask = (
+        (er_l < float(theta_er))
+        & (rw_l < float(rw_max))
+        & (rp_l > float(rp_low))
+        & (rp_l < float(rp_high))
+        & (slope.abs() < float(slope_abs_max))
+    )
+    mask = mask.fillna(False)
+    y_sideway = np.zeros(len(valid_indices), dtype=np.int32)
+    for i, t in enumerate(valid_indices):
+        if 0 <= int(t) < len(mask):
+            y_sideway[i] = 1 if bool(mask.iloc[int(t)]) else 0
+    return y_sideway
+
 
 def get_summary_feature_names(
     channel_names: List[str],
@@ -107,6 +167,7 @@ def run_interaction_importance(
     task: str,
     feature_names: List[str],
     top_n: int = 15,
+    device: str = "cpu",
 ) -> pd.DataFrame:
     """
     取 importance 前 top_n 個特徵，建 pairwise 乘積交互項，再訓 LightGBM，
@@ -117,7 +178,7 @@ def run_interaction_importance(
     if n < 2 or top_n < 2:
         return pd.DataFrame(columns=["feat_a", "feat_b", "importance"])
     # 先跑一次得到排序後的前 top_n 名索引（用全特徵 importance 排序）
-    model0 = lgb.LGBMClassifier(
+    lgb_kw: Dict[str, Any] = dict(
         n_estimators=200,
         max_depth=6,
         learning_rate=0.05,
@@ -127,6 +188,9 @@ def run_interaction_importance(
         verbosity=-1,
         n_jobs=1,
     )
+    if device in ("gpu", "cuda"):
+        lgb_kw["device"] = "gpu"
+    model0 = lgb.LGBMClassifier(**lgb_kw)
     df_train = pd.DataFrame(X_train, columns=feature_names)
     if task == "3class":
         le = LabelEncoder()
@@ -151,16 +215,7 @@ def run_interaction_importance(
     X_tr_full = np.hstack([X_train, X_tr_ia])
     X_te_full = np.hstack([X_test, X_te_ia])
     all_names = list(feature_names) + ia_names
-    model_ia = lgb.LGBMClassifier(
-        n_estimators=200,
-        max_depth=6,
-        learning_rate=0.05,
-        reg_alpha=0.1,
-        reg_lambda=0.1,
-        random_state=RANDOM_STATE,
-        verbosity=-1,
-        n_jobs=1,
-    )
+    model_ia = lgb.LGBMClassifier(**lgb_kw)
     df_tr = pd.DataFrame(X_tr_full, columns=all_names)
     if task == "3class":
         model_ia.fit(df_tr, y_train_enc)
@@ -184,19 +239,23 @@ def run_importance(
     y_test: np.ndarray,
     task: str,
     feature_names: List[str],
+    device: str = "cpu",
 ) -> Tuple[Any, np.ndarray]:
     """訓練 LightGBM，回傳 model 與 feature_importances_（與 feature_names 同序）。"""
+    lgb_kw: Dict[str, Any] = dict(
+        n_estimators=200,
+        max_depth=6,
+        learning_rate=0.05,
+        reg_alpha=0.1,
+        reg_lambda=0.1,
+        random_state=RANDOM_STATE,
+        verbosity=-1,
+        n_jobs=1,
+    )
+    if device in ("gpu", "cuda"):
+        lgb_kw["device"] = "gpu"
     if task == "binary":
-        model = lgb.LGBMClassifier(
-            n_estimators=200,
-            max_depth=6,
-            learning_rate=0.05,
-            reg_alpha=0.1,
-            reg_lambda=0.1,
-            random_state=RANDOM_STATE,
-            verbosity=-1,
-            n_jobs=1,
-        )
+        model = lgb.LGBMClassifier(**lgb_kw)
         model.fit(
             pd.DataFrame(X_train, columns=feature_names),
             y_train,
@@ -205,16 +264,7 @@ def run_importance(
         from sklearn.preprocessing import LabelEncoder
         le = LabelEncoder()
         y_enc = le.fit_transform(y_train)
-        model = lgb.LGBMClassifier(
-            n_estimators=200,
-            max_depth=6,
-            learning_rate=0.05,
-            reg_alpha=0.1,
-            reg_lambda=0.1,
-            random_state=RANDOM_STATE,
-            verbosity=-1,
-            n_jobs=1,
-        )
+        model = lgb.LGBMClassifier(**lgb_kw)
         model.fit(
             pd.DataFrame(X_train, columns=feature_names),
             y_enc,
@@ -234,6 +284,7 @@ def run_per_channel(
     channel_names: List[str],
     *,
     stats_per_channel: int = STATS_PER_CHANNEL_TEMPORAL,
+    device: str = "cpu",
 ) -> Tuple[List[str], List[float]]:
     """每個 channel 只用該 channel 的 stats_per_channel 維訓練，回傳 channel 名列表與對應 Test 指標。"""
     assert X.shape[1] == stats_per_channel * F
@@ -247,13 +298,46 @@ def run_per_channel(
         if task == "binary":
             y_tr = y_binary[train_idx]
             y_te = y_binary[test_idx]
-            _, auc, _ = fit_predict_binary(X_tr, y_tr, X_te, y_te, use_lightgbm=True)
+            _, auc, _ = fit_predict_binary(
+                X_tr, y_tr, X_te, y_te, use_lightgbm=True, device=device
+            )
             metrics.append(auc)
         else:
             y_tr = y_3class[train_idx]
             y_te = y_3class[test_idx]
-            _, macro_f1, _, _ = fit_predict_3class(X_tr, y_tr, X_te, y_te, use_lightgbm=True)
+            _, macro_f1, _, _ = fit_predict_3class(
+                X_tr, y_tr, X_te, y_te, use_lightgbm=True, device=device
+            )
             metrics.append(macro_f1)
+    return list(channel_names), metrics
+
+
+def run_per_channel_binary_auc(
+    X: np.ndarray,
+    y_binary: np.ndarray,
+    train_idx: np.ndarray,
+    test_idx: np.ndarray,
+    F: int,
+    channel_names: List[str],
+    *,
+    stats_per_channel: int = STATS_PER_CHANNEL_TEMPORAL,
+    device: str = "cpu",
+) -> Tuple[List[str], List[float]]:
+    """每個 channel 只用該 channel 的 stats_per_channel 維訓練，回傳二分類 AUC。"""
+    assert X.shape[1] == stats_per_channel * F
+    assert len(channel_names) == F
+    metrics: List[float] = []
+    for ch in range(F):
+        start, end = ch * stats_per_channel, (ch + 1) * stats_per_channel
+        X_ch = X[:, start:end]
+        X_tr = X_ch[train_idx]
+        X_te = X_ch[test_idx]
+        y_tr = y_binary[train_idx]
+        y_te = y_binary[test_idx]
+        _, auc, _ = fit_predict_binary(
+            X_tr, y_tr, X_te, y_te, use_lightgbm=True, device=device
+        )
+        metrics.append(auc)
     return list(channel_names), metrics
 
 
@@ -264,12 +348,28 @@ def main() -> None:
     parser.add_argument("--max_steps", type=int, default=None)
     parser.add_argument("--task", type=str, choices=("binary", "3class"), default="binary")
     parser.add_argument(
+        "--device",
+        type=str,
+        choices=("cpu", "gpu", "cuda"),
+        default="cpu",
+        help="LightGBM 訓練裝置：cpu/gpu/cuda（gpu 與 cuda 等價）",
+    )
+    parser.add_argument(
         "--summary_mode",
         type=str,
         choices=("temporal", "three_segment", "five_stats"),
         default="temporal",
         help="temporal=近期+全窗(7*F), three_segment=早/中/晚(6*F), five_stats=5*F",
     )
+    parser.add_argument("--only_5m", action="store_true", help="只跑 5m_target 與 5m_others")
+    parser.add_argument("--enable_sideway_auc", action="store_true", help="新增盤整(區間)二分類 AUC 報表")
+    parser.add_argument("--sideway_lookback_l", type=int, default=24)
+    parser.add_argument("--sideway_theta_er", type=float, default=0.30)
+    parser.add_argument("--sideway_rw_max", type=float, default=3.8)
+    parser.add_argument("--sideway_rp_low", type=float, default=0.2)
+    parser.add_argument("--sideway_rp_high", type=float, default=0.8)
+    parser.add_argument("--sideway_slope_k", type=int, default=6)
+    parser.add_argument("--sideway_slope_abs_max", type=float, default=0.30)
     parser.add_argument("--out_dir", type=str, default="logs")
     args = parser.parse_args()
 
@@ -303,13 +403,42 @@ def main() -> None:
     y_test_bin = y_binary[test_idx]
     y_train_3 = y_3class[train_idx]
     y_test_3 = y_3class[test_idx]
+    y_sideway = None
+    y_train_sideway = None
+    y_test_sideway = None
+    if args.enable_sideway_auc:
+        y_sideway = build_sideway_labels(
+            close_arr,
+            atr_ratio_arr,
+            valid_indices,
+            lookback_l=args.sideway_lookback_l,
+            theta_er=args.sideway_theta_er,
+            rw_max=args.sideway_rw_max,
+            rp_low=args.sideway_rp_low,
+            rp_high=args.sideway_rp_high,
+            slope_k=args.sideway_slope_k,
+            slope_abs_max=args.sideway_slope_abs_max,
+        )
+        y_train_sideway = y_sideway[train_idx]
+        y_test_sideway = y_sideway[test_idx]
+        print(
+            "Sideway label ratio (train/test): "
+            f"{float(np.mean(y_train_sideway)):.4f}/{float(np.mean(y_test_sideway)):.4f}"
+        )
 
     metric_name = "AUC" if args.task == "binary" else "MacroF1"
     # 收集各 CNN 的繪圖資料，最後合成一張 4x2 圖
     plot_imp: List[Tuple[str, pd.DataFrame, int]] = []   # (cnn_key, plot_df, top_n)
     plot_ch: List[Tuple[str, List[str], List[float]]] = []  # (cnn_key, ch_names, ch_metrics)
+    plot_sideway: List[Tuple[str, List[str], List[float]]] = []  # (cnn_key, ch_names, sideway_auc)
+    sideway_summary_rows: List[Dict[str, float | str]] = []
+    selected_cnn_keys = (
+        [k for k in CNN_KEYS if k in ("5m_target", "5m_others")]
+        if args.only_5m
+        else list(CNN_KEYS)
+    )
 
-    for cnn_key in CNN_KEYS:
+    for cnn_key in selected_cnn_keys:
         print(f"--- CNN: {cnn_key} ---")
         X_list = [
             obs_to_summary_features_one_cnn(o, cnn_key, summary_mode=args.summary_mode)
@@ -328,11 +457,11 @@ def main() -> None:
         # ---------- (1) LightGBM feature importance ----------
         if args.task == "binary":
             _, imp = run_importance(
-                X_train, y_train_bin, X_test, y_test_bin, "binary", feature_names
+                X_train, y_train_bin, X_test, y_test_bin, "binary", feature_names, args.device
             )
         else:
             _, imp = run_importance(
-                X_train, y_train_3, X_test, y_test_3, "3class", feature_names
+                X_train, y_train_3, X_test, y_test_3, "3class", feature_names, args.device
             )
         df_imp = pd.DataFrame({
             "feature": feature_names,
@@ -357,7 +486,7 @@ def main() -> None:
         y_test_task = y_test_bin if args.task == "binary" else y_test_3
         df_ia = run_interaction_importance(
             X_train, y_train_task, X_test, y_test_task,
-            args.task, feature_names, top_n=15,
+            args.task, feature_names, top_n=15, device=args.device,
         )
         csv_ia = os.path.join(
             args.out_dir, f"e2_interaction_importance_{cnn_key}_{args.task}.csv"
@@ -373,6 +502,7 @@ def main() -> None:
         ch_names, ch_metrics = run_per_channel(
             X, y_binary, y_3class, train_idx, test_idx, args.task, F, channel_names,
             stats_per_channel=stats_per_channel,
+            device=args.device,
         )
         df_ch = pd.DataFrame({
             "channel": ch_names,
@@ -381,6 +511,55 @@ def main() -> None:
         csv_ch = os.path.join(args.out_dir, f"e2_per_channel_metric_{cnn_key}_{args.task}.csv")
         df_ch.to_csv(csv_ch, index=False)
         print(f"  Saved {csv_ch}")
+
+        if args.enable_sideway_auc and y_sideway is not None and y_train_sideway is not None and y_test_sideway is not None:
+            # 整體盤整 AUC（使用該 CNN 全特徵）
+            _, sideway_auc_overall, _ = fit_predict_binary(
+                X_train,
+                y_train_sideway,
+                X_test,
+                y_test_sideway,
+                use_lightgbm=True,
+                device=args.device,
+            )
+            sideway_summary_rows.append(
+                {
+                    "cnn_key": cnn_key,
+                    "sideway_auc": float(sideway_auc_overall),
+                    "sideway_train_ratio": float(np.mean(y_train_sideway)),
+                    "sideway_test_ratio": float(np.mean(y_test_sideway)),
+                }
+            )
+            # 單 channel 盤整 AUC
+            sideway_ch_names, sideway_ch_auc = run_per_channel_binary_auc(
+                X,
+                y_sideway,
+                train_idx,
+                test_idx,
+                F,
+                channel_names,
+                stats_per_channel=stats_per_channel,
+                device=args.device,
+            )
+            df_ch_sideway = pd.DataFrame(
+                {
+                    "channel": sideway_ch_names,
+                    "sideway_auc": sideway_ch_auc,
+                }
+            ).sort_values("sideway_auc", ascending=False)
+            csv_ch_sideway = os.path.join(
+                args.out_dir,
+                f"e2_per_channel_metric_{cnn_key}_sideway_auc.csv",
+            )
+            df_ch_sideway.to_csv(csv_ch_sideway, index=False)
+            print(f"  Saved {csv_ch_sideway}")
+            plot_sideway.append(
+                (
+                    cnn_key,
+                    df_ch_sideway["channel"].tolist(),
+                    df_ch_sideway["sideway_auc"].tolist(),
+                )
+            )
 
         # 依 sort 後順序供繪圖
         ch_names_sorted = df_ch["channel"].tolist()
@@ -426,6 +605,51 @@ def main() -> None:
         plt.savefig(combined_path, dpi=150, bbox_inches="tight")
         plt.close()
         print(f"  Saved combined figure: {combined_path}")
+
+    if args.enable_sideway_auc and plot_sideway:
+        n_sw = len(plot_sideway)
+        fig_sw, axes_sw = plt.subplots(1, n_sw, figsize=(5 * n_sw, 10))
+        axes_sw_arr = np.atleast_1d(axes_sw)
+        for i in range(n_sw):
+            cnn_key_sw, ch_names_sw, sw_metrics = plot_sideway[i]
+            ax_sw = axes_sw_arr[i]
+            ax_sw.barh(range(len(ch_names_sw)), sw_metrics, align="center")
+            ax_sw.set_yticks(range(len(ch_names_sw)))
+            ax_sw.set_yticklabels(ch_names_sw, fontsize=6)
+            ax_sw.invert_yaxis()
+            ax_sw.set_xlabel("Sideway AUC")
+            ax_sw.set_title(f"Per-channel Sideway AUC ({cnn_key_sw})")
+            ax_sw.axvline(0.5, color="gray", linestyle="--", alpha=0.7)
+        plt.suptitle("E2 Sideway AUC (per channel)", fontsize=12, y=1.002)
+        plt.tight_layout()
+        path_sw_ch = os.path.join(args.out_dir, "e2_sideway_auc_per_channel_combined.png")
+        plt.savefig(path_sw_ch, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved sideway per-channel figure: {path_sw_ch}")
+
+    if args.enable_sideway_auc and sideway_summary_rows:
+        df_sideway_summary = pd.DataFrame(sideway_summary_rows).sort_values("sideway_auc", ascending=False)
+        fig_ov, ax_ov = plt.subplots(figsize=(max(6.0, 0.45 * len(df_sideway_summary)), 4.0))
+        cnn_keys_ov = df_sideway_summary["cnn_key"].astype(str).tolist()
+        aucs_ov = df_sideway_summary["sideway_auc"].astype(float).tolist()
+        y_pos = np.arange(len(cnn_keys_ov))
+        ax_ov.barh(y_pos, aucs_ov, align="center")
+        ax_ov.set_yticks(y_pos)
+        ax_ov.set_yticklabels(cnn_keys_ov)
+        ax_ov.invert_yaxis()
+        ax_ov.set_xlabel("Sideway AUC (full features, LightGBM)")
+        ax_ov.set_title("Sideway AUC by CNN (full features, LightGBM)")
+        ax_ov.axvline(0.5, color="gray", linestyle="--", alpha=0.7)
+        ax_ov.set_xlim(0.0, 1.0)
+        plt.tight_layout()
+        path_sw_ov = os.path.join(args.out_dir, "e2_sideway_auc_overall_by_cnn.png")
+        plt.savefig(path_sw_ov, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved sideway overall figure: {path_sw_ov}")
+
+        csv_sideway_summary = os.path.join(args.out_dir, "e2_sideway_auc_summary.csv")
+        df_sideway_summary.to_csv(csv_sideway_summary, index=False)
+        print(f"  Saved {csv_sideway_summary}")
 
     print("Done.")
 

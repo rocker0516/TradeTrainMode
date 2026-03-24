@@ -45,6 +45,49 @@ def _clip(series: pd.Series, low: float = -5.0, high: float = 5.0) -> pd.Series:
     return series.clip(lower=low, upper=high)
 
 
+def _heavy_field_features(
+    series: pd.Series,
+    *,
+    feature_name: str,
+    z_window: int,
+    z_window_short: int,
+    minp: int,
+    minp_short: int,
+) -> dict[str, pd.Series]:
+    """
+    對單一原始欄位做重度工程化（多尺度 + 變化率 + EMA 結構）。
+
+    產出 5 個欄位：
+    - {name}_z_short
+    - {name}_z_long
+    - {name}_roc_1
+    - {name}_roc_12
+    - {name}_ema_12_48_spread
+    """
+    s = series.astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    prev_1 = s.shift(1).replace(0.0, np.nan)
+    prev_12 = s.shift(12).replace(0.0, np.nan)
+    ema_12 = s.ewm(span=12, adjust=False).mean()
+    ema_48 = s.ewm(span=48, adjust=False).mean()
+    out = {
+        f"{feature_name}_z_short": _clip(_rolling_zscore(s, z_window_short, minp_short)),
+        f"{feature_name}_z_long": _clip(_rolling_zscore(s, z_window, minp)),
+        f"{feature_name}_roc_1": ((s - s.shift(1)) / np.clip(prev_1.abs(), 1e-12, None))
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0.0)
+        .clip(-5.0, 5.0),
+        f"{feature_name}_roc_12": ((s - s.shift(12)) / np.clip(prev_12.abs(), 1e-12, None))
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0.0)
+        .clip(-5.0, 5.0),
+        f"{feature_name}_ema_12_48_spread": ((ema_12 - ema_48) / np.clip(ema_48.abs(), 1e-12, None))
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0.0)
+        .clip(-5.0, 5.0),
+    }
+    return out
+
+
 def _get_col(df: pd.DataFrame, col: str, *, default: float = 0.0) -> pd.Series:
     """取得欄位；若不存在則回傳全 0（確保不同 symbol/資料版本仍輸出固定 shape）。"""
     if col in df.columns:
@@ -343,7 +386,7 @@ class FeatureTransformer:
         volume_impact_scale = volume_impact.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 0.001)
         rv_ratio_scale = pd.Series(rv_ratio_arr, index=df_5m.index).clip(0.0, 0.05)
 
-        # === 构建 Target 特征 DataFrame（僅保留 Config 指定欄位）===
+        # === 构建 Target 特征 DataFrame（先建全量，後續再依 Config 篩選）===
         target_feats = pd.DataFrame({
             "ret_15m_scale": ret_15m_scale,
             "body_z": _clip(_rolling_zscore(body_raw, z_window, minp)),
@@ -369,8 +412,43 @@ class FeatureTransformer:
             "alts_volume_log_mean_scale": alts_volume_log_mean_scale,
             "dist_to_long_liq_zone_atr": dist_to_long_liq_zone_atr.replace([np.inf, -np.inf], np.nan).fillna(0.0),
         }, index=df_5m.index)
-        
-        target_cols = list(self.OPTIMIZED_TARGET_5M_COLS)
+
+        # 重度工程化：把 5m 原始 11 欄位全部展開為多尺度特徵
+        target_raw_fields = {
+            "open": o,
+            "high": h,
+            "low": l,
+            "close": c,
+            "volume": v,
+            "buy_volume": buy_v,
+            "sell_volume": sell_v,
+            "volume_ratio": volume_ratio,
+            "long_short_ratio": long_short_ratio,
+            "trades": trades,
+            "quote_volume": quote_v,
+        }
+        target_heavy: dict[str, pd.Series] = {}
+        for raw_name, raw_series in target_raw_fields.items():
+            target_heavy.update(
+                _heavy_field_features(
+                    raw_series,
+                    feature_name=raw_name,
+                    z_window=z_window,
+                    z_window_short=z_window_short,
+                    minp=minp,
+                    minp_short=minp_short,
+                )
+            )
+        target_feats = pd.concat([target_feats, pd.DataFrame(target_heavy, index=df_5m.index)], axis=1)
+
+        configured_target_cols = list(self.OPTIMIZED_TARGET_5M_COLS)
+        if configured_target_cols:
+            missing_target = [c for c in configured_target_cols if c not in target_feats.columns]
+            if missing_target:
+                raise ValueError(f"OBS_PRICE_SEQ_TARGET_COLS 含未知欄位: {missing_target[:8]}")
+            target_cols = configured_target_cols
+        else:
+            target_cols = list(target_feats.columns)
         target_feats = target_feats.reindex(columns=target_cols).replace([np.inf, -np.inf], np.nan).fillna(0.0)
         
         # === 构建 Others 特征 ===
@@ -382,7 +460,13 @@ class FeatureTransformer:
             hs = _get_symbol_col(df_5m, target_symbol=sym, suffix="high")
             ls = _get_symbol_col(df_5m, target_symbol=sym, suffix="low")
             os = _get_symbol_col(df_5m, target_symbol=sym, suffix="open")
-            vs = _get_symbol_col(df_5m, target_symbol=sym, suffix="volume")
+            vs = _get_symbol_col_first_of(df_5m, target_symbol=sym, suffixes=("volume", "volume_usd"))
+            buy_vs = _get_symbol_col(df_5m, target_symbol=sym, suffix="buy_volume")
+            sell_vs = _get_symbol_col(df_5m, target_symbol=sym, suffix="sell_volume")
+            trades_s = _get_symbol_col(df_5m, target_symbol=sym, suffix="trades")
+            quote_vs = _get_symbol_col_first_of(df_5m, target_symbol=sym, suffixes=("quote_volume", "quote_volume_usd"))
+            volume_ratio_s = _get_symbol_col(df_5m, target_symbol=sym, suffix="volume_ratio")
+            long_short_ratio_s = _get_symbol_col(df_5m, target_symbol=sym, suffix="long_short_ratio")
 
             log_cs = _safe_log(cs)
             ret1_s = log_cs.diff().fillna(0.0)
@@ -420,34 +504,74 @@ class FeatureTransformer:
             dist_to_long_liq_zone_atr_s = ((cs - recent_swing_low_s) / atr_est_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
             dist_to_short_liq_zone_atr_s = ((recent_swing_high_s - cs) / atr_est_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
 
-            sym_feats = pd.DataFrame({
-                f"{sym}_ret_15m_scale": ret_15m_scale_s,
-                f"{sym}_ret_1h_scale": ret_1h_scale_s,
-                f"{sym}_ret_1_atr": ret_1_atr_s,
-                f"{sym}_volume_log_z": _clip(_rolling_zscore(vol_log_s, z_window, minp)),
-                f"{sym}_rsi_14": rsi_14_s.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0),
-                f"{sym}_body_range_ratio": body_range_ratio_s,
-                f"{sym}_volume_impact_scale": volume_impact_scale_s,
-                f"{sym}_ema_12_48_spread_raw": ema_12_48_spread_raw_s,
-                f"{sym}_ret_12_raw": ret_12_raw_s,
-                f"{sym}_up_volume_ratio_12": up_volume_ratio_12_s,
-                f"{sym}_dist_to_long_liq_zone_atr": dist_to_long_liq_zone_atr_s.replace([np.inf, -np.inf], np.nan).fillna(0.0),
-                f"{sym}_dist_to_short_liq_zone_atr": dist_to_short_liq_zone_atr_s.replace([np.inf, -np.inf], np.nan).fillna(0.0),
-            }, index=df_5m.index)
-            
+            base_feats: dict[str, pd.Series] = {
+                "ret_15m_scale": ret_15m_scale_s,
+                "ret_1h_scale": ret_1h_scale_s,
+                "ret_1_atr": ret_1_atr_s,
+                "volume_log_z": _clip(_rolling_zscore(vol_log_s, z_window, minp)),
+                "rsi_14": rsi_14_s.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0),
+                "body_range_ratio": body_range_ratio_s,
+                "volume_impact_scale": volume_impact_scale_s,
+                "ema_12_48_spread_raw": ema_12_48_spread_raw_s,
+                "ret_12_raw": ret_12_raw_s,
+                "up_volume_ratio_12": up_volume_ratio_12_s,
+                "dist_to_long_liq_zone_atr": dist_to_long_liq_zone_atr_s.replace([np.inf, -np.inf], np.nan).fillna(0.0),
+                "dist_to_short_liq_zone_atr": dist_to_short_liq_zone_atr_s.replace([np.inf, -np.inf], np.nan).fillna(0.0),
+            }
+
+            # 重度工程化：others 每個 symbol 也納入 11 個原始欄位的多尺度特徵
+            others_raw_fields = {
+                "open": os,
+                "high": hs,
+                "low": ls,
+                "close": cs,
+                "volume": vs,
+                "buy_volume": buy_vs,
+                "sell_volume": sell_vs,
+                "volume_ratio": volume_ratio_s,
+                "long_short_ratio": long_short_ratio_s,
+                "trades": trades_s,
+                "quote_volume": quote_vs,
+            }
+            for raw_name, raw_series in others_raw_fields.items():
+                base_feats.update(
+                    _heavy_field_features(
+                        raw_series,
+                        feature_name=raw_name,
+                        z_window=z_window,
+                        z_window_short=z_window_short,
+                        minp=minp,
+                        minp_short=minp_short,
+                    )
+                )
+
+            configured_others_base_cols = list(self.OTHERS_5M_COLS_PER_SYMBOL)
+            if configured_others_base_cols:
+                missing_others = [c for c in configured_others_base_cols if c not in base_feats]
+                if missing_others:
+                    raise ValueError(f"OBS_PRICE_SEQ_OTHERS_COLS 含未知欄位: {missing_others[:8]}")
+                selected_base_cols = configured_others_base_cols
+            else:
+                selected_base_cols = list(base_feats.keys())
+
+            sym_feats = pd.DataFrame(
+                {f"{sym}_{col}": base_feats[col] for col in selected_base_cols},
+                index=df_5m.index,
+            ).replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(np.float32, copy=False)
             others_feats_list.append(sym_feats)
-            for col in self.OTHERS_5M_COLS_PER_SYMBOL:
-                others_cols.append(f"{sym}_{col}")
+            others_cols.extend([f"{sym}_{col}" for col in selected_base_cols])
         
         if others_feats_list:
-            others_feats = pd.concat(others_feats_list, axis=1)
-            others_feats = others_feats.reindex(columns=others_cols).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            others_feats = pd.concat(others_feats_list, axis=1, copy=False)
+            if list(others_feats.columns) != others_cols:
+                others_feats = others_feats.reindex(columns=others_cols)
+            others_feats = others_feats.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(np.float32, copy=False)
         else:
-            others_feats = pd.DataFrame(index=df_5m.index, columns=others_cols).fillna(0.0)
+            others_feats = pd.DataFrame(index=df_5m.index, columns=others_cols, dtype=np.float32).fillna(0.0)
         
         return (
-            target_feats.astype(np.float32).to_numpy(copy=True),
-            others_feats.astype(np.float32).to_numpy(copy=True),
+            target_feats.astype(np.float32, copy=False).to_numpy(copy=False),
+            others_feats.to_numpy(copy=False),
             target_cols,
             others_cols,
         )
