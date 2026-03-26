@@ -14,14 +14,14 @@ class PhaseABEnvConfig:
 
     ENV_ID: int = 0
     RANDOM_START: bool = True
-    WINDOW_SIZE: int = 14
+    WINDOW_SIZE: int = 72
     WINDOW_SIZE_1D: int = 12
     DEFAULT_MAX_EPISODE_STEPS: int = 288 * 31
 
-    NO_TRADE_ENTRY_THRESHOLD: float = 0.2
+    NO_TRADE_ENTRY_THRESHOLD: float = 0.3
     NO_TRADE_EXIT_THRESHOLD: float = 0.1
     MAX_STEP_POS_CHANGE_PCT: float = 0.4
-    MIN_POSITION_CHANGE: float = 0.2
+    MIN_POSITION_CHANGE: float = 0.1
 
     TRADE_FREQ_WINDOW_STEPS: None | int = None
     TRADE_FREQ_COST_LIMIT: None | float = None

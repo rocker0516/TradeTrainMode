@@ -37,7 +37,7 @@ import lightgbm as lgb
 
 
 # ---------- 常數 ----------
-HORIZON_K = 6
+HORIZON_K = 36
 DELTA_COEF = 10
 KEEP_RATE_DEFAULT = 0.3  # 分位數門檻之預設保留率 p
 TRAIN_RATIO = 0.7

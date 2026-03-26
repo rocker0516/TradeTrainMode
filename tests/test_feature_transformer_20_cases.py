@@ -154,10 +154,18 @@ def test_feature_shapes_are_fixed_and_safe(case: Case) -> None:
     assert md.price_seq_target_features_dim > 0
     assert md.cols_5m_target == list(Config.OBS_PRICE_SEQ_TARGET_COLS)
 
-    # 1d target 通道數 = OBS_PRICE_SEQ_1D_TARGET_COLS（macro 等在 others）
-    n_1d_tgt = len(Config.OBS_PRICE_SEQ_1D_TARGET_COLS)
-    assert md.features_1d_dim == n_1d_tgt
-    assert md.cols_1d == list(Config.OBS_PRICE_SEQ_1D_TARGET_COLS)
+    # 1d target：
+    # - Config 指定非空時，維度需等於指定欄位數
+    # - Config 為空 tuple 時，語意為「使用全部可用欄位」
+    configured_1d_target_cols = list(Config.OBS_PRICE_SEQ_1D_TARGET_COLS)
+    if configured_1d_target_cols:
+        n_1d_tgt = len(configured_1d_target_cols)
+        assert md.features_1d_dim == n_1d_tgt
+        assert md.cols_1d == configured_1d_target_cols
+    else:
+        n_1d_tgt = len(md.cols_1d)
+        assert n_1d_tgt > 0
+        assert md.features_1d_dim == n_1d_tgt
 
     # 任意 step 的序列 shape 必須一致
     seq_5m_target, _ = md.get_price_seq(40)
