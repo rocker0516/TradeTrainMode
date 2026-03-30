@@ -9,7 +9,11 @@ class CostWeights:
     雖然公式已標準化，但保留此類別以備未來擴充 (例如是否啟用某條線的開關)。
     目前主要用於佔位，參數皆預設為 1.0 或由 Config 控制。
     """
-    pass
+    fric_fee_weight: float = 1.0
+    fric_turnover_weight: float = 0.0
+    fric_trade_activity_weight: float = 0.0
+    fric_extreme_weight: float = 0.0
+    fric_extreme_threshold: float = 0.0
 
 
 class CostCalculator:
@@ -57,7 +61,10 @@ class CostCalculator:
             - cost: 總正規化成本（不含 cost_risk_dense，僅 death + fric）
             - cost_risk: 死亡成本 (0 或 [1.0, 2.0]，剩餘步數越多越大)
             - cost_risk_dense: 每步 dense 懲罰 (1 - buffer_ratio)^2，僅在接近死亡線時變大
-            - cost_fric: 摩擦成本（本步手續費正規化，優先使用 step_fee_add_only）
+            - cost_fric: 摩擦成本（fee + activity + extreme 三分量加總）
+            - cost_fric_fee_component: fee 分量（scaled）
+            - cost_fric_activity_component: activity 分量（scaled）
+            - cost_fric_extreme_component: extreme 分量（scaled）
             - cost_breakdown: 詳細分項
         """
         # 防除以零保護：使用 min_balance 或極小值做為分母下限
@@ -97,9 +104,37 @@ class CostCalculator:
         # cost_fric_scale：放大係數，使 cost_fric 與 reward 同數量級（預設 1.0；Phase B 可設 100~1000）
         step_fee_add_only = kwargs.get("step_fee_add_only")
         fee_source = step_fee_add_only if step_fee_add_only is not None else step_fee
+        fee_ratio = max(0.0, float(fee_source)) / safe_equity
+
+        turnover_ratio = max(0.0, float(kwargs.get("turnover_ratio", 0.0)))
+        trade_activity = max(0.0, float(kwargs.get("trade_activity", 0.0)))
+
+        fric_fee_weight = max(0.0, float(kwargs.get("cost_fric_fee_weight", self.weights.fric_fee_weight)))
+        fric_turnover_weight = max(0.0, float(kwargs.get("cost_fric_turnover_weight", self.weights.fric_turnover_weight)))
+        fric_trade_activity_weight = max(
+            0.0,
+            float(kwargs.get("cost_fric_trade_activity_weight", self.weights.fric_trade_activity_weight)),
+        )
+        fric_extreme_weight = max(0.0, float(kwargs.get("cost_fric_extreme_weight", self.weights.fric_extreme_weight)))
+        fric_extreme_threshold = max(
+            0.0,
+            float(kwargs.get("cost_fric_extreme_threshold", self.weights.fric_extreme_threshold)),
+        )
+
+        fee_component_raw = fric_fee_weight * fee_ratio
+        activity_component_raw = (
+            fric_turnover_weight * turnover_ratio
+            + fric_trade_activity_weight * trade_activity
+        )
+        extreme_signal = max(turnover_ratio, trade_activity)
+        extreme_component_raw = fric_extreme_weight * max(0.0, extreme_signal - fric_extreme_threshold) ** 2
+
         fric_scale = float(kwargs.get("cost_fric_scale", 1.0))
         fric_scale = max(1e-12, fric_scale)
-        c_fric = (max(0.0, float(fee_source)) / safe_equity) * fric_scale
+        fee_component = fee_component_raw * fric_scale
+        activity_component = activity_component_raw * fric_scale
+        extreme_component = extreme_component_raw * fric_scale
+        c_fric = fee_component + activity_component + extreme_component
         
         # 總成本 (供 Env.info['cost'] 使用；不含 cost_risk_dense，dense 由獨立 lambda 處理)
         total_cost = c_death + c_fric
@@ -109,6 +144,11 @@ class CostCalculator:
             "cost_risk": float(c_risk),            # 死亡成本通道
             "cost_risk_dense": float(c_risk_dense),  # dense 緩衝懲罰通道 (方案 B 獨立)
             "cost_fric": float(c_fric),            # 摩擦成本通道
+            "cost_fric_fee_component": float(fee_component),
+            "cost_fric_activity_component": float(activity_component),
+            "cost_fric_extreme_component": float(extreme_component),
+            "cost_fric_turnover_signal": float(turnover_ratio),
+            "cost_fric_trade_activity_signal": float(trade_activity),
             "cost_breakdown": {
                 "death_cost": float(c_death),
                 "dense_buffer_cost": float(c_risk_dense),

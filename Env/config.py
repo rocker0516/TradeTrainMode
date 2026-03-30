@@ -15,14 +15,14 @@ class Config:
     # -------------------------------------------------------------------------
     # 資金與交易成本
     # -------------------------------------------------------------------------
-    INITIAL_BALANCE: float =1000.0
+    INITIAL_BALANCE: float =300.0
     TRANSACTION_FEE: float = 0.01  # 手續費百分比（例：0.04 代表 0.04%）
 
     # -------------------------------------------------------------------------
     # 視窗與步數
     # -------------------------------------------------------------------------
-    WINDOW_SIZE: int = 72  # 5m 根數，432 ≈ 1.5 天
-    WINDOW_SIZE_1D: int = 14 
+    WINDOW_SIZE: int = 24  # 5m 根數，432 ≈ 1.5 天
+    WINDOW_SIZE_1D: int = 12 
     MIN_EPISODE_STEPS: int = 288 * 21 * 1 # 288 * 21 * 1 = 5760
     MAX_EPISODE_STEPS: int = 288 * 21 * 1 # 288 * 21 * 1 = 5760
     RISK_BASE_UPDATE_STEPS: int = 288  # 每 N steps 更新 daily_risk_base（用於單步倉位變化上限）
@@ -47,12 +47,12 @@ class Config:
     #    cost_fric_scale 與 lambda_fee_max 需平衡：太低易過度交易；太高主線 log-return 被懲罰淹沒。
     # 5) 驗收：eval JSON 中 termination_reason_counts["balance_insufficient"]==0 且
     #    summary["profit"]["mean"]>0（或 log_return_sum mean>0）；勿只靠調低 MIN_BALANCE「假裝不死」。
-    MIN_POSITION_CHANGE: float = 0.1 # 最小調倉幅度 deadband（0 = 不啟用）
+    MIN_POSITION_CHANGE: float = 0.2 # 最小調倉幅度 deadband（0 = 不啟用）
     MAX_STEP_POS_CHANGE_PCT: float = 0.4  # 單步最大持倉比例變化（0.5 = 50%）
-    MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（供 ActionClipWrapper 等使用）
+    MAX_POSITION_PCT: float = 0.8  # 最大目標持倉比例（供 ActionClipWrapper 等使用） 
 
     # No-trade 雙門檻（hysteresis）：空倉時 |action| < ENTRY 不進場；有倉時 |action| < EXIT 易回空倉
-    NO_TRADE_ENTRY_THRESHOLD: float = 0.3
+    NO_TRADE_ENTRY_THRESHOLD: float = 0.2
     NO_TRADE_EXIT_THRESHOLD: float = 0.1
 
     # -------------------------------------------------------------------------
@@ -76,6 +76,13 @@ class Config:
     # 手續費與 Fee Limit
     # -------------------------------------------------------------------------
     FEE_ROLLING_WINDOW: int = 288
+    # cost_fric 混合懲罰（fee + activity + extreme）
+    COST_FRIC_SCALE: float = 1.0
+    COST_FRIC_FEE_WEIGHT: float = 1.0
+    COST_FRIC_TURNOVER_WEIGHT: float = 0.0
+    COST_FRIC_TRADE_ACTIVITY_WEIGHT: float = 0.0
+    COST_FRIC_EXTREME_WEIGHT: float = 0.0
+    COST_FRIC_EXTREME_THRESHOLD: float = 0.0
 
     # -------------------------------------------------------------------------
     # 止損與清算

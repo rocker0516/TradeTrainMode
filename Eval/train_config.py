@@ -26,6 +26,14 @@ class TrainConfig:
     
     FEATURE_SYMBOLS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "1000PEPEUSDT")
     """
+
+    # 成本重設計：預設 baseline/guardrail 與 ablation 輪次
+    BASELINE_EVAL_REPORT_PATH: str = (
+        "logs/phase_B_lr10_lb001_rs100_rb3e-05_cb003_ntp0005_lf007_fas3000000_cfs100000_fg10_fw2000000_eval.json"
+    )
+    MIN_PROFIT_RATIO: float = 0.9
+    MAX_DRAWDOWN_RATIO: float = 1.1
+    MAX_TRADE_COUNT_RATIO: float = 0.7
     特徵 symbols（固定順序、固定維度）
     - 用於 5m 跨市場摘要 +（後續可擴充）多幣 1d regime
     - 注意：Gym observation_space 必須固定 shape，因此這裡用「固定清單」，

@@ -236,8 +236,31 @@ class TradingEnvironment(gym.Env):
         # CostCalculator 現在不再需要 weights (已內建正規化公式)，這裡維持空建構
         self.cost_calculator = CostCalculator()
         # cost_fric_scale：放大 cost_fric，使 lambda_fee * cost_fric 與 reward 同數量級（預設 1.0）
-        self._cost_fric_scale = float(kwargs.get("cost_fric_scale", 1.0))
+        self._cost_fric_scale = float(kwargs.get("cost_fric_scale", getattr(Config, "COST_FRIC_SCALE", 1.0)))
         self._cost_fric_scale = max(1e-12, self._cost_fric_scale)
+        self._cost_fric_fee_weight = max(
+            0.0, float(kwargs.get("cost_fric_fee_weight", getattr(Config, "COST_FRIC_FEE_WEIGHT", 1.0)))
+        )
+        self._cost_fric_turnover_weight = max(
+            0.0,
+            float(kwargs.get("cost_fric_turnover_weight", getattr(Config, "COST_FRIC_TURNOVER_WEIGHT", 0.0))),
+        )
+        self._cost_fric_trade_activity_weight = max(
+            0.0,
+            float(
+                kwargs.get(
+                    "cost_fric_trade_activity_weight",
+                    getattr(Config, "COST_FRIC_TRADE_ACTIVITY_WEIGHT", 0.0),
+                )
+            ),
+        )
+        self._cost_fric_extreme_weight = max(
+            0.0, float(kwargs.get("cost_fric_extreme_weight", getattr(Config, "COST_FRIC_EXTREME_WEIGHT", 0.0)))
+        )
+        self._cost_fric_extreme_threshold = max(
+            0.0,
+            float(kwargs.get("cost_fric_extreme_threshold", getattr(Config, "COST_FRIC_EXTREME_THRESHOLD", 0.0))),
+        )
 
         # Runtime State
         self.current_step = 0
@@ -1456,10 +1479,18 @@ class TradingEnvironment(gym.Env):
             equity=float(new_equity),
             min_balance=float(self.min_balance),
             step_fee=float(step_fee),
+            step_fee_add_only=float(step_fee_add_only),
             episode_steps=int(self.episode_steps),
             episode_max_steps=int(self.episode_max_steps),
             initial_balance=float(self.initial_balance),
+            turnover_ratio=float(turnover_ratio),
+            trade_activity=1.0 if bool(traded) else 0.0,
             cost_fric_scale=self._cost_fric_scale,
+            cost_fric_fee_weight=self._cost_fric_fee_weight,
+            cost_fric_turnover_weight=self._cost_fric_turnover_weight,
+            cost_fric_trade_activity_weight=self._cost_fric_trade_activity_weight,
+            cost_fric_extreme_weight=self._cost_fric_extreme_weight,
+            cost_fric_extreme_threshold=self._cost_fric_extreme_threshold,
         )
 
         # 本回合 cost_risk / cost_risk_dense 累計（供 TensorBoard；須在 _build_step_info 前累加當步）
@@ -1523,6 +1554,16 @@ class TradingEnvironment(gym.Env):
             info["cost_risk_dense"] = float(cost_out["cost_risk_dense"])
         if "cost_fric" in cost_out:
             info["cost_fric"] = float(cost_out["cost_fric"])
+        if "cost_fric_fee_component" in cost_out:
+            info["cost_fric_fee_component"] = float(cost_out["cost_fric_fee_component"])
+        if "cost_fric_activity_component" in cost_out:
+            info["cost_fric_activity_component"] = float(cost_out["cost_fric_activity_component"])
+        if "cost_fric_extreme_component" in cost_out:
+            info["cost_fric_extreme_component"] = float(cost_out["cost_fric_extreme_component"])
+        if "cost_fric_turnover_signal" in cost_out:
+            info["cost_fric_turnover_signal"] = float(cost_out["cost_fric_turnover_signal"])
+        if "cost_fric_trade_activity_signal" in cost_out:
+            info["cost_fric_trade_activity_signal"] = float(cost_out["cost_fric_trade_activity_signal"])
         # 交易頻率成本：本步有持倉變化則 1.0，否則 0.0（供「最近 N 步交易比例」約束使用）
         position_changed = abs(float(new_size) - float(prev_size)) > 1e-9
         info["cost_trade_freq"] = 1.0 if position_changed else 0.0

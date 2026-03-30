@@ -17,6 +17,7 @@ from Env.config import Config
 from Env.trading_env import TradingEnvironment
 from LiveTradingRunner.live_render import LiveRefreshRenderer
 from LiveTradingRunner.render_history_utils import (
+    build_sideway_mask_from_series,
     conviction_strength_from_trend_score,
     gate_ac_change_labels,
     gate_flags_to_regime_indicator,
@@ -173,6 +174,8 @@ def run_holdout_rollout_and_show_live_render(
         conviction_strength_history: List[float] = []
         trend_tanh_signed_history: List[float] = []
         gate_b_liquidity_history: List[float] = []
+        sideway_close_history: List[float] = []
+        sideway_atr_ratio_history: List[float] = []
         prev_gate: Optional[Tuple[float, float, float]] = None
         prev_pos: float = 0.0
         obs_curr: Any = obs
@@ -196,6 +199,8 @@ def run_holdout_rollout_and_show_live_render(
                 _step_idx = max(0, min(_step_idx, _md_len - 1))
                 _met = base.market_data.get_market_metrics(_step_idx)
                 _ts = float(_met.get("trend_score", 0.0))
+                sideway_close_history.append(float(_met.get("close", 0.0)))
+                sideway_atr_ratio_history.append(float(_met.get("atr_ratio", 0.0)))
                 _gf = base.market_data.get_gate_flags(_step_idx)
                 _scale = float(
                     getattr(
@@ -220,6 +225,8 @@ def run_holdout_rollout_and_show_live_render(
                 conviction_strength_history.append(0.0)
                 trend_tanh_signed_history.append(0.0)
                 gate_b_liquidity_history.append(0.0)
+                sideway_close_history.append(0.0)
+                sideway_atr_ratio_history.append(0.0)
 
             eq = float(info_d.get("equity", float("nan")))
             if np.isfinite(eq):
@@ -301,6 +308,10 @@ def run_holdout_rollout_and_show_live_render(
         pos_deque: Deque[float] = deque(position_history)
         tm_deque: Deque[Optional[str]] = deque(trade_marker_history)
         gl_deque: Deque[List[str]] = deque(gate_labels_rows_history)
+        sideway_mask_history = build_sideway_mask_from_series(
+            sideway_close_history,
+            sideway_atr_ratio_history,
+        )
 
         renderer.refresh(
             closed_bar_ts=str(last_ts),
@@ -319,6 +330,7 @@ def run_holdout_rollout_and_show_live_render(
             conviction_strength_history=conviction_strength_history,
             trend_tanh_signed_history=trend_tanh_signed_history,
             gate_b_liquidity_history=gate_b_liquidity_history,
+            sideway_mask_history=sideway_mask_history,
         )
 
         import matplotlib.pyplot as plt

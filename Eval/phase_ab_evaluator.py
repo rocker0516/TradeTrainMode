@@ -70,12 +70,20 @@ class PhaseABEvaluator:
         deterministic: bool = True,
         seed: Optional[int] = None,
         report_path: str = "",
+        baseline_report_path: str = "",
+        min_profit_ratio: float = 0.9,
+        max_drawdown_ratio: float = 1.1,
+        max_trade_count_ratio: float = 0.7,
     ) -> None:
         self.env_builder = env_builder
         self.n_episodes = max(1, int(n_episodes))
         self.deterministic = bool(deterministic)
         self.seed = seed
         self.report_path = (report_path or "").strip()
+        self.baseline_report_path = (baseline_report_path or "").strip()
+        self.min_profit_ratio = float(min_profit_ratio)
+        self.max_drawdown_ratio = float(max_drawdown_ratio)
+        self.max_trade_count_ratio = float(max_trade_count_ratio)
 
     def evaluate(
         self,
@@ -235,10 +243,18 @@ class PhaseABEvaluator:
                 else:
                     vals.append(0.0)
             summary[key] = _summary(vals).to_dict()
+        # 主 KPI：每筆交易收益效率
+        profit_per_trade_vals: list[float] = []
+        for item in episode_results:
+            profit = float(item.get("profit", 0.0) or 0.0)
+            trade_count = max(1.0, float(item.get("episode_trade_count", 0.0) or 0.0))
+            profit_per_trade_vals.append(float(profit / trade_count))
+        summary["profit_per_trade"] = _summary(profit_per_trade_vals).to_dict()
         term_counts: dict[str, int] = {}
         for item in episode_results:
             r = str(item.get("termination_reason") or "unknown")
             term_counts[r] = term_counts.get(r, 0) + 1
+        guardrails = self._build_guardrail_result(summary=summary)
         return {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "reason": reason,
@@ -248,6 +264,65 @@ class PhaseABEvaluator:
             "results": episode_results,
             "summary": summary,
             "termination_reason_counts": term_counts,
+            "guardrails": guardrails,
+        }
+
+    def _load_baseline_summary(self) -> dict[str, float]:
+        if not self.baseline_report_path:
+            return {}
+        try:
+            with open(self.baseline_report_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+            return {
+                "profit_mean": float(((summary.get("profit") or {}).get("mean")) or 0.0),
+                "episode_max_dd_mean": float(((summary.get("episode_max_dd") or {}).get("mean")) or 0.0),
+                "episode_trade_count_mean": float(((summary.get("episode_trade_count") or {}).get("mean")) or 0.0),
+            }
+        except Exception:
+            return {}
+
+    def _build_guardrail_result(self, *, summary: dict[str, dict[str, float]]) -> dict[str, Any]:
+        baseline = self._load_baseline_summary()
+        current_profit = float((summary.get("profit") or {}).get("mean", 0.0))
+        current_dd = float((summary.get("episode_max_dd") or {}).get("mean", 0.0))
+        current_trade_count = float((summary.get("episode_trade_count") or {}).get("mean", 0.0))
+        base_profit = float(baseline.get("profit_mean", 0.0))
+        base_dd = float(baseline.get("episode_max_dd_mean", 0.0))
+        base_trade_count = float(baseline.get("episode_trade_count_mean", 0.0))
+        if base_profit <= 0.0 or base_dd <= 0.0 or base_trade_count <= 0.0:
+            return {
+                "enabled": False,
+                "status": "skipped",
+                "reason": "baseline_missing_or_non_positive",
+                "baseline_report_path": self.baseline_report_path,
+            }
+
+        min_profit = base_profit * self.min_profit_ratio
+        max_dd = base_dd * self.max_drawdown_ratio
+        max_trade_count = base_trade_count * self.max_trade_count_ratio
+        checks = {
+            "profit_guardrail": {
+                "pass": bool(current_profit >= min_profit),
+                "current": current_profit,
+                "threshold": min_profit,
+            },
+            "max_dd_guardrail": {
+                "pass": bool(current_dd <= max_dd),
+                "current": current_dd,
+                "threshold": max_dd,
+            },
+            "trade_count_guardrail": {
+                "pass": bool(current_trade_count <= max_trade_count),
+                "current": current_trade_count,
+                "threshold": max_trade_count,
+            },
+        }
+        return {
+            "enabled": True,
+            "status": "pass" if all(bool(v.get("pass")) for v in checks.values()) else "fail",
+            "baseline_report_path": self.baseline_report_path,
+            "checks": checks,
         }
 
     def _print_payload(self, payload: dict[str, Any]) -> None:
@@ -282,6 +357,7 @@ class PhaseABEvaluator:
             "episode_log_return_sum",
             "final_balance",
             "profit",
+            "profit_per_trade",
             "episode_steps",
             "episode_cost_risk_sum",
             "episode_cost_risk_dense_sum",
@@ -305,6 +381,9 @@ class PhaseABEvaluator:
         term_counts = payload.get("termination_reason_counts", {})
         if term_counts:
             print("[Eval] termination_reason_counts:", term_counts)
+        guardrails = payload.get("guardrails", {})
+        if isinstance(guardrails, dict) and guardrails:
+            print("[Eval] guardrails:", guardrails.get("status"), guardrails)
 
     def _write_report(self, payload: dict[str, Any]) -> None:
         os.makedirs(os.path.dirname(self.report_path) or ".", exist_ok=True)

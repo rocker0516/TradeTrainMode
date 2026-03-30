@@ -129,6 +129,7 @@ class LiveRefreshRenderer:
         trade_marker_history: Sequence[Optional[str]],
         gate_labels_rows_history: Sequence[Sequence[str]],
         take: int,
+        sideway_mask_tail: Optional[np.ndarray] = None,
     ) -> None:
         self._ax_price.clear()
         if df_price.empty:
@@ -158,6 +159,26 @@ class LiveRefreshRenderer:
             self._ax_price.plot(df_price["timestamp"], df_price["close"], color="tab:blue", linewidth=1.0)
         self._ax_price.set_ylabel("Price")
         self._ax_price.xaxis_date()
+        if sideway_mask_tail is not None and take > 0 and len(df_price) >= take:
+            ts_tail = pd.to_datetime(df_price["timestamp"].iloc[-take:])
+            side = np.asarray(sideway_mask_tail, dtype=bool).reshape(-1)
+            if side.size == take:
+                high_tail = np.asarray(df_price["high"].iloc[-take:], dtype=float)
+                low_tail = np.asarray(df_price["low"].iloc[-take:], dtype=float)
+                y_min = float(np.nanmin(low_tail))
+                y_max = float(np.nanmax(high_tail))
+                if np.isfinite(y_min) and np.isfinite(y_max) and (y_max > y_min):
+                    self._ax_price.fill_between(
+                        ts_tail,
+                        y_min,
+                        y_max,
+                        where=side,
+                        step="post",
+                        color="khaki",
+                        alpha=0.16,
+                        label="Sideway region",
+                    )
+                    self._ax_price.legend(loc="upper left", fontsize=7)
         self._overlay_bs_and_gate_history(
             df_price,
             trade_marker_history,
@@ -262,6 +283,7 @@ class LiveRefreshRenderer:
         conviction_strength_history: Optional[Sequence[float]] = None,
         trend_tanh_signed_history: Optional[Sequence[float]] = None,
         gate_b_liquidity_history: Optional[Sequence[float]] = None,
+        sideway_mask_history: Optional[Sequence[bool]] = None,
     ) -> None:
         """Refresh one window with latest chart and PnL state.
 
@@ -282,6 +304,7 @@ class LiveRefreshRenderer:
             conviction_strength_history: 每步 |tanh(scale*trend_score)|；缺省則以 0 填滿。
             trend_tanh_signed_history: 每步 tanh(scale×trend) 帶符號（5m）；缺省不畫點線。
             gate_b_liquidity_history: 每步 Gate B 0/1（5m 流動性）；缺省不畫綠帶。
+            sideway_mask_history: 每步是否盤整（True=盤整），缺省不畫盤整區域。
         """
         _ = ts_history
         df_use = df_price.copy()
@@ -320,16 +343,26 @@ class LiveRefreshRenderer:
                 gb = [0.0] * (h_eq - len(gb)) + gb
             if len(gb) > h_eq:
                 gb = gb[-h_eq:]
+        sw: List[bool] = []
+        if sideway_mask_history is not None:
+            sw = [bool(v) for v in list(sideway_mask_history)]
+            if len(sw) < h_eq:
+                sw = [False] * (h_eq - len(sw)) + sw
+            if len(sw) > h_eq:
+                sw = sw[-h_eq:]
 
         align_parts = [h_eq, h_m, h_g, n_price, len(gr), len(cv)]
         if trend_tanh_signed_history is not None:
             align_parts.append(len(tt))
         if gate_b_liquidity_history is not None:
             align_parts.append(len(gb))
+        if sideway_mask_history is not None:
+            align_parts.append(len(sw))
         h_align = int(min(align_parts)) if (n_price > 0 and h_eq > 0) else 0
         take = h_align
 
-        self._draw_price(df_use, trade_marker_history, gate_labels_rows_history, take)
+        y_sw = np.asarray(sw[-take:], dtype=bool) if (sideway_mask_history is not None and take > 0) else None
+        self._draw_price(df_use, trade_marker_history, gate_labels_rows_history, take, y_sw)
 
         if take > 0:
             ts_tail = pd.to_datetime(df_use["timestamp"].iloc[-take:])

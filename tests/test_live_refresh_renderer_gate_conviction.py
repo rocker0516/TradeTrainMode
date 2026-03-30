@@ -46,6 +46,7 @@ def test_refresh_gate_regime_and_conviction_aligned(n: int) -> None:
     cv = [abs(np.tanh(0.1 * float(i))) for i in range(n)]
     tt = [float(np.tanh(0.1 * float(i) * (-1 if i % 2 else 1))) for i in range(n)]
     gb = [1.0 if i % 4 == 0 else 0.0 for i in range(n)]
+    sw = [bool(i % 5 in (0, 1)) for i in range(n)]
 
     r = LiveRefreshRenderer(symbol=sym, max_visible_bars=max(50, n + 10), data_dir=data_dir)
     r.refresh(
@@ -65,4 +66,5 @@ def test_refresh_gate_regime_and_conviction_aligned(n: int) -> None:
         conviction_strength_history=cv,
         trend_tanh_signed_history=tt,
         gate_b_liquidity_history=gb,
+        sideway_mask_history=sw,
     )

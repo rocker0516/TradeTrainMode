@@ -30,7 +30,12 @@ from Eval.train_config import TrainConfig
 from LiveTradingRunner.live_runner_env_config import LiveRunnerEnvConfig
 from LiveTradingRunner.fee_provider import BinanceFeeRateProvider
 from LiveTradingRunner.live_render import LiveRefreshRenderer
-from LiveTradingRunner.render_history_utils import gate_ac_change_labels, trade_bs_from_delta
+from LiveTradingRunner.render_history_utils import (
+    atr_ratio_from_ohlc,
+    build_sideway_mask_from_series,
+    gate_ac_change_labels,
+    trade_bs_from_delta,
+)
 
 
 @dataclass
@@ -278,6 +283,20 @@ def _tick_decision_json_payload(decision: TickDecision) -> Dict[str, Any]:
     if isinstance(gf, tuple):
         d["gate_flags"] = [float(x) for x in gf]
     return d
+
+
+def _build_sideway_mask_from_df_price(df_plot: pd.DataFrame) -> List[bool]:
+    """由 session OHLC 估算 sideway mask（對齊 E2 build_sideway_labels 公式）。"""
+    if df_plot is None or df_plot.empty:
+        return []
+    required = {"high", "low", "close"}
+    if not required.issubset(set(df_plot.columns)):
+        return []
+    close_vals = pd.to_numeric(df_plot["close"], errors="coerce").ffill().fillna(0.0).tolist()
+    high_vals = pd.to_numeric(df_plot["high"], errors="coerce").ffill().fillna(0.0).tolist()
+    low_vals = pd.to_numeric(df_plot["low"], errors="coerce").ffill().fillna(0.0).tolist()
+    atr_ratio_vals = atr_ratio_from_ohlc(high_vals, low_vals, close_vals)
+    return build_sideway_mask_from_series(close_vals, atr_ratio_vals)
 
 
 def _update_paper_equity(
@@ -580,6 +599,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 if not df_plot.empty:
                     df_plot["timestamp"] = pd.to_datetime(df_plot["timestamp"], errors="coerce")
                     df_plot = df_plot.dropna(subset=["timestamp"])
+                sideway_mask_history = _build_sideway_mask_from_df_price(df_plot)
                 gate_labels = gate_ac_change_labels(state.last_gate_flags, decision.gate_flags)
                 trade_marker = trade_bs_from_delta(
                     prev_final_pos_pct=prev_pos_pct,
@@ -615,6 +635,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         conviction_strength_history=list(conviction_strength_history),
                         trend_tanh_signed_history=list(trend_tanh_signed_history),
                         gate_b_liquidity_history=list(gate_b_liquidity_history),
+                        sideway_mask_history=sideway_mask_history,
                     )
                 if decision.gate_flags is not None:
                     state.last_gate_flags = decision.gate_flags
@@ -667,6 +688,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 if not df_plot.empty:
                     df_plot["timestamp"] = pd.to_datetime(df_plot["timestamp"], errors="coerce")
                     df_plot = df_plot.dropna(subset=["timestamp"])
+                sideway_mask_history = _build_sideway_mask_from_df_price(df_plot)
                 gate_labels = gate_ac_change_labels(state.last_gate_flags, decision.gate_flags)
                 trade_marker = trade_bs_from_delta(
                     prev_final_pos_pct=prev_pos_pct,
@@ -702,6 +724,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                         conviction_strength_history=list(conviction_strength_history),
                         trend_tanh_signed_history=list(trend_tanh_signed_history),
                         gate_b_liquidity_history=list(gate_b_liquidity_history),
+                        sideway_mask_history=sideway_mask_history,
                     )
                 if decision.gate_flags is not None:
                     state.last_gate_flags = decision.gate_flags

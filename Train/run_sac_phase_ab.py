@@ -85,6 +85,8 @@ class RiskOnlyPenaltyWrapper(gym.Wrapper):
         reward_scale: float = 10.0,
         lambda_fee_max: float = 0.0,
         fee_anneal_steps: int = 0,
+        fee_activation_log_return_threshold: Optional[float] = None,
+        fee_activation_min_timesteps: int = 0,
     ) -> None:
         super().__init__(env)
         self.lambda_risk = float(lambda_risk)
@@ -93,24 +95,45 @@ class RiskOnlyPenaltyWrapper(gym.Wrapper):
         # 手續費「懲罰」權重退火（非 transaction_fee）：lambda_fee(t) 從 0 線性升到 lambda_fee_max
         self.lambda_fee_max = float(lambda_fee_max)
         self.fee_anneal_steps = max(0, int(fee_anneal_steps))
+        self.fee_activation_min_timesteps = max(0, int(fee_activation_min_timesteps))
+        self.fee_activation_log_return_threshold = (
+            float(fee_activation_log_return_threshold)
+            if fee_activation_log_return_threshold is not None
+            else None
+        )
+        self._fee_anneal_start_step: Optional[int] = None
 
     def _current_lambda_fee(self) -> float:
         """
-        依當前 training_timestep 決定手續費懲罰權重。
+        依當前 training_timestep 與收益門檻決定手續費懲罰權重。
 
         規則：
-        - fee_anneal_steps <= 0：不退火，恆為 lambda_fee_max
-        - 0 < step < fee_anneal_steps：線性從 0 升到 lambda_fee_max
-        - step >= fee_anneal_steps：固定為 lambda_fee_max
+        - fee_activation_min_timesteps：在此步數前一律不啟用 fee 懲罰（探索 warmup）。
+        - fee_activation_log_return_threshold 有設定時：rolling_log_return_mean 達標後才開始 fee 退火。
+        - fee_anneal_steps <= 0：啟用後不退火，恆為 lambda_fee_max。
+        - 0 < elapsed < fee_anneal_steps：線性從 0 升到 lambda_fee_max。
+        - elapsed >= fee_anneal_steps：固定為 lambda_fee_max。
         """
         if self.lambda_fee_max <= 0.0:
             return 0.0
+        step = int(getattr(self, "training_timestep", 0) or 0)
+        if step < self.fee_activation_min_timesteps:
+            return 0.0
+
+        if self.fee_activation_log_return_threshold is not None and self._fee_anneal_start_step is None:
+            rolling_lr = getattr(self, "rolling_log_return_mean", None)
+            if rolling_lr is None or float(rolling_lr) < self.fee_activation_log_return_threshold:
+                return 0.0
+            self._fee_anneal_start_step = int(step)
+
+        start_step = self._fee_anneal_start_step
+        if start_step is None:
+            start_step = self.fee_activation_min_timesteps
+        elapsed = max(0, int(step) - int(start_step))
+
         if self.fee_anneal_steps <= 0:
             return self.lambda_fee_max
-        step = int(getattr(self, "training_timestep", 0) or 0)
-        if step <= 0:
-            return 0.0
-        factor = max(0.0, min(1.0, float(step) / float(self.fee_anneal_steps)))
+        factor = max(0.0, min(1.0, float(elapsed) / float(self.fee_anneal_steps)))
         return self.lambda_fee_max * factor
 
     def step(self, action: Any) -> tuple[Any, float, bool, bool, dict]:
@@ -132,6 +155,7 @@ class RiskOnlyPenaltyWrapper(gym.Wrapper):
         info["cost_risk_dense_used"] = cost_risk_dense
         info["cost_fric_used"] = cost_fric
         info["lambda_fee"] = float(lambda_fee)
+        info["fee_anneal_started"] = 1.0 if self._fee_anneal_start_step is not None else 0.0
         return obs, reward_mod, terminated, truncated, info
 
 
@@ -230,16 +254,20 @@ class PhaseABStatsCallback(BaseCallback):
         self._trade_count_buf: list[float] = []
         self._total_fees_buf: list[float] = []
         self._profit_buf: list[float] = []
-        # 每步 reward 明細（來自 RiskOnlyPenaltyWrapper 的 info，供 TensorBoard reward_decomp）
+        # 每步 reward 明細（RiskOnlyPenaltyWrapper info）：TB 寫入時 reward_decomp=合成 reward_mod 明細；cost_fric=摩擦細項
         self._reward_raw_step: list[float] = []
         self._reward_mod_step: list[float] = []
         self._cost_risk_used_step: list[float] = []
         self._cost_risk_dense_used_step: list[float] = []
         self._cost_fric_used_step: list[float] = []
+        self._cost_fric_fee_component_step: list[float] = []
+        self._cost_fric_activity_component_step: list[float] = []
+        self._cost_fric_extreme_component_step: list[float] = []
         self._lambda_fee_step: list[float] = []
         self._penalty_fee_step: list[float] = []
         self._tb_log_dir = (tb_log_dir or "").strip()
         self._tb_writer = None
+        self._latest_log_return_mean: Optional[float] = None
         self._reward_scale = float(reward_scale) if reward_scale is not None else None
         self._lambda_risk = float(lambda_risk) if lambda_risk is not None else None
         self._lambda_buffer = float(lambda_buffer) if lambda_buffer is not None else None
@@ -264,6 +292,7 @@ class PhaseABStatsCallback(BaseCallback):
         try:
             for env in getattr(self.training_env, "envs", []):
                 setattr(env, "training_timestep", self.num_timesteps)
+                setattr(env, "rolling_log_return_mean", self._latest_log_return_mean)
         except Exception:
             pass
 
@@ -347,6 +376,21 @@ class PhaseABStatsCallback(BaseCallback):
                     self._cost_fric_used_step.append(float(info["cost_fric_used"]))
                 except (TypeError, ValueError):
                     pass
+            if "cost_fric_fee_component" in info:
+                try:
+                    self._cost_fric_fee_component_step.append(float(info["cost_fric_fee_component"]))
+                except (TypeError, ValueError):
+                    pass
+            if "cost_fric_activity_component" in info:
+                try:
+                    self._cost_fric_activity_component_step.append(float(info["cost_fric_activity_component"]))
+                except (TypeError, ValueError):
+                    pass
+            if "cost_fric_extreme_component" in info:
+                try:
+                    self._cost_fric_extreme_component_step.append(float(info["cost_fric_extreme_component"]))
+                except (TypeError, ValueError):
+                    pass
             if "lambda_fee" in info:
                 try:
                     self._lambda_fee_step.append(float(info["lambda_fee"]))
@@ -360,7 +404,7 @@ class PhaseABStatsCallback(BaseCallback):
                 except (TypeError, ValueError):
                     pass
 
-        # --- 每 log_freq 步：寫入 action 統計（logger 僅 stdout）+ reward 分解與輔助/主線比寫入 TensorBoard ---
+        # --- 每 log_freq 步：寫入 action 統計（logger 僅 stdout）+ episode_stats / reward_decomp / cost_fric 寫入 TensorBoard ---
         if self.n_calls % self.log_freq != 0:
             return True
         step = getattr(self, "num_timesteps", self.n_calls)
@@ -369,6 +413,7 @@ class PhaseABStatsCallback(BaseCallback):
                 # Reward 分解：主線 log_return、輔助 regime/conviction、cost_risk
                 if self._log_return_buf:
                     val = float(np.mean(self._log_return_buf))
+                    self._latest_log_return_mean = val
                     self.logger.record("episode_stats/reward_log_return_sum_mean", val)
                     self._tb_writer.add_scalar("episode_stats/reward_log_return_sum_mean", val, step)
                     self._tb_writer.add_scalar("episode_stats/log_return_sum_mean", val, step)
@@ -413,7 +458,13 @@ class PhaseABStatsCallback(BaseCallback):
                     ratio_fp = mean_fees / denom_profit
                     self.logger.record("episode_stats/fees_profit_ratio_mean", ratio_fp)
                     self._tb_writer.add_scalar("episode_stats/fees_profit_ratio_mean", ratio_fp, step)
-                # Reward 計算明細（reward_decomp）：每 log_freq 內步的平均，方便對照公式
+                if self._profit_buf and self._trade_count_buf:
+                    mean_profit = float(np.mean(self._profit_buf))
+                    mean_trades = float(np.mean(self._trade_count_buf))
+                    profit_per_trade = mean_profit / max(1.0, mean_trades)
+                    self.logger.record("episode_stats/profit_per_trade_mean", profit_per_trade)
+                    self._tb_writer.add_scalar("episode_stats/profit_per_trade_mean", profit_per_trade, step)
+                # reward_decomp：reward_mod 合成明細（主線 + 各 cost 原值與加權懲罰；摩擦僅保留 penalty_fee 一項）
                 if self._reward_raw_step:
                     mean_raw = float(np.mean(self._reward_raw_step))
                     self._tb_writer.add_scalar("reward_decomp/reward_raw_mean", mean_raw, step)
@@ -431,29 +482,48 @@ class PhaseABStatsCallback(BaseCallback):
                     self._tb_writer.add_scalar("reward_decomp/cost_risk_dense_used_mean", mean_cd, step)
                     if self._lambda_buffer is not None:
                         self._tb_writer.add_scalar("reward_decomp/penalty_dense_mean", self._lambda_buffer * mean_cd, step)
+                # cost_fric：摩擦通道細項（總量、分量、λ）；penalty_fee 同時寫入 reward_decomp 以對齊公式
                 if self._cost_fric_used_step:
                     self._tb_writer.add_scalar(
-                        "reward_decomp/cost_fric_used_mean",
+                        "cost_fric/used_mean",
                         float(np.mean(self._cost_fric_used_step)),
+                        step,
+                    )
+                if self._cost_fric_fee_component_step:
+                    self._tb_writer.add_scalar(
+                        "cost_fric/fee_component_mean",
+                        float(np.mean(self._cost_fric_fee_component_step)),
+                        step,
+                    )
+                if self._cost_fric_activity_component_step:
+                    self._tb_writer.add_scalar(
+                        "cost_fric/activity_component_mean",
+                        float(np.mean(self._cost_fric_activity_component_step)),
+                        step,
+                    )
+                if self._cost_fric_extreme_component_step:
+                    self._tb_writer.add_scalar(
+                        "cost_fric/extreme_component_mean",
+                        float(np.mean(self._cost_fric_extreme_component_step)),
                         step,
                     )
                 if self._lambda_fee_step:
                     self._tb_writer.add_scalar(
-                        "reward_decomp/lambda_fee_mean",
+                        "cost_fric/lambda_fee_mean",
                         float(np.mean(self._lambda_fee_step)),
                         step,
                     )
                 if self._penalty_fee_step:
-                    self._tb_writer.add_scalar(
-                        "reward_decomp/penalty_fee_mean",
-                        float(np.mean(self._penalty_fee_step)),
-                        step,
-                    )
+                    mean_pf = float(np.mean(self._penalty_fee_step))
+                    self._tb_writer.add_scalar("reward_decomp/penalty_fee_mean", mean_pf, step)
+                    self._tb_writer.add_scalar("cost_fric/penalty_fee_mean", mean_pf, step)
             except Exception:
                 pass
         # 保留原有 logger key 以相容既有腳本，並清空 buffer
         if self._log_return_buf:
-            self.logger.record("episode_stats/log_return_sum_mean", float(np.mean(self._log_return_buf)))
+            mean_log_return = float(np.mean(self._log_return_buf))
+            self._latest_log_return_mean = mean_log_return
+            self.logger.record("episode_stats/log_return_sum_mean", mean_log_return)
             self._log_return_buf.clear()
         if self._final_balance_buf:
             val = float(np.mean(self._final_balance_buf))
@@ -488,6 +558,12 @@ class PhaseABStatsCallback(BaseCallback):
             self._cost_risk_dense_used_step.clear()
         if self._cost_fric_used_step:
             self._cost_fric_used_step.clear()
+        if self._cost_fric_fee_component_step:
+            self._cost_fric_fee_component_step.clear()
+        if self._cost_fric_activity_component_step:
+            self._cost_fric_activity_component_step.clear()
+        if self._cost_fric_extreme_component_step:
+            self._cost_fric_extreme_component_step.clear()
         if self._lambda_fee_step:
             self._lambda_fee_step.clear()
         if self._penalty_fee_step:
@@ -538,6 +614,8 @@ def make_env(
     reward_scale: float = 10.0,
     lambda_fee_max: float = 0.0,
     fee_anneal_steps: int = 0,
+    fee_activation_log_return_threshold: Optional[float] = None,
+    fee_activation_min_timesteps: int = 0,
     action_repeat: int = 1,
     anneal_steps: int = 0,
     seed: Optional[int] = None,
@@ -565,6 +643,8 @@ def make_env(
                 reward_scale=reward_scale,
                 lambda_fee_max=lambda_fee_max,
                 fee_anneal_steps=fee_anneal_steps,
+                fee_activation_log_return_threshold=fee_activation_log_return_threshold,
+                fee_activation_min_timesteps=fee_activation_min_timesteps,
             )
         if action_repeat and action_repeat > 1:
             from Env.wrappers import ActionRepeatWrapper
@@ -585,6 +665,11 @@ def get_phase_ab_env_kwargs(
     holdout_months: int = 3,
     data_mode: str = "train",
     cost_fric_scale: float = 1.0,
+    cost_fric_fee_weight: float = 1.0,
+    cost_fric_turnover_weight: float = 0.0,
+    cost_fric_trade_activity_weight: float = 0.0,
+    cost_fric_extreme_weight: float = 0.0,
+    cost_fric_extreme_threshold: float = 0.0,
 ) -> dict[str, Any]:
     """
     Phase A/B 共用的 env 參數：減少 hard override、主線 log-return。
@@ -624,6 +709,11 @@ def get_phase_ab_env_kwargs(
         trade_freq_window_steps=PhaseABEnvConfig.TRADE_FREQ_WINDOW_STEPS,
         trade_freq_cost_limit=PhaseABEnvConfig.TRADE_FREQ_COST_LIMIT,
         cost_fric_scale=float(cost_fric_scale),
+        cost_fric_fee_weight=float(cost_fric_fee_weight),
+        cost_fric_turnover_weight=float(cost_fric_turnover_weight),
+        cost_fric_trade_activity_weight=float(cost_fric_trade_activity_weight),
+        cost_fric_extreme_weight=float(cost_fric_extreme_weight),
+        cost_fric_extreme_threshold=float(cost_fric_extreme_threshold),
         # 順向／regime 輔助 reward（小權重）：做對方向加分，主線仍是 log-return
         regime_alignment_bonus_weight=float(regime_bonus_weight),
         conviction_trend_bonus_weight=float(conviction_bonus_weight),
@@ -836,32 +926,59 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase A/B SAC 訓練")
     parser.add_argument("--phase", choices=["A", "B"], default="B", help="Phase A=只放寬控制, B=再加 cost_risk 懲罰")
-    parser.add_argument("--timesteps", type=int, default=1_000_000) # 288 * 21 * 48 * 20 = 261,360,000
-    parser.add_argument("--n-envs", type=int, default=48)
+    parser.add_argument("--timesteps", type=int, default=12_000_000) # 288 * 21 * 48 * 20 = 261,360,000
+    parser.add_argument("--n-envs", type=int, default=64)
     parser.add_argument("--lambda-risk", type=float, default=1.0, help="Phase B 時 cost_risk（事件型）的權重")
     parser.add_argument("--lambda-buffer", type=float, default=0.01, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
     parser.add_argument("--reward-scale", type=float, default=10.0, help="Phase B 時主線 reward 放大倍數")
     parser.add_argument(
         "--lambda-fee-max",
         type=float,
-        default=0.05,
+        default=0.07,
         help="Phase B 時 cost_fric（手續費摩擦成本）的「懲罰權重」；非每筆交易手續費率（手續費率由環境 transaction_fee 決定）。0=不啟用手續費懲罰",
     )
     parser.add_argument(
         "--fee-anneal-steps",
         type=int,
-        default=3_000_000,
+        default=1_000_000,
         help="手續費懲罰權重從 0 線性升到 lambda_fee_max 所需的步數（<=0 表示不退火，恆為 lambda_fee_max）",
+    )
+    parser.add_argument(
+        "--fee-activation-log-return-threshold",
+        type=float,
+        default=None,
+        help="rolling episode_stats/log_return_sum_mean 達到此門檻前，不啟用 fee 懲罰（預設: 不啟用門檻）",
+    )
+    parser.add_argument(
+        "--fee-activation-min-timesteps",
+        type=int,
+        default=2_000_000,
+        help="前 N timesteps 一律不啟用 fee 懲罰（探索 warmup）",
     )
     parser.add_argument(
         "--cost-fric-scale",
         type=float,
-        default=1000.0,
+        default=10_000.0,
         help="Phase B 時 cost_fric 放大係數；原始 cost_fric=step_fee/equity 約 1e-4~1e-3，乘此係數後與 reward 同數量級，lambda_fee 才有效（預設 100）",
+    )
+    parser.add_argument("--cost-fric-fee-weight", type=float, default=1.0, help="cost_fric 的 fee 分量權重")
+    parser.add_argument("--cost-fric-turnover-weight", type=float, default=0.0, help="cost_fric 的 turnover 分量權重")
+    parser.add_argument(
+        "--cost-fric-trade-activity-weight",
+        type=float,
+        default=0.0,
+        help="cost_fric 的 trade_activity 分量權重（每步是否成交）",
+    )
+    parser.add_argument("--cost-fric-extreme-weight", type=float, default=0.0, help="cost_fric 的 extreme 分量權重")
+    parser.add_argument(
+        "--cost-fric-extreme-threshold",
+        type=float,
+        default=0.0,
+        help="cost_fric extreme 分量門檻（activity/turnover 超過後用平方懲罰）",
     )
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--log-freq", type=int, default=1000, help="PhaseAB 統計與 log 間隔（步數）")
+    parser.add_argument("--log-freq", type=int, default=1_000, help="PhaseAB 統計與 log 間隔（步數）")
     # 訓練/評估時間切分（預設：訓練用過去、評估用最近 N 月，避免評估用訓練見過的資料）
     parser.add_argument("--holdout-months", type=int, default=1, help="評估用最近 N 個月資料；訓練用其餘過去資料（與 --no-data-split 互斥）")
     parser.add_argument("--no-data-split", action="store_true", help="停用訓練/評估時間切分，訓練與評估皆用完整資料")
@@ -876,19 +993,43 @@ def main() -> None:
     parser.add_argument("--conviction-bonus-weight", type=float, default=0.03, help="Conviction 順向 bonus 權重（強訊號+大倉+同向加分）")
     parser.add_argument("--conviction-min-abs-pos", type=float, default=0.4, help="Conviction 生效最小持倉比例")
     parser.add_argument("--conviction-trend-min-strength", type=float, default=0.5, help="Conviction 生效最小趨勢強度")
-    parser.add_argument("--anneal-steps", type=int, default=500_000, help="輔助 reward 退火步數（0=不退火，regime/conviction 全程滿權重）")
+    parser.add_argument("--anneal-steps", type=int, default=0, help="輔助 reward 退火步數（0=不退火，regime/conviction 全程滿權重）")
     # 評估參數（可訓練中觸發、訓練後觸發，或 eval-only）
     parser.add_argument("--eval-only", action="store_true", help="只做評估，不進行訓練")
     parser.add_argument("--eval-model-path", type=str, default="", help="評估模型路徑（空則沿用 --save-path）")
     parser.add_argument("--eval-episodes", type=int, default=10, help="每次評估回合數")
     parser.add_argument("--eval-seed", type=int, default=42, help="評估用 seed")
     parser.add_argument("--eval-report-path", type=str, default="", help="評估結果 JSON 輸出路徑，空則依 phase/lr/lb/rs/rb/cb 自動產生")
+    parser.add_argument(
+        "--baseline-report-path",
+        type=str,
+        default=str(PhaseABEnvConfig.DEFAULT_BASELINE_REPORT_PATH),
+        help="guardrail baseline 的 eval JSON 路徑",
+    )
+    parser.add_argument(
+        "--min-profit-ratio",
+        type=float,
+        default=float(PhaseABEnvConfig.DEFAULT_GUARDRAIL_MIN_PROFIT_RATIO),
+        help="guardrail：summary.profit.mean 至少為 baseline 的此比例",
+    )
+    parser.add_argument(
+        "--max-dd-ratio",
+        type=float,
+        default=float(PhaseABEnvConfig.DEFAULT_GUARDRAIL_MAX_DD_RATIO),
+        help="guardrail：summary.episode_max_dd.mean 至多為 baseline 的此比例",
+    )
+    parser.add_argument(
+        "--max-trade-count-ratio",
+        type=float,
+        default=float(PhaseABEnvConfig.DEFAULT_GUARDRAIL_MAX_TRADE_COUNT_RATIO),
+        help="guardrail：summary.episode_trade_count.mean 至多為 baseline 的此比例",
+    )
     parser.add_argument("--tb-log", type=str, default="", help="TensorBoard log 目錄，空則依 phase/lr/lb/rs/rb/cb 自動產生或不寫")
     parser.add_argument("--save-path", type=str, default="", help="模型儲存路徑，空則依 phase/lr/lb/rs/rb/cb 自動產生")
     parser.add_argument("--eval-deterministic", action=argparse.BooleanOptionalAction, default=True, help="評估是否使用 deterministic 動作(False=使用隨機動作)")
     parser.add_argument("--eval-on-train-end", action=argparse.BooleanOptionalAction, default=True, help="訓練結束後是否執行一次評估")
     parser.add_argument("--eval-trigger-steps", type=int, nargs="*", default=[], help="訓練中在指定步數觸發評估，可多個")
-    parser.add_argument("--eval-trigger-every", type=int, default=3_000_000, help="訓練中每 N steps 觸發評估（0=停用）")
+    parser.add_argument("--eval-trigger-every", type=int, default=10_000_000, help="訓練中每 N steps 觸發評估（0=停用）")
     parser.add_argument("--eval-trigger-min-interval", type=int, default=0, help="兩次訓練中評估最小間隔步數")
     parser.add_argument("--eval-trigger-mode", choices=["any", "all"], default="any", help="多條件組合模式")
     parser.add_argument("--eval-metric-rule", action="append", default=[], help="內建 metric 規則，例如 log_return_sum_mean>=0.2")
@@ -905,15 +1046,53 @@ def main() -> None:
         default=2000,
         help="訓練後 holdout 圖表價格區最多顯示的 5m K 線根數（上限）",
     )
+    parser.add_argument(
+        "--ablation-round",
+        choices=["none", "round1", "round2", "round3"],
+        default="none",
+        help="套用 cost_fric 重設計實驗輪次預設（可再由 CLI 明確參數覆寫）",
+    )
     args = parser.parse_args()
+    # cost_fric=cost_fric_scale×(w fee​ ⋅fee_ratio+w turnover ⋅turnover_ratio+wactivity ⋅trade_activity+w extreme ⋅max(0,extreme_signal−threshold) 2 )
+    if args.ablation_round == "round1":
+        args.cost_fric_scale = 100.0
+        args.cost_fric_fee_weight = 1.0
+        args.cost_fric_turnover_weight = 0.0
+        args.cost_fric_trade_activity_weight = 0.0
+        args.cost_fric_extreme_weight = 0.0
+        args.cost_fric_extreme_threshold = 0.0
+    elif args.ablation_round == "round2":
+        args.cost_fric_scale = 100.0
+        args.cost_fric_fee_weight = 1.0
+        args.cost_fric_turnover_weight = 0.0#0025
+        args.cost_fric_trade_activity_weight = 0.01
+        args.cost_fric_extreme_weight = 0.0
+        args.cost_fric_extreme_threshold = 0.0
+    elif args.ablation_round == "round3":
+        args.cost_fric_scale = 100.0
+        args.cost_fric_fee_weight = 1.0
+        args.cost_fric_turnover_weight = 0.25
+        args.cost_fric_trade_activity_weight = 0.05
+        args.cost_fric_extreme_weight = 2.0
+        args.cost_fric_extreme_threshold = 0.25
 
     # 路徑預設：依 phase/lr/lb/rs/rb/cb/ntp/lf/fas 產生（不可在 add_argument 時用 args，故在此補上）
     def _path_prefix() -> str:
+        fee_gate = (
+            str(args.fee_activation_log_return_threshold).replace(".", "")
+            if args.fee_activation_log_return_threshold is not None
+            else "none"
+        )
         return (
             f"phase_{args.phase}_lr{str(args.lambda_risk).replace('.', '')}_lb{str(args.lambda_buffer).replace('.', '')}"
             f"_rs{str(args.reward_scale).replace('.', '')}_rb{str(args.regime_bonus_weight).replace('.', '')}_cb{str(args.conviction_bonus_weight).replace('.', '')}"
             f"_ntp{str(args.neutral_trade_penalty_weight).replace('.', '')}"
             f"_lf{str(args.lambda_fee_max).replace('.', '')}_fas{str(args.fee_anneal_steps).replace('.', '')}_cfs{str(args.cost_fric_scale).replace('.', '')}"
+            f"_cfw{str(args.cost_fric_fee_weight).replace('.', '')}_ctw{str(args.cost_fric_turnover_weight).replace('.', '')}"
+            f"_caw{str(args.cost_fric_trade_activity_weight).replace('.', '')}"
+            f"_cew{str(args.cost_fric_extreme_weight).replace('.', '')}_cet{str(args.cost_fric_extreme_threshold).replace('.', '')}"
+            f"_fg{fee_gate}_fw{str(args.fee_activation_min_timesteps).replace('.', '')}"
+            f"_abr{args.ablation_round}"
         )
     if not (getattr(args, "eval_report_path", "") or "").strip():
         args.eval_report_path = f"logs/{_path_prefix()}_eval.json"
@@ -928,6 +1107,13 @@ def main() -> None:
         print(f"[Data split] 訓練用「非最近 {holdout} 月」、評估用「最近 {holdout} 月」")
     else:
         print("[Data split] 已停用，訓練與評估皆使用完整資料")
+    print(
+        "[cost_fric] "
+        f"ablation_round={args.ablation_round} scale={args.cost_fric_scale} "
+        f"fee={args.cost_fric_fee_weight} turnover={args.cost_fric_turnover_weight} "
+        f"activity={args.cost_fric_trade_activity_weight} "
+        f"extreme={args.cost_fric_extreme_weight}@{args.cost_fric_extreme_threshold}"
+    )
 
     env_kwargs_train = get_phase_ab_env_kwargs(
         regime_bonus_weight=args.regime_bonus_weight,
@@ -939,6 +1125,11 @@ def main() -> None:
         holdout_months=holdout,
         data_mode="train",
         cost_fric_scale=getattr(args, "cost_fric_scale", 100.0),
+        cost_fric_fee_weight=getattr(args, "cost_fric_fee_weight", 1.0),
+        cost_fric_turnover_weight=getattr(args, "cost_fric_turnover_weight", 0.0),
+        cost_fric_trade_activity_weight=getattr(args, "cost_fric_trade_activity_weight", 0.0),
+        cost_fric_extreme_weight=getattr(args, "cost_fric_extreme_weight", 0.0),
+        cost_fric_extreme_threshold=getattr(args, "cost_fric_extreme_threshold", 0.0),
     )
     env_kwargs_eval = get_phase_ab_env_kwargs(
         regime_bonus_weight=args.regime_bonus_weight,
@@ -950,6 +1141,11 @@ def main() -> None:
         holdout_months=holdout,
         data_mode="eval",
         cost_fric_scale=getattr(args, "cost_fric_scale", 100.0),
+        cost_fric_fee_weight=getattr(args, "cost_fric_fee_weight", 1.0),
+        cost_fric_turnover_weight=getattr(args, "cost_fric_turnover_weight", 0.0),
+        cost_fric_trade_activity_weight=getattr(args, "cost_fric_trade_activity_weight", 0.0),
+        cost_fric_extreme_weight=getattr(args, "cost_fric_extreme_weight", 0.0),
+        cost_fric_extreme_threshold=getattr(args, "cost_fric_extreme_threshold", 0.0),
     )
 
     eval_env_thunk = make_env(
@@ -959,6 +1155,8 @@ def main() -> None:
         reward_scale=args.reward_scale,
         lambda_fee_max=args.lambda_fee_max,
         fee_anneal_steps=args.fee_anneal_steps,
+        fee_activation_log_return_threshold=args.fee_activation_log_return_threshold,
+        fee_activation_min_timesteps=args.fee_activation_min_timesteps,
         action_repeat=args.action_repeat,
         anneal_steps=args.anneal_steps,
         seed=args.eval_seed,
@@ -970,6 +1168,10 @@ def main() -> None:
         deterministic=args.eval_deterministic,
         seed=args.eval_seed,
         report_path=args.eval_report_path,
+        baseline_report_path=args.baseline_report_path,
+        min_profit_ratio=args.min_profit_ratio,
+        max_drawdown_ratio=args.max_dd_ratio,
+        max_trade_count_ratio=args.max_trade_count_ratio,
     )
     if args.eval_only:
         model_path = args.eval_model_path.strip() or args.save_path
@@ -986,6 +1188,8 @@ def main() -> None:
                 reward_scale=args.reward_scale,
                 lambda_fee_max=args.lambda_fee_max,
                 fee_anneal_steps=args.fee_anneal_steps,
+                fee_activation_log_return_threshold=args.fee_activation_log_return_threshold,
+                fee_activation_min_timesteps=args.fee_activation_min_timesteps,
                 action_repeat=args.action_repeat,
                 anneal_steps=args.anneal_steps,
                 **env_kwargs_train,
@@ -1053,6 +1257,8 @@ def main() -> None:
             reward_scale=args.reward_scale,
             lambda_fee_max=args.lambda_fee_max,
             fee_anneal_steps=args.fee_anneal_steps,
+            fee_activation_log_return_threshold=args.fee_activation_log_return_threshold,
+            fee_activation_min_timesteps=args.fee_activation_min_timesteps,
             action_repeat=args.action_repeat,
             anneal_steps=args.anneal_steps,
             seed=None,
