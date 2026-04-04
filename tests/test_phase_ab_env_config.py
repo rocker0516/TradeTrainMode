@@ -33,7 +33,6 @@ _PHASE_AB_KWARGS_REQUIRED_KEYS: frozenset[str] = frozenset(
         "min_position_change",
         "trade_freq_window_steps",
         "trade_freq_cost_limit",
-        "cost_fric_scale",
         "regime_alignment_bonus_weight",
         "conviction_trend_bonus_weight",
         "neutral_trade_penalty_weight",
@@ -51,7 +50,6 @@ def _kwargs_train_eval() -> tuple[dict, dict]:
         conviction_trend_min_strength=0.4,
         data_split_enabled=True,
         holdout_months=2,
-        cost_fric_scale=123.0,
         max_episode_steps=None,
     )
     train_kw = get_phase_ab_env_kwargs(data_mode="train", **common)

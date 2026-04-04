@@ -306,12 +306,11 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
             "cost",
             "cost_risk",
             "cost_risk_dense",
-            "cost_fric",
             "cost_breakdown",
         ):
             assert k in info
         assert isinstance(info["cost_breakdown"], dict)
-        for k in ("death_cost", "dense_buffer_cost", "fric_cost"):
+        for k in ("death_cost", "dense_buffer_cost"):
             assert k in info["cost_breakdown"]
 
     # --- position checks ---
@@ -397,6 +396,6 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
     if sc.expect.get("opened_with_stop_disabled"):
         assert abs(float(env.executor.position.size)) > 1e-12
         bd = info.get("cost_breakdown", {})
-        assert "dense_buffer_cost" in bd and "fric_cost" in bd
+        assert "dense_buffer_cost" in bd and "death_cost" in bd
 
 

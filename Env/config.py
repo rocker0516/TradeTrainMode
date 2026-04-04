@@ -44,7 +44,6 @@ class Config:
     # 2) MAX_STEP_POS_CHANGE_PCT：Phase AB 常在 kwargs 設 0.5，可試 0.25～0.35 減少單步梭哈。
     # 3) NO_TRADE_ENTRY_THRESHOLD：提高（例如 0.35～0.45）可減少小訊號進出與手續費磨損。
     # 4) Phase B 訓練：略提高 lambda_buffer（貼近爆倉／緩衝的 dense 懲罰）；lambda_risk 維持對死亡事件敏感。
-    #    cost_fric_scale 與 lambda_fee_max 需平衡：太低易過度交易；太高主線 log-return 被懲罰淹沒。
     # 5) 驗收：eval JSON 中 termination_reason_counts["balance_insufficient"]==0 且
     #    summary["profit"]["mean"]>0（或 log_return_sum mean>0）；勿只靠調低 MIN_BALANCE「假裝不死」。
     MIN_POSITION_CHANGE: float = 0.2 # 最小調倉幅度 deadband（0 = 不啟用）
@@ -76,13 +75,6 @@ class Config:
     # 手續費與 Fee Limit
     # -------------------------------------------------------------------------
     FEE_ROLLING_WINDOW: int = 288
-    # cost_fric 混合懲罰（fee + activity + extreme）
-    COST_FRIC_SCALE: float = 1.0
-    COST_FRIC_FEE_WEIGHT: float = 1.0
-    COST_FRIC_TURNOVER_WEIGHT: float = 0.0
-    COST_FRIC_TRADE_ACTIVITY_WEIGHT: float = 0.0
-    COST_FRIC_EXTREME_WEIGHT: float = 0.0
-    COST_FRIC_EXTREME_THRESHOLD: float = 0.0
 
     # -------------------------------------------------------------------------
     # 止損與清算

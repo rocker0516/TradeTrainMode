@@ -1,6 +1,6 @@
 """
 CostCalculator 現行版本不再區分 stop-loss 事件通道；相關成本由環境／executor 處理。
-此檔保留為「死亡 + fric + dense」與舊測試路徑相容的 smoke 測試。
+此檔保留為「死亡 + dense」與舊測試路徑相容的 smoke 測試。
 """
 
 from __future__ import annotations

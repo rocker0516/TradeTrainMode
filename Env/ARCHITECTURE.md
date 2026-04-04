@@ -15,7 +15,7 @@
 | [Components/tracker.py](Components/tracker.py) | 帳戶序列、手續費滑窗、Step Log (JSONL) |
 | [Executors/trade_executor.py](Executors/trade_executor.py) | 倉位執行、保證金/強平/止損、手續費 |
 | [Rewards/reward.py](Rewards/reward.py) | 獎勵計算（log return、regime 對齊、conviction bonus）、工廠 `create_default_calculator` |
-| [Costs/cost.py](Costs/cost.py) | 正規化成本（cost_risk/cost_fric），供 Lagrangian 使用 |
+| [Costs/cost.py](Costs/cost.py) | 正規化成本（cost_risk / cost_risk_dense），供 Lagrangian 使用 |
 | [wrappers.py](wrappers.py) | `ActionRepeatWrapper`（Frame Skip，累積 reward/cost） |
 | [Renderers/](Renderers/) | `BaseEpisodeRenderer` 抽象、`MplfinanceEpisodeRenderer` 實作 |
 
@@ -80,7 +80,7 @@ flowchart TB
 | **TradeExecutor** | initial_balance, fee_rate, leverage, min_trade_qty, margin_mode, stop_loss_atr 等 | `reset(balance)`、`execute(price, target_size, atr_est, ...)`、`equity(price)`、持倉/止損/強平/手續費 |
 | **Tracker** | step_log 開關、data_len、fee_rolling_window | `account_series`（position/equity/wallet 等）、`fee_history`、`rolling_fee_sum`、`update_account_series`、`log_step` |
 | **RewardCalculator** | 由 `create_default_calculator(...)` 建立，權重可來自 Config/kwargs | `compute(last_equity, new_equity, done, ..., gate_flags, regime_score)` → 主線 reward（log return + 可選 regime/conviction bonus） |
-| **CostCalculator** | 可選 CostWeights | `compute(liq_triggered, equity, min_balance, step_fee, episode_steps/max_steps)` → `cost`, `cost_risk`, `cost_fric`, `cost_breakdown` |
+| **CostCalculator** | — | `compute(liq_triggered, equity, min_balance, episode_steps/max_steps, initial_balance)` → `cost`, `cost_risk`, `cost_risk_dense`, `cost_breakdown` |
 
 ---
 
@@ -116,7 +116,7 @@ flowchart TB
 5. **獎勵相關**：`_compute_reward_features`、episode 統計（turnover、holding_steps、trade_count、max_dd、active_exit、flat_steps）、止損/強平計數。
 6. **終止判斷**：`_determine_termination(data_exhausted, max_steps_reached, balance_insufficient, liq_triggered)` → (terminated, truncated, reason)。
 7. **Reward**：`reward_calculator.compute(..., gate_flags=..., regime_score=..., position_pct=...)`；累加 episode_conviction_bonus、episode_log_return_sum、episode_regime_alignment_bonus_sum。
-8. **Cost**：`cost_calculator.compute(liq_triggered, equity, min_balance, step_fee, episode_steps, episode_max_steps)` → 寫入 `info['cost']`、`info['cost_risk']`、`info['cost_fric']`、`info['cost_breakdown']`；另寫入 `info['cost_trade_freq']`、`info['cost_flat']`。
+8. **Cost**：`cost_calculator.compute(liq_triggered, equity, min_balance, episode_steps, episode_max_steps, initial_balance)` → 寫入 `info['cost']`、`info['cost_risk']`、`info['cost_risk_dense']`、`info['cost_breakdown']`；另寫入 `info['cost_trade_freq']`、`info['cost_flat']`。
 9. **事件與步進**：`_record_step_events`（entry/reduce/close/flip/SL/LIQ）、`current_step++`、`episode_steps++`、空倉滑窗更新。
 10. **Info 與日誌**：`_build_step_info`、寫入 cost 相關鍵、Tracker.log_step、`update_account_series`；若 `render_on_done` 且 done 則呼叫 `render()`。
 11. **回傳**：`_get_observation()`、reward、terminated、truncated、info。
@@ -129,7 +129,7 @@ flowchart TB
   - 以資產對數報酬為主（`base_log_ret_weight * log(new_equity/last_equity)`）。  
   - 可選：Regime 對齊 bonus（A 多、C 空，依 `dir_strength` 加權）、Conviction trend bonus（強訊號+大倉+同向）；終局懲罰不在主線，改由 cost 表示。
 - **成本（約束線）**：[Costs/cost.py](Costs/cost.py)  
-  - 正規化為「佔權益比例」：死亡成本 `cost_risk`（1.0 + 剩餘步數比例），摩擦 `cost_fric`（目前為 0）。  
+  - 正規化：死亡事件 `cost_risk`（1.0 + 剩餘步數比例）；每步 dense 緩衝 `cost_risk_dense`（(1−buffer_ratio)²）；`cost` 僅為死亡通道（不含 dense）。摩擦由 PnL 反映，無 `cost_fric`。  
   - `info` 另提供 `cost_trade_freq`、`cost_flat` 供多 λ 或統計使用。
 
 ---
@@ -340,8 +340,8 @@ flowchart LR
 
 - **CostCalculator.compute**：  
   - 死亡：`is_dead = liq_triggered or (equity <= min_balance)`；若死亡且提供 episode_steps 與 episode_max_steps，則 `c_death = 1.0 + (remaining_steps / episode_max_steps)`，區間 [1.0, 2.0]；否則 c_death=1.0。  
-  - cost_risk = c_death；cost_fric = 0.0（目前固定）；cost = total_cost = c_death；cost_breakdown = {death_cost, fric_cost}。  
-  - 回傳 dict：cost、cost_risk、cost_fric、cost_breakdown。
+  - cost_risk = c_death；`cost_risk_dense` = (1−buffer_to_min_ratio)²（有 initial_balance 時）；`cost` = c_death；`cost_breakdown` = {death_cost, dense_buffer_cost}。  
+  - 回傳 dict：cost、cost_risk、cost_risk_dense、cost_breakdown。
 
 ---
 
@@ -371,7 +371,7 @@ flowchart LR
 | 7 | 獎勵特徵與 episode 統計 | _compute_reward_features → position_change, traded, position_change_norm, turnover_ratio, current_dd；更新 episode_turnover_notional、episode_trade_count、episode_holding_steps、episode_max_dd、last_trade_step；_update_episode_event_counters → stop_loss_triggered, liq_triggered；寫入 trade_executed_flag、cooldown_remaining_norm、episode_active_exit_count |
 | 8 | 終止判斷 | data_exhausted、max_steps_reached、balance_insufficient、liq_triggered → _determine_termination → terminated, truncated, termination_reason |
 | 9 | Reward | get_gate_flags(step_idx)、get_regime_score(step_idx)；reward_calculator.compute(..., gate_flags, regime_score, position_pct, ...)；累加 episode_conviction_bonus_sum、episode_log_return_sum、episode_regime_alignment_bonus_sum |
-| 10 | Cost | observer.compute_risk_signals；cost_calculator.compute(liq_triggered, equity, min_balance, step_fee, episode_steps, episode_max_steps)；寫入 info cost/cost_risk/cost_fric/cost_breakdown/cost_trade_freq/cost_flat |
+| 10 | Cost | observer.compute_risk_signals；cost_calculator.compute(liq_triggered, equity, min_balance, episode_steps, episode_max_steps, initial_balance)；寫入 info cost/cost_risk/cost_risk_dense/cost_breakdown/cost_trade_freq/cost_flat |
 | 11 | 事件與步進 | _record_step_events；current_step += 1；episode_steps += 1；_last_position_size；flat 判斷與 episode_flat_steps、_flat_deque、_recent_flat_ratio；trade_freq_deque.append |
 | 12 | Info 與日誌 | _build_step_info；info 寫入 cost 相關；_last_info = info；_build_log_payload → tracker.log_step；tracker.update_account_series(current_step, executor, mark_price) |
 | 13 | Render on done | 若 done 且 render_on_done 且未 render 過則 render()，info['render_path'] = 路徑 |
@@ -395,7 +395,7 @@ flowchart LR
 - **ActionRepeatWrapper(env, repeat=N)**：  
   - step(action) 時迴圈最多 N 次呼叫 env.step(action)；累加 total_reward、total_step_fee、total_cost、total_cost_channels、total_cost_breakdown；若 info 有 cost_trade_freq>0 則 any_trade_in_repeat=True；累加 cost_flat、n_steps。  
   - 若 done、truncated、stop_loss_triggered 或 liq_triggered 則**立即 break**。  
-  - 回傳前將 info 的 step_fee_ratio、cost、cost_risk、cost_fric、cost_trade_freq（任一步有交易則 1）、cost_flat（repeat 內平均）、cost_breakdown 設為累積值。  
+  - 回傳前將 info 的 step_fee_ratio、cost、cost_risk、cost_risk_dense、cost_trade_freq（任一步有交易則 1）、cost_flat（repeat 內平均）、cost_breakdown 設為累積值。  
   - 回傳 (obs, total_reward, done, truncated, info)。
 
 - **ActionClipWrapper(env, max_position_pct)**：將 action clip 到 [-max_position_pct, max_position_pct]，輸出 float32。

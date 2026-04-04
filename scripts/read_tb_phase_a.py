@@ -1,6 +1,6 @@
 """讀取 Phase A/B TensorBoard 日誌並輸出摘要。可指定目錄路徑。
 
-若某個 scalar 不存在（例如舊 run 沒有 cost_risk_dense_sum_mean、或尚無 cost_fric/*），該欄位輸出為空，不報錯。
+若某個 scalar 不存在（例如舊 run 沒有 cost_risk_dense_sum_mean），該欄位輸出為空，不報錯。
 """
 import argparse
 import os
@@ -17,13 +17,6 @@ KEYS = [
     "episode_stats/trade_count_mean",
     "episode_stats/total_fees_mean",
     "episode_stats/fees_profit_ratio_mean",
-    # Phase B：reward 合成中的摩擦懲罰項、摩擦細項（新 run；舊 log 無則空欄）
-    "reward_decomp/penalty_fee_mean",
-    "cost_fric/used_mean",
-    "cost_fric/fee_component_mean",
-    "cost_fric/activity_component_mean",
-    "cost_fric/extreme_component_mean",
-    "cost_fric/lambda_fee_mean",
 ]
 
 
@@ -63,9 +56,7 @@ def main() -> None:
     print(
         "step,log_return_mean,final_balance_mean,cost_risk_mean,"
         "cost_risk_dense_mean,auxiliary_main_ratio,trade_count_mean,"
-        "total_fees_mean,fees_profit_ratio,penalty_fee_mean,"
-        "cf_used_mean,cf_fee_component_mean,cf_activity_component_mean,"
-        "cf_extreme_component_mean,cf_lambda_fee_mean"
+        "total_fees_mean,fees_profit_ratio"
     )
     for step in steps_primary:
         row = [str(step)]

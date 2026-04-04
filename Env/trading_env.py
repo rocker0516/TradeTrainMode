@@ -15,7 +15,7 @@ from Env.Components.observer import TradingObserver
 from Env.Components.action_processor import ActionProcessor
 from Env.Components.tracker import Tracker
 from Env.load_file import load_data
-from Env.Costs.cost import CostCalculator, CostWeights
+from Env.Costs.cost import CostCalculator
 
 
 @dataclass(frozen=True)
@@ -232,35 +232,8 @@ class TradingEnvironment(gym.Env):
         
         # Cost / Constraint（供 Lagrangian-SAC 使用）
         # 注意：reward 與 cost 分離，cost 透過 info 回傳，方便訓練端做 λ 更新與解析。
-        # REFACTORED: 只保留死亡懲罰 (Liq / Bankrupt) 與 摩擦成本 (Fee/Equity)
-        # CostCalculator 現在不再需要 weights (已內建正規化公式)，這裡維持空建構
+        # 僅保留死亡懲罰 (Liq / Bankrupt) 與 dense 緩衝（cost_risk_dense）；摩擦不進成本通道。
         self.cost_calculator = CostCalculator()
-        # cost_fric_scale：放大 cost_fric，使 lambda_fee * cost_fric 與 reward 同數量級（預設 1.0）
-        self._cost_fric_scale = float(kwargs.get("cost_fric_scale", getattr(Config, "COST_FRIC_SCALE", 1.0)))
-        self._cost_fric_scale = max(1e-12, self._cost_fric_scale)
-        self._cost_fric_fee_weight = max(
-            0.0, float(kwargs.get("cost_fric_fee_weight", getattr(Config, "COST_FRIC_FEE_WEIGHT", 1.0)))
-        )
-        self._cost_fric_turnover_weight = max(
-            0.0,
-            float(kwargs.get("cost_fric_turnover_weight", getattr(Config, "COST_FRIC_TURNOVER_WEIGHT", 0.0))),
-        )
-        self._cost_fric_trade_activity_weight = max(
-            0.0,
-            float(
-                kwargs.get(
-                    "cost_fric_trade_activity_weight",
-                    getattr(Config, "COST_FRIC_TRADE_ACTIVITY_WEIGHT", 0.0),
-                )
-            ),
-        )
-        self._cost_fric_extreme_weight = max(
-            0.0, float(kwargs.get("cost_fric_extreme_weight", getattr(Config, "COST_FRIC_EXTREME_WEIGHT", 0.0)))
-        )
-        self._cost_fric_extreme_threshold = max(
-            0.0,
-            float(kwargs.get("cost_fric_extreme_threshold", getattr(Config, "COST_FRIC_EXTREME_THRESHOLD", 0.0))),
-        )
 
         # Runtime State
         self.current_step = 0
@@ -1124,50 +1097,6 @@ class TradingEnvironment(gym.Env):
         fee_rate_pct = float(self.executor.get_fee_rate())
         return abs(desired_size - current_size) * float(current_price) * (fee_rate_pct / 100.0)
 
-    def _estimate_add_only_fee(
-        self,
-        *,
-        prev_size: float,
-        new_size: float,
-        current_price: float,
-    ) -> float:
-        """
-        估算「只計入加碼/加曝險」的手續費（排除減倉/平倉）。
-
-        用途：
-        - 供 cost_fric（摩擦成本線）使用：只在加碼/加曝險時才計入摩擦成本。
-
-        定義：
-        - 若同向（未翻倉）：add_qty = max(0, |new| - |prev|)
-        - 若翻倉（跨 0 且新舊皆非 0）：只計入「新方向開倉」的部分 => add_qty = |new|
-
-        Args:
-            prev_size: 上一步的持倉 size
-            new_size: 本步執行後的持倉 size
-            current_price: 本步當下價格（用於估算名目）
-
-        Returns:
-            add_only_fee（>=0）
-        """
-        price = float(current_price)
-        if not (price > 0.0):
-            return 0.0
-
-        prev = float(prev_size)
-        new = float(new_size)
-        prev_nz = abs(prev) > 1e-8
-        new_nz = abs(new) > 1e-8
-
-        # Flip：只計入新方向「開倉」的名目（排除關倉名目）
-        if prev_nz and new_nz and (prev * new < 0.0):
-            add_qty = abs(new)
-        else:
-            add_qty = max(0.0, abs(new) - abs(prev))
-
-        add_notional = float(add_qty) * price
-        fee_rate_pct = float(self.executor.get_fee_rate())
-        return float(abs(add_notional) * (fee_rate_pct / 100.0))
-
     def _update_action_effects_cache(self, *, expected_fee: float, current_price: float) -> None:
         """
         更新 last_action_effects（供下一個 observation 使用）。
@@ -1353,12 +1282,6 @@ class TradingEnvironment(gym.Env):
             new_equity=new_equity,
             new_size=new_size,
         )
-        # Add-only friction fee（排除減倉/平倉；翻倉只算新方向開倉）
-        step_fee_add_only = self._estimate_add_only_fee(
-            prev_size=float(prev_size),
-            new_size=float(new_size),
-            current_price=float(prices.current_price),
-        )
         # Episode metrics: turnover / holding / trade count
         try:
             turnover_notional_change = float(position_change) * float(prices.current_price)
@@ -1472,25 +1395,15 @@ class TradingEnvironment(gym.Env):
         )
         step_fee_ratio = float(step_fee / self.initial_balance) if self.initial_balance > 0 else 0.0
         
-        # 計算成本（cost_risk 事件型、cost_risk_dense 每步 dense、cost_fric）
+        # 計算成本（cost_risk 事件型、cost_risk_dense 每步 dense）
         # 死亡時傳入 episode 步數，使 cost_risk 隨剩餘步數加權（越早死懲罰越大）
         cost_out = self.cost_calculator.compute(
             liq_triggered=bool(liq_triggered),
             equity=float(new_equity),
             min_balance=float(self.min_balance),
-            step_fee=float(step_fee),
-            step_fee_add_only=float(step_fee_add_only),
             episode_steps=int(self.episode_steps),
             episode_max_steps=int(self.episode_max_steps),
             initial_balance=float(self.initial_balance),
-            turnover_ratio=float(turnover_ratio),
-            trade_activity=1.0 if bool(traded) else 0.0,
-            cost_fric_scale=self._cost_fric_scale,
-            cost_fric_fee_weight=self._cost_fric_fee_weight,
-            cost_fric_turnover_weight=self._cost_fric_turnover_weight,
-            cost_fric_trade_activity_weight=self._cost_fric_trade_activity_weight,
-            cost_fric_extreme_weight=self._cost_fric_extreme_weight,
-            cost_fric_extreme_threshold=self._cost_fric_extreme_threshold,
         )
 
         # 本回合 cost_risk / cost_risk_dense 累計（供 TensorBoard；須在 _build_step_info 前累加當步）
@@ -1552,18 +1465,6 @@ class TradingEnvironment(gym.Env):
             info["cost_risk"] = float(cost_out["cost_risk"])
         if "cost_risk_dense" in cost_out:
             info["cost_risk_dense"] = float(cost_out["cost_risk_dense"])
-        if "cost_fric" in cost_out:
-            info["cost_fric"] = float(cost_out["cost_fric"])
-        if "cost_fric_fee_component" in cost_out:
-            info["cost_fric_fee_component"] = float(cost_out["cost_fric_fee_component"])
-        if "cost_fric_activity_component" in cost_out:
-            info["cost_fric_activity_component"] = float(cost_out["cost_fric_activity_component"])
-        if "cost_fric_extreme_component" in cost_out:
-            info["cost_fric_extreme_component"] = float(cost_out["cost_fric_extreme_component"])
-        if "cost_fric_turnover_signal" in cost_out:
-            info["cost_fric_turnover_signal"] = float(cost_out["cost_fric_turnover_signal"])
-        if "cost_fric_trade_activity_signal" in cost_out:
-            info["cost_fric_trade_activity_signal"] = float(cost_out["cost_fric_trade_activity_signal"])
         # 交易頻率成本：本步有持倉變化則 1.0，否則 0.0（供「最近 N 步交易比例」約束使用）
         position_changed = abs(float(new_size) - float(prev_size)) > 1e-9
         info["cost_trade_freq"] = 1.0 if position_changed else 0.0

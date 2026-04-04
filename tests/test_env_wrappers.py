@@ -60,7 +60,7 @@ def test_action_repeat_wrapper_breaks_on_stop_loss(patch_env_load_data, make_syn
 
 
 def test_action_repeat_wrapper_accumulates_cost_channels_and_breakdown() -> None:
-    """repeat>1 時，wrapper 累積 cost / cost_risk / cost_fric / cost_risk_dense 與 cost_breakdown（與現行 Env 一致）。"""
+    """repeat>1 時，wrapper 累積 cost / cost_risk / cost_risk_dense 與 cost_breakdown（與現行 Env 一致）。"""
 
     class DummyEnv(gym.Env):
         def __init__(self) -> None:
@@ -80,8 +80,7 @@ def test_action_repeat_wrapper_accumulates_cost_channels_and_breakdown() -> None
                 "cost": 1.0,
                 "cost_risk": 0.1,
                 "cost_risk_dense": 0.05,
-                "cost_fric": 0.2,
-                "cost_breakdown": {"death_cost": 0.1, "dense_buffer_cost": 0.05, "fric_cost": 0.2},
+                "cost_breakdown": {"death_cost": 0.1, "dense_buffer_cost": 0.05},
             }
             terminated = False
             truncated = False
@@ -95,11 +94,8 @@ def test_action_repeat_wrapper_accumulates_cost_channels_and_breakdown() -> None
 
     assert info["cost"] == pytest.approx(3.0)
     assert info["cost_risk"] == pytest.approx(0.3)
-    assert info["cost_fric"] == pytest.approx(0.6)
     assert info["cost_risk_dense"] == pytest.approx(0.15)
     assert isinstance(info.get("cost_breakdown"), dict)
     assert info["cost_breakdown"]["death_cost"] == pytest.approx(0.3)
-    assert info["cost_breakdown"]["fric_cost"] == pytest.approx(0.6)
     assert info["cost_breakdown"]["dense_buffer_cost"] == pytest.approx(0.15)
-
 

@@ -30,8 +30,8 @@ class ActionRepeatWrapper(gym.Wrapper):
         total_cost = 0.0
         # 注意：訓練端的 LagrangianCallback 會從 info 讀取 cost_* 來更新 λ，
         # 若 repeat>1 但只保留「最後一步」的 cost_*，會導致 avg_cost 低估甚至顯示為 0，造成你以為「違規卻不更新」。
-        total_cost_channels = defaultdict(float)   # cost_risk / cost_fric
-        total_cost_breakdown = defaultdict(float)  # death_cost / fric_cost
+        total_cost_channels = defaultdict(float)   # cost_risk / cost_risk_dense
+        total_cost_breakdown = defaultdict(float)  # death_cost / dense_buffer_cost
         any_trade_in_repeat = False  # 本 macro-step 內是否有任一步發生交易（供 cost_trade_freq）
         sum_flat = 0.0
         n_steps = 0  # 實際執行的 substep 數（供 cost_flat 取平均）
@@ -50,7 +50,7 @@ class ActionRepeatWrapper(gym.Wrapper):
             if 'cost' in info:
                 total_cost += float(info['cost'])
             # 嘗試累積多通道 cost（如果存在）
-            for k in ("cost_risk", "cost_risk_dense", "cost_fric"):
+            for k in ("cost_risk", "cost_risk_dense"):
                 if k in info:
                     try:
                         total_cost_channels[k] += float(info.get(k, 0.0))

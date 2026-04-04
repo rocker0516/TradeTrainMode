@@ -23,7 +23,7 @@ class MockEnv(gym.Env):
         
         info = {
             "cost": 0.5, # High cost
-            "cost_breakdown": {"death_cost": 0.0, "fric_cost": 0.5},
+            "cost_breakdown": {"death_cost": 0.0, "dense_buffer_cost": 0.5},
             "profit": 100.0,
         }
         
@@ -37,9 +37,9 @@ class MockEnv(gym.Env):
                 "return_orig_scaled": 1.0,
                 "return_total": 0.5, # 1.0 - (0.1 * 0.5 * 10)
                 "return_cost": 5.0,
-                "cost_breakdown": {"fric_cost": 5.0},
+                "cost_breakdown": {"dense_buffer_cost": 5.0},
                 "cost_penalty_total": 0.5,
-                "cost_penalty_breakdown": {"fric_cost": 0.5},
+                "cost_penalty_breakdown": {"dense_buffer_cost": 0.5},
             }
             
         return np.zeros(10, dtype=np.float32), reward, terminated, truncated, info
@@ -86,9 +86,9 @@ def test_callback_dump_stats():
                      "return_orig_scaled": 1.0,
                      "return_total": 0.5,
                      "return_cost": 5.0,
-                     "cost_breakdown": {"fric_cost": 5.0},
+                     "cost_breakdown": {"dense_buffer_cost": 5.0},
                      "cost_penalty_total": 0.5,
-                     "cost_penalty_breakdown": {"fric_cost": 0.5}
+                     "cost_penalty_breakdown": {"dense_buffer_cost": 0.5}
                  },
                  "profit": 100.0,
                  "final_balance": 10100.0
