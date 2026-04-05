@@ -154,6 +154,22 @@ class PhaseABEvaluator:
                 "episode_trade_count": 0,
                 "total_fees": 0.0,
                 "episode_start_timestamp": None,
+                # ep_*：與 TradingEnvironment 回合結束 info 一致（評估／報表別名）
+                "ep_return": 0.0,
+                "ep_cost_risk_sum": 0.0,
+                "ep_cost_risk_dense_sum": 0.0,
+                "ep_death_count": 0,
+                "ep_max_drawdown": 0.0,
+                "ep_fee_paid": 0.0,
+                "ep_turnover": 0.0,
+                "ep_avg_risk_load": 0.0,
+                "ep_idle_ratio": 0.0,
+                "ep_trade_count": 0,
+                "ep_tail_loss_count": 0,
+                "episode_turnover_notional": 0.0,
+                "episode_flat_steps": 0,
+                "episode_stop_loss_count": 0,
+                "episode_liq_count": 0,
             }
 
             while not done:
@@ -187,6 +203,33 @@ class PhaseABEvaluator:
                         episode_item["total_fees"] = float(info.get("total_fees", 0.0))
                         ts = info.get("episode_start_timestamp")
                         episode_item["episode_start_timestamp"] = str(ts) if ts is not None else None
+                        episode_item["episode_turnover_notional"] = float(
+                            info.get("episode_turnover_notional", 0.0)
+                        )
+                        episode_item["episode_flat_steps"] = int(info.get("episode_flat_steps", 0))
+                        episode_item["episode_stop_loss_count"] = int(info.get("episode_stop_loss_count", 0))
+                        episode_item["episode_liq_count"] = int(info.get("episode_liq_count", 0))
+                        for _ek in (
+                            "ep_return",
+                            "ep_cost_risk_sum",
+                            "ep_cost_risk_dense_sum",
+                            "ep_death_count",
+                            "ep_max_drawdown",
+                            "ep_fee_paid",
+                            "ep_turnover",
+                            "ep_avg_risk_load",
+                            "ep_idle_ratio",
+                            "ep_trade_count",
+                            "ep_tail_loss_count",
+                        ):
+                            if _ek in info:
+                                try:
+                                    if _ek in ("ep_death_count", "ep_trade_count", "ep_tail_loss_count"):
+                                        episode_item[_ek] = int(info[_ek])
+                                    else:
+                                        episode_item[_ek] = float(info[_ek])
+                                except (TypeError, ValueError):
+                                    pass
 
                 done = bool(dones[0]) if isinstance(dones, np.ndarray) else bool(dones)
 
@@ -230,6 +273,21 @@ class PhaseABEvaluator:
             "episode_max_dd",
             "episode_trade_count",
             "total_fees",
+            "episode_turnover_notional",
+            "episode_flat_steps",
+            "episode_stop_loss_count",
+            "episode_liq_count",
+            "ep_return",
+            "ep_cost_risk_sum",
+            "ep_cost_risk_dense_sum",
+            "ep_death_count",
+            "ep_max_drawdown",
+            "ep_fee_paid",
+            "ep_turnover",
+            "ep_avg_risk_load",
+            "ep_idle_ratio",
+            "ep_trade_count",
+            "ep_tail_loss_count",
         )
         summary: dict[str, dict[str, float]] = {}
         for key in keys_numeric:
@@ -238,6 +296,8 @@ class PhaseABEvaluator:
                 v = item.get(key)
                 if v is None:
                     vals.append(0.0)
+                elif isinstance(v, bool):
+                    vals.append(1.0 if v else 0.0)
                 elif isinstance(v, (int, float)):
                     vals.append(float(v))
                 else:
@@ -367,6 +427,21 @@ class PhaseABEvaluator:
             "episode_trade_count",
             "total_fees",
             "episode_max_dd",
+            "episode_turnover_notional",
+            "episode_flat_steps",
+            "episode_stop_loss_count",
+            "episode_liq_count",
+            "ep_return",
+            "ep_cost_risk_sum",
+            "ep_cost_risk_dense_sum",
+            "ep_death_count",
+            "ep_max_drawdown",
+            "ep_fee_paid",
+            "ep_turnover",
+            "ep_avg_risk_load",
+            "ep_idle_ratio",
+            "ep_trade_count",
+            "ep_tail_loss_count",
         ):
             if key not in summary:
                 continue

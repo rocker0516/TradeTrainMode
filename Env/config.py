@@ -101,6 +101,13 @@ class Config:
     ACTION_REPEAT: int = 3  # ActionRepeatWrapper 預設（Frame Skip）
 
     # -------------------------------------------------------------------------
+    # Episode 尾部風險統計（短窗累積 net log return；見 TradingEnvironment ep_tail_loss_count）
+    # -------------------------------------------------------------------------
+    # 向前 k 步 R_t(k)=sum r_{t..t+k-1}；若 R < -TAIL_LOSS_TAU 視為 tail；連續 t 僅在進入 tail 時計一次事件。
+    TAIL_LOSS_WINDOW_K: int = 12
+    TAIL_LOSS_TAU: float = 0.05
+
+    # -------------------------------------------------------------------------
     # Step Log
     # -------------------------------------------------------------------------
     STEP_LOG_ENABLED: bool = False

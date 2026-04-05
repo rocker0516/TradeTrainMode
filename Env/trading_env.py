@@ -18,6 +18,34 @@ from Env.load_file import load_data
 from Env.Costs.cost import CostCalculator
 
 
+def compute_tail_loss_event_count(step_log_returns: list[float], k: int, tau: float) -> int:
+    """
+    依短窗累積 net log return 計算「進入 tail 區間」事件次數（與 TradingEnvironment 逐步更新語意一致）。
+
+    Args:
+        step_log_returns: 每步 r_t = log(E_{t+1}/E_t) 序列（與 episode_log_return_sum 同口徑）。
+        k: 窗長；k < 1 或 tau <= 0 時回傳 0（停用）。
+        tau: 門檻 R_t(k) < -tau 視為 tail。
+
+    Returns:
+        ep_tail_loss_count：tail_flag_t=1 且 tail_flag_{t-1}=0 的次數（t 為窗起點索引）。
+    """
+    if k < 1 or tau <= 0.0:
+        return 0
+    n = len(step_log_returns)
+    if n < k:
+        return 0
+    prev_flag = False
+    out = 0
+    for L in range(k, n + 1):
+        R = float(sum(step_log_returns[L - k : L]))
+        flag = R < -tau
+        if flag and not prev_flag:
+            out += 1
+        prev_flag = flag
+    return int(out)
+
+
 @dataclass(frozen=True)
 class _StepPrices:
     """step() 單步計算會用到的價格與波動資訊。"""
@@ -190,6 +218,9 @@ class TradingEnvironment(gym.Env):
         )
         # 空倉成本門檻：|final_pos_pct| < 此值視為空倉（供 cost_flat；可經 env_config 傳入）
         self.flat_threshold = float(kwargs.get("flat_threshold", 0.02))
+        # 短窗尾部 log return 事件（ep_tail_loss_count）；k<1 或 tau<=0 視為停用
+        self.tail_loss_window_k = int(kwargs.get("tail_loss_window_k", getattr(Config, "TAIL_LOSS_WINDOW_K", 12)))
+        self.tail_loss_tau = float(kwargs.get("tail_loss_tau", getattr(Config, "TAIL_LOSS_TAU", 0.05)))
         # 空倉比例滑窗步數（與 cost_flat 同口徑，供 recent_flat_ratio 觀察；實盤可算）
         self._flat_window_steps = int(kwargs.get("flat_window_steps", 864))  # 預設 288*3
         self._flat_deque: Optional[deque] = None
@@ -275,6 +306,12 @@ class TradingEnvironment(gym.Env):
         self._last_position_size = 0.0
         self.episode_stop_loss_count = 0
         self.episode_liq_count = 0
+        # 每步 |position_pct|（與 reward 用 pos_pct_reward 同口徑）累加，回合結束除步數得 ep_avg_risk_load
+        self.episode_abs_position_pct_sum = 0.0
+        # 短窗 tail 事件計數（與 compute_tail_loss_event_count 逐步語意一致）
+        self.ep_tail_loss_count = 0
+        self._episode_step_log_returns: list[float] = []
+        self._tail_prev_window_flag = False
         self.stop_loss_cooldown = 0
         self.daily_risk_base = 0.0
         self.last_risk_base_update_step = 0
@@ -490,6 +527,10 @@ class TradingEnvironment(gym.Env):
         self._last_position_size = 0.0
         self.episode_stop_loss_count = 0
         self.episode_liq_count = 0
+        self.episode_abs_position_pct_sum = 0.0
+        self.ep_tail_loss_count = 0
+        self._episode_step_log_returns = []
+        self._tail_prev_window_flag = False
         self.stop_loss_cooldown = 0
         self.daily_risk_base = self.initial_balance
         self.last_risk_base_update_step = self.current_step
@@ -882,6 +923,27 @@ class TradingEnvironment(gym.Env):
             info["episode_stop_loss_count"] = int(getattr(self, "episode_stop_loss_count", 0))
             info["episode_liq_count"] = int(getattr(self, "episode_liq_count", 0))
             info["episode_active_exit_count"] = int(getattr(self, "episode_active_exit_count", 0))
+
+            # ---- ep_* 別名（評估／報表用；與既有 episode_* 數值一致）----
+            ib = float(self.initial_balance)
+            fe = float(new_equity)
+            ep_ret = float((fe / ib) - 1.0) if ib > 0.0 else 0.0
+            n_steps_done = int(max(1, int(getattr(self, "episode_steps", 0))))
+            info["ep_return"] = ep_ret
+            info["ep_cost_risk_sum"] = float(episode_cost_risk_sum)
+            info["ep_cost_risk_dense_sum"] = float(episode_cost_risk_dense_sum)
+            info["ep_death_count"] = int(
+                int(getattr(self, "episode_stop_loss_count", 0)) + int(getattr(self, "episode_liq_count", 0))
+            )
+            info["ep_max_drawdown"] = float(episode_max_dd)
+            info["ep_fee_paid"] = float(getattr(self.executor, "total_fees", 0.0))
+            info["ep_turnover"] = float(max(0.0, float(episode_turnover_notional)))
+            info["ep_avg_risk_load"] = float(getattr(self, "episode_abs_position_pct_sum", 0.0)) / float(
+                n_steps_done
+            )
+            info["ep_idle_ratio"] = float(int(episode_flat_steps)) / float(n_steps_done)
+            info["ep_trade_count"] = int(max(0, int(episode_trade_count)))
+            info["ep_tail_loss_count"] = int(getattr(self, "ep_tail_loss_count", 0))
 
         return info
 
@@ -1372,7 +1434,21 @@ class TradingEnvironment(gym.Env):
         # 純對數報酬與 regime bonus 累計（與 reward 分解一致，供 STATS 顯示真實 log return / Est. ROI）
         safe_last = max(last_equity, 1e-8)
         safe_new = max(new_equity, 1e-8)
-        self.episode_log_return_sum += float(np.log(safe_new / safe_last))
+        r_step = float(np.log(safe_new / safe_last))
+        self.episode_log_return_sum += r_step
+        # 風險曝險（與本步 reward 之 pos_pct_reward 一致）
+        self.episode_abs_position_pct_sum += float(abs(float(pos_pct_reward)))
+        self._episode_step_log_returns.append(r_step)
+        k_tl = int(getattr(self, "tail_loss_window_k", 0) or 0)
+        tau_tl = float(getattr(self, "tail_loss_tau", 0.0) or 0.0)
+        if k_tl >= 1 and tau_tl > 0.0:
+            rets_tl = self._episode_step_log_returns
+            if len(rets_tl) >= k_tl:
+                R_tl = float(sum(rets_tl[-k_tl:]))
+                flag_tl = bool(R_tl < -tau_tl)
+                if flag_tl and not self._tail_prev_window_flag:
+                    self.ep_tail_loss_count += 1
+                self._tail_prev_window_flag = flag_tl
         _reg = getattr(self.reward_calculator, "last_regime_alignment_bonus", 0.0)
         self.episode_regime_alignment_bonus_sum += float(
             np.nan_to_num(_reg, nan=0.0, posinf=0.0, neginf=0.0)
