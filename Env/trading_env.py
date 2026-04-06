@@ -89,6 +89,10 @@ class TradingEnvironment(gym.Env):
         # 預設行為不變：若未提供 max_episode_steps，仍使用 Config.MAX_EPISODE_STEPS。
         self.max_episode_steps = int(kwargs.get("max_episode_steps", getattr(Config, "MAX_EPISODE_STEPS", 1000000)))
         self.min_position_change = float(kwargs.get("min_position_change", Config.MIN_POSITION_CHANGE))
+        # 目標倉位比例 |w| 上限；未傳時 1.0 與舊版 [-1,1] 行為一致。Phase A/B 由 PhaseABEnvConfig 傳入。
+        self.max_position_pct = float(kwargs.get("max_position_pct", 1.0))
+        if self.max_position_pct <= 0.0 or self.max_position_pct > 1.0:
+            raise ValueError("max_position_pct must be in (0, 1]")
         # daily_risk_base 更新頻率（用於單步倉位變化上限的基準）
         # 預設用 Config.RISK_BASE_UPDATE_STEPS；若未設定則回退到 window_size（維持舊語義）
         self.risk_base_update_steps = int(
@@ -175,9 +179,15 @@ class TradingEnvironment(gym.Env):
             # no-trade 雙門檻（hysteresis）：讓 0 倉位更穩定，避免 action 0 附近抖動造成反覆成交
             no_trade_entry_threshold=float(kwargs.get("no_trade_entry_threshold", getattr(Config, "NO_TRADE_ENTRY_THRESHOLD", 0.0))),
             no_trade_exit_threshold=float(kwargs.get("no_trade_exit_threshold", getattr(Config, "NO_TRADE_EXIT_THRESHOLD", 0.0))),
+            max_position_pct=float(self.max_position_pct),
         )
-        # Action Space
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+        # Action Space（與 max_position_pct 一致，供 SAC 等政策對齊邊界）
+        self.action_space = spaces.Box(
+            low=-float(self.max_position_pct),
+            high=float(self.max_position_pct),
+            shape=(1,),
+            dtype=np.float32,
+        )
 
         # Executor
         self.executor = TradeExecutor(

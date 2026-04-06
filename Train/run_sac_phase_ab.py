@@ -547,6 +547,7 @@ def get_phase_ab_env_kwargs(
         no_trade_exit_threshold=float(PhaseABEnvConfig.NO_TRADE_EXIT_THRESHOLD),
         max_step_pos_change_pct=float(PhaseABEnvConfig.MAX_STEP_POS_CHANGE_PCT),
         min_position_change=float(PhaseABEnvConfig.MIN_POSITION_CHANGE),
+        max_position_pct=float(PhaseABEnvConfig.MAX_POSITION_PCT),
         trade_freq_window_steps=PhaseABEnvConfig.TRADE_FREQ_WINDOW_STEPS,
         trade_freq_cost_limit=PhaseABEnvConfig.TRADE_FREQ_COST_LIMIT,
         # 順向／regime 輔助 reward（小權重）：做對方向加分，主線仍是 log-return
@@ -761,11 +762,11 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase A/B SAC 訓練")
     parser.add_argument("--phase", choices=["A", "B"], default="B", help="Phase A=只放寬控制, B=再加 cost_risk 懲罰")
-    parser.add_argument("--timesteps", type=int, default=10_000) # 288 * 21 * 48 * 20 = 261,360,000
-    parser.add_argument("--n-envs", type=int, default=1)
+    parser.add_argument("--timesteps", type=int, default=12_000_000) # 288 * 21 * 48 * 20 = 261,360,000
+    parser.add_argument("--n-envs", type=int, default=64)
     parser.add_argument("--lambda-risk", type=float, default=1.0, help="Phase B 時 cost_risk（事件型）的權重")
-    parser.add_argument("--lambda-buffer", type=float, default=0.01, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
-    parser.add_argument("--reward-scale", type=float, default=10.0, help="Phase B 時主線 reward 放大倍數")
+    parser.add_argument("--lambda-buffer", type=float, default=0.001, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
+    parser.add_argument("--reward-scale", type=float, default=1.0, help="Phase B 時主線 reward 放大倍數")
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--log-freq", type=int, default=1_000, help="PhaseAB 統計與 log 間隔（步數）")
@@ -780,7 +781,7 @@ def main() -> None:
         default=float(PhaseABEnvConfig.NEUTRAL_TRADE_PENALTY_WEIGHT),
         help="中性區（無 Gate A/C）且本步成交時，主線 reward 固定扣分（不隨 regime/conviction 退火）",
     )
-    parser.add_argument("--conviction-bonus-weight", type=float, default=0.03, help="Conviction 順向 bonus 權重（強訊號+大倉+同向加分）")
+    parser.add_argument("--conviction-bonus-weight", type=float, default=0.0003, help="Conviction 順向 bonus 權重（強訊號+大倉+同向加分）")
     parser.add_argument("--conviction-min-abs-pos", type=float, default=0.4, help="Conviction 生效最小持倉比例")
     parser.add_argument("--conviction-trend-min-strength", type=float, default=0.5, help="Conviction 生效最小趨勢強度")
     parser.add_argument("--anneal-steps", type=int, default=0, help="輔助 reward 退火步數（0=不退火，regime/conviction 全程滿權重）")

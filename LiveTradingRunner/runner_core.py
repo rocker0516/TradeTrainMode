@@ -353,6 +353,7 @@ class LiveRunner:
             min_position_change=float(getattr(cfg, "min_position_change", 0.0)),
             no_trade_entry_threshold=float(getattr(cfg, "no_trade_entry_threshold", 0.0)),
             no_trade_exit_threshold=float(getattr(cfg, "no_trade_exit_threshold", 0.0)),
+            max_position_pct=float(getattr(cfg, "max_position_pct", 1.0)),
         )
 
         # risk_base：近似 TradingEnvironment 的 daily_risk_base（每 risk_base_update_steps 更新一次）

@@ -3,22 +3,39 @@ import numpy as np
 class ActionProcessor:
     """
     負責動作處理邏輯：
-    1. 翻倉偵測 (Flip Detection)（僅標記 is_flip；不做預算限制）
-    1.1 no-trade 雙門檻（hysteresis）：讓 0 倉位更穩定（避免 action 0 附近抖動造成反覆成交）
-    2. 單步倉位變化限制 (Max Step Position Change)
-    3. 最小調倉幅度過濾 (Deadband)
+    1. 將 raw action clip 至 [-max_position_pct, +max_position_pct]（目標倉位比例）
+    2. 翻倉偵測 (Flip Detection)（僅標記 is_flip；不做預算限制）
+    2.1 no-trade 雙門檻（hysteresis）：讓 0 倉位更穩定（避免 action 0 附近抖動造成反覆成交）
+    3. 單步倉位變化限制 (Max Step Position Change)
+    4. 最小調倉幅度過濾 (Deadband)
     """
     def __init__(self, 
                  leverage: float, 
                  max_step_pos_change_pct: float,
                  min_position_change: float,
                  no_trade_entry_threshold: float = 0.0,
-                 no_trade_exit_threshold: float = 0.0):
+                 no_trade_exit_threshold: float = 0.0,
+                 max_position_pct: float = 1.0):
+        """
+        Args:
+            leverage: 槓桿倍數。
+            max_step_pos_change_pct: 單步相對 risk_base 的名義變化上限比例。
+            min_position_change: 最小調倉 deadband（相對名義容量）。
+            no_trade_entry_threshold: 空倉時 |action| 低於此值則目標強制為 0。
+            no_trade_exit_threshold: 有倉時 |action| 低於此值則目標強制為 0（應 <= entry）。
+            max_position_pct: 目標持倉比例絕對值上限，須落在 (0, 1]；預設 1.0 與舊版 [-1,1] clip 相容。
+
+        Raises:
+            ValueError: 門檻順序不合法或 max_position_pct 不在 (0, 1]。
+        """
         self.leverage = float(leverage)
         self.max_step_pos_change_pct = float(max_step_pos_change_pct)
         self.min_position_change = float(min_position_change)
         self.no_trade_entry_threshold = float(no_trade_entry_threshold)
         self.no_trade_exit_threshold = float(no_trade_exit_threshold)
+        self.max_position_pct = float(max_position_pct)
+        if self.max_position_pct <= 0.0 or self.max_position_pct > 1.0:
+            raise ValueError("max_position_pct must be in (0, 1]")
 
         # 允許關閉 hysteresis：兩者皆為 0 即不生效
         if self.no_trade_entry_threshold < 0.0:
@@ -39,7 +56,7 @@ class ActionProcessor:
             (target_pos_pct, is_flip)
         """
         # 1. Clip raw action
-        action_val = float(np.clip(action_raw[0], -1.0, 1.0))
+        action_val = float(np.clip(action_raw[0], -self.max_position_pct, self.max_position_pct))
         target_pos_pct = action_val
 
         # 2. Current Position Pct

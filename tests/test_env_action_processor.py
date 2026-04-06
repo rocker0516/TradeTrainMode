@@ -133,6 +133,20 @@ def test_action_processor_no_trade_hysteresis_exits_when_has_position_and_action
     assert float(target) == 0.0
 
 
+def test_action_processor_respects_max_position_pct_clip() -> None:
+    ex = _make_executor()
+    ap = ActionProcessor(
+        leverage=10.0,
+        max_step_pos_change_pct=1.0,
+        min_position_change=0.0,
+        max_position_pct=0.8,
+    )
+    target, _ = ap.process_action(np.array([1.0], dtype=np.float32), ex, 100.0)
+    assert float(target) == pytest.approx(0.8, abs=1e-6)
+    target_neg, _ = ap.process_action(np.array([-1.0], dtype=np.float32), ex, 100.0)
+    assert float(target_neg) == pytest.approx(-0.8, abs=1e-6)
+
+
 def test_action_processor_no_trade_hysteresis_validates_threshold_order() -> None:
     # entry 必須 >= exit（否則 hysteresis 會失去意義）
     with pytest.raises(ValueError):
