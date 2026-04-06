@@ -764,8 +764,8 @@ def main() -> None:
     parser.add_argument("--phase", choices=["A", "B"], default="B", help="Phase A=只放寬控制, B=再加 cost_risk 懲罰")
     parser.add_argument("--timesteps", type=int, default=12_000_000) # 288 * 21 * 48 * 20 = 261,360,000
     parser.add_argument("--n-envs", type=int, default=64)
-    parser.add_argument("--lambda-risk", type=float, default=1.0, help="Phase B 時 cost_risk（事件型）的權重")
-    parser.add_argument("--lambda-buffer", type=float, default=0.001, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
+    parser.add_argument("--lambda-risk", type=float, default=0.1, help="Phase B 時 cost_risk（事件型）的權重")
+    parser.add_argument("--lambda-buffer", type=float, default=0.00001, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
     parser.add_argument("--reward-scale", type=float, default=1.0, help="Phase B 時主線 reward 放大倍數")
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")
     parser.add_argument("--device", type=str, default="auto")
@@ -788,7 +788,7 @@ def main() -> None:
     # 評估參數（可訓練中觸發、訓練後觸發，或 eval-only）
     parser.add_argument("--eval-only", action="store_true", help="只做評估，不進行訓練")
     parser.add_argument("--eval-model-path", type=str, default="", help="評估模型路徑（空則沿用 --save-path）")
-    parser.add_argument("--eval-episodes", type=int, default=10, help="每次評估回合數")
+    parser.add_argument("--eval-episodes", type=int, default=100, help="每次評估回合數")
     parser.add_argument("--eval-seed", type=int, default=42, help="評估用 seed")
     parser.add_argument("--eval-report-path", type=str, default="", help="評估結果 JSON 輸出路徑，空則依 phase/lr/lb/rs/rb/cb 自動產生")
     parser.add_argument(
@@ -820,7 +820,7 @@ def main() -> None:
     parser.add_argument("--eval-deterministic", action=argparse.BooleanOptionalAction, default=True, help="評估是否使用 deterministic 動作(False=使用隨機動作)")
     parser.add_argument("--eval-on-train-end", action=argparse.BooleanOptionalAction, default=True, help="訓練結束後是否執行一次評估")
     parser.add_argument("--eval-trigger-steps", type=int, nargs="*", default=[], help="訓練中在指定步數觸發評估，可多個")
-    parser.add_argument("--eval-trigger-every", type=int, default=10_000_000, help="訓練中每 N steps 觸發評估（0=停用）")
+    parser.add_argument("--eval-trigger-every", type=int, default=20_000_000, help="訓練中每 N steps 觸發評估（0=停用）")
     parser.add_argument("--eval-trigger-min-interval", type=int, default=0, help="兩次訓練中評估最小間隔步數")
     parser.add_argument("--eval-trigger-mode", choices=["any", "all"], default="any", help="多條件組合模式")
     parser.add_argument("--eval-metric-rule", action="append", default=[], help="內建 metric 規則，例如 log_return_sum_mean>=0.2")
@@ -845,6 +845,7 @@ def main() -> None:
             f"phase_{args.phase}_lr{str(args.lambda_risk).replace('.', '')}_lb{str(args.lambda_buffer).replace('.', '')}"
             f"_rs{str(args.reward_scale).replace('.', '')}_rb{str(args.regime_bonus_weight).replace('.', '')}_cb{str(args.conviction_bonus_weight).replace('.', '')}"
             f"_ntp{str(args.neutral_trade_penalty_weight).replace('.', '')}"
+            f"_sl{str(3).replace('.', '')}"
         )
     if not (getattr(args, "eval_report_path", "") or "").strip():
         args.eval_report_path = f"logs/{_path_prefix()}_eval.json"

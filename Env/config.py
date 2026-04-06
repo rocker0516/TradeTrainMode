@@ -79,7 +79,7 @@ class Config:
     # -------------------------------------------------------------------------
     # 止損與清算
     # -------------------------------------------------------------------------
-    STOP_LOSS_ATR: float = 2  # 止損距離的 ATR 倍數
+    STOP_LOSS_ATR: float = 3  # 止損距離的 ATR 倍數
     STOP_LOSS_LIQ_BUFFER_PCT: float = 0.2  # 止損相對強平價的安全緩衝（比例）
     STOP_LOSS_COOLDOWN_STEPS: int = 0  # 止損後冷卻步數（30/5）
     STOP_LOSS_EVENT_COST: float = 0.02  # 觸發止損時的額外事件成本（比例）
