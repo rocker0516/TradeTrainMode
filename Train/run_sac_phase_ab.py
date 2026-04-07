@@ -511,6 +511,14 @@ def get_phase_ab_env_kwargs(
     data_split_enabled: bool = True,
     holdout_months: int = 3,
     data_mode: str = "train",
+    # ---- execution cost params (wired to TradingEnvironment -> TradeExecutor) ----
+    execution_cost_mode: int = 0,
+    spread_half_bps: float = 0.0,
+    min_notional: float = 0.0,
+    slip_base_bps: float = 0.0,
+    slip_vol_coeff: float = 0.0,
+    slip_size_coeff: float = 15.0,
+    adv_lookback_days: int = 30,
 ) -> dict[str, Any]:
     """
     Phase A/B 共用的 env 參數：減少 hard override、主線 log-return。
@@ -556,6 +564,14 @@ def get_phase_ab_env_kwargs(
         neutral_trade_penalty_weight=float(neutral_trade_penalty_weight),
         conviction_min_abs_pos=float(conviction_min_abs_pos),
         conviction_trend_min_strength=float(conviction_trend_min_strength),
+        # ---- execution cost params ----
+        execution_cost_mode=int(execution_cost_mode),
+        spread_half_bps=float(spread_half_bps),
+        min_notional=float(min_notional),
+        slip_base_bps=float(slip_base_bps),
+        slip_vol_coeff=float(slip_vol_coeff),
+        slip_size_coeff=float(slip_size_coeff),
+        adv_lookback_days=int(adv_lookback_days),
     )
     # 評估端若沿用預設 min_episode_steps，常會把可選起點範圍壓縮到單一點，
     # 導致每次 reset 都是同一起點。eval 模式改為放寬，確保 random_start 可生效。
@@ -765,16 +781,16 @@ def main() -> None:
     parser.add_argument("--timesteps", type=int, default=12_000_000) # 288 * 21 * 48 * 20 = 261,360,000
     parser.add_argument("--n-envs", type=int, default=64)
     parser.add_argument("--lambda-risk", type=float, default=0.1, help="Phase B 時 cost_risk（事件型）的權重")
-    parser.add_argument("--lambda-buffer", type=float, default=0.00001, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
+    parser.add_argument("--lambda-buffer", type=float, default=0.001, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
     parser.add_argument("--reward-scale", type=float, default=1.0, help="Phase B 時主線 reward 放大倍數")
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--log-freq", type=int, default=1_000, help="PhaseAB 統計與 log 間隔（步數）")
+    parser.add_argument("--log-freq", type=int, default=10_000, help="PhaseAB 統計與 log 間隔（步數）")
     # 訓練/評估時間切分（預設：訓練用過去、評估用最近 N 月，避免評估用訓練見過的資料）
     parser.add_argument("--holdout-months", type=int, default=1, help="評估用最近 N 個月資料；訓練用其餘過去資料（與 --no-data-split 互斥）")
     parser.add_argument("--no-data-split", action="store_true", help="停用訓練/評估時間切分，訓練與評估皆用完整資料")
     # 順向／regime 輔助 reward（小權重，做對方向加分）
-    parser.add_argument("--regime-bonus-weight", type=float, default=0.00003, help="Regime 對齊 bonus 權重（A 多/C 空加分，依 dir_strength 加權）")
+    parser.add_argument("--regime-bonus-weight", type=float, default=0.0000003, help="Regime 對齊 bonus 權重（A 多/C 空加分，依 dir_strength 加權）")
     parser.add_argument(
         "--neutral-trade-penalty-weight",
         type=float,
@@ -785,6 +801,14 @@ def main() -> None:
     parser.add_argument("--conviction-min-abs-pos", type=float, default=0.4, help="Conviction 生效最小持倉比例")
     parser.add_argument("--conviction-trend-min-strength", type=float, default=0.5, help="Conviction 生效最小趨勢強度")
     parser.add_argument("--anneal-steps", type=int, default=0, help="輔助 reward 退火步數（0=不退火，regime/conviction 全程滿權重）")
+    # ---- Execution cost 開關與參數 ----
+    parser.add_argument("--execution-cost-mode", type=int, default=3, help="成交成本 bitmask：1=spread, 2=min_notional, 4=slippage，可相加組合（例 7=全開）")
+    parser.add_argument("--spread-half-bps", type=float, default=1.0, help="half-spread（bps）；買加價、賣減價")
+    parser.add_argument("--min-notional", type=float, default=10.0, help="名目金額門檻，低於門檻則不成交（含減倉/平倉）")
+    parser.add_argument("--slip-base-bps", type=float, default=0.25, help="體量滑點：base bps")
+    parser.add_argument("--slip-vol-coeff", type=float, default=0.0, help="體量滑點：成交量代理係數（目前 vol_proxy=0，如需可自定）")
+    parser.add_argument("--slip-size-coeff", type=float, default=8.0, help="體量滑點：size_ratio 係數（Δ名目/ADV 名目）")
+    parser.add_argument("--adv-lookback-days", type=int, default=30, help="ADV 名目回顧天數（以 5m bar 計算 rolling 平均）")
     # 評估參數（可訓練中觸發、訓練後觸發，或 eval-only）
     parser.add_argument("--eval-only", action="store_true", help="只做評估，不進行訓練")
     parser.add_argument("--eval-model-path", type=str, default="", help="評估模型路徑（空則沿用 --save-path）")
@@ -846,6 +870,12 @@ def main() -> None:
             f"_rs{str(args.reward_scale).replace('.', '')}_rb{str(args.regime_bonus_weight).replace('.', '')}_cb{str(args.conviction_bonus_weight).replace('.', '')}"
             f"_ntp{str(args.neutral_trade_penalty_weight).replace('.', '')}"
             f"_sl{str(3).replace('.', '')}"
+            f"_ec{str(args.execution_cost_mode).replace('.', '')}"
+            f"_hs{str(args.spread_half_bps).replace('.', '')}"
+            f"_mn{str(args.min_notional).replace('.', '')}"
+            f"_sb{str(args.slip_base_bps).replace('.', '')}"
+            f"_sc{str(args.slip_size_coeff).replace('.', '')}"
+            f"_ad{str(args.adv_lookback_days).replace('.', '')}"
         )
     if not (getattr(args, "eval_report_path", "") or "").strip():
         args.eval_report_path = f"logs/{_path_prefix()}_eval.json"
@@ -870,6 +900,14 @@ def main() -> None:
         data_split_enabled=data_split,
         holdout_months=holdout,
         data_mode="train",
+        # execution cost
+        execution_cost_mode=args.execution_cost_mode,
+        spread_half_bps=args.spread_half_bps,
+        min_notional=args.min_notional,
+        slip_base_bps=args.slip_base_bps,
+        slip_vol_coeff=args.slip_vol_coeff,
+        slip_size_coeff=args.slip_size_coeff,
+        adv_lookback_days=args.adv_lookback_days,
     )
     env_kwargs_eval = get_phase_ab_env_kwargs(
         regime_bonus_weight=args.regime_bonus_weight,
@@ -880,6 +918,14 @@ def main() -> None:
         data_split_enabled=data_split,
         holdout_months=holdout,
         data_mode="eval",
+        # execution cost
+        execution_cost_mode=args.execution_cost_mode,
+        spread_half_bps=args.spread_half_bps,
+        min_notional=args.min_notional,
+        slip_base_bps=args.slip_base_bps,
+        slip_vol_coeff=args.slip_vol_coeff,
+        slip_size_coeff=args.slip_size_coeff,
+        adv_lookback_days=args.adv_lookback_days,
     )
 
     eval_env_thunk = make_env(
@@ -962,7 +1008,7 @@ def main() -> None:
         from stable_baselines3.common.logger import configure
         model.set_logger(configure(None, ["stdout"]))
 
-    model.learn(total_timesteps=args.timesteps, callback=callbacks, progress_bar=True)
+    model.learn(total_timesteps=args.timesteps, callback=callbacks, progress_bar=True, log_interval=10_000)
     os.makedirs(os.path.dirname(args.save_path) or ".", exist_ok=True)
     model.save(args.save_path)
     vec_env.close()

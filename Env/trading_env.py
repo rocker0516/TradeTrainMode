@@ -54,6 +54,9 @@ class _StepPrices:
     current_high: float
     current_low: float
     atr_est: float
+    # 交易量與 ADV 名目（供成交成本/slippage 使用）
+    bar_volume: float
+    adv_notional: float
 
 
 class TradingEnvironment(gym.Env):
@@ -109,6 +112,15 @@ class TradingEnvironment(gym.Env):
         self.margin_mode = 'isolated'
         self.min_trade_qty = 0.001 
 
+        # ---- Execution cost parameters (bitmask control) ----
+        self.execution_cost_mode = int(kwargs.get("execution_cost_mode", getattr(Config, "EXECUTION_COST_MODE", 0)))
+        self.spread_half_bps = float(kwargs.get("spread_half_bps", getattr(Config, "SPREAD_HALF_BPS", 0.0)))
+        self.min_notional = float(kwargs.get("min_notional", getattr(Config, "MIN_NOTIONAL", 0.0)))
+        self.slip_base_bps = float(kwargs.get("slip_base_bps", getattr(Config, "SLIP_BASE_BPS", 0.0)))
+        self.slip_vol_coeff = float(kwargs.get("slip_vol_coeff", getattr(Config, "SLIP_VOL_COEFF", 0.0)))
+        self.slip_size_coeff = float(kwargs.get("slip_size_coeff", getattr(Config, "SLIP_SIZE_COEFF", 15.0)))
+        self.adv_lookback_days = int(kwargs.get("adv_lookback_days", getattr(Config, "ADV_LOOKBACK_DAYS", 30)))
+
         # ---- Train/Eval split (optional; to prevent data leakage) ----
         # 語義：
         # - data_split_enabled=True 且 data_mode="train"：使用「非最近 N 個月」資料
@@ -145,6 +157,21 @@ class TradingEnvironment(gym.Env):
             self.df_5m, self.df_1d = df_5m_in, df_1d_in
         else:
             self.df_5m, self.df_1d = load_data()
+
+        # ---- Precompute ADV notional rolling average (for slippage model) ----
+        try:
+            df5 = self.df_5m
+            close_col = "close"
+            vol_col = "volume"
+            if close_col in df5.columns and vol_col in df5.columns:
+                notional = (pd.Series(df5[close_col]).astype(float) * pd.Series(df5[vol_col]).astype(float))
+                win = max(1, int(self.adv_lookback_days) * 288)
+                adv_notional = notional.rolling(window=win, min_periods=1).mean().astype(float)
+                self._adv_notional_arr = adv_notional.to_numpy(copy=False)
+            else:
+                self._adv_notional_arr = np.zeros(len(df5), dtype=float)
+        except Exception:
+            self._adv_notional_arr = np.zeros(len(self.df_5m), dtype=float)
 
         # ---- Apply train/eval split by recent months ----
         if self.data_split_enabled and self.data_mode in {"train", "eval"}:
@@ -200,6 +227,13 @@ class TradingEnvironment(gym.Env):
             min_position_change=self.min_position_change,
             stop_loss_atr=float(kwargs.get("stop_loss_atr", Config.STOP_LOSS_ATR)),
             stop_loss_liq_buffer_pct=getattr(Config, "STOP_LOSS_LIQ_BUFFER_PCT", 0.0),
+            # execution cost wiring
+            execution_cost_mode=int(self.execution_cost_mode),
+            spread_half_bps=float(self.spread_half_bps),
+            min_notional=float(self.min_notional),
+            slip_base_bps=float(self.slip_base_bps),
+            slip_vol_coeff=float(self.slip_vol_coeff),
+            slip_size_coeff=float(self.slip_size_coeff),
         )
         
         # Reward Calculator（順向獎勵參數可由 Config 或 kwargs 覆寫）
@@ -906,6 +940,13 @@ class TradingEnvironment(gym.Env):
             info["fees_to_equity_ratio"] = (
                 float(getattr(self.executor, "total_fees", 0.0)) / float(max(1e-8, new_equity))
             )
+            # 交易滑點成本（累積）
+            try:
+                total_slip = float(getattr(self.executor, "total_slippage_cost", 0.0))
+                info["total_slippage_cost"] = total_slip
+                info["total_slippage_cost_ratio"] = float(total_slip / float(self.initial_balance)) if self.initial_balance > 0 else 0.0
+            except Exception:
+                pass
             # 額外提供 Gymnasium 語意旗標，方便外部檢查（不影響既有 key）
             info["terminated"] = bool(terminated)
             info["truncated"] = bool(truncated)
@@ -1010,11 +1051,22 @@ class TradingEnvironment(gym.Env):
         current_high = float(metrics["high"])
         current_low = float(metrics["low"])
         atr_est = float(metrics["atr_ratio"]) * current_price
+        # bar volume 與 ADV 名目
+        try:
+            bar_volume = float(self.market_data.df_5m["volume"].iloc[self.current_step])
+        except Exception:
+            bar_volume = 0.0
+        try:
+            adv_notional = float(self._adv_notional_arr[self.current_step])
+        except Exception:
+            adv_notional = 0.0
         return _StepPrices(
             current_price=current_price,
             current_high=current_high,
             current_low=current_low,
             atr_est=atr_est,
+            bar_volume=bar_volume,
+            adv_notional=adv_notional,
         )
 
     def _apply_stop_loss_cooldown(self, action: np.ndarray, current_price: float, last_equity: float) -> np.ndarray:
@@ -1130,6 +1182,8 @@ class TradingEnvironment(gym.Env):
             equity=last_equity,
             atr=prices.atr_est,
             risk_base=self.daily_risk_base,
+            bar_volume=prices.bar_volume,
+            adv_notional=prices.adv_notional,
         )
         # 執行後真實倉位比例（executor 可能因 min_trade_qty / deadband 未動，故以實際持倉為準）
         max_nominal = max(float(last_equity) * float(self.leverage), 1e-8)

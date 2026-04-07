@@ -18,6 +18,22 @@ class Config:
     INITIAL_BALANCE: float =300.0
     TRANSACTION_FEE: float = 0.01  # 手續費百分比（例：0.04 代表 0.04%）
 
+    # 成交成本模型（以單一整數 bitmask 控制，0=關閉所有）
+    # 1=spread（half-spread bps），2=min_notional（名目門檻），4=slippage（交易量比例滑點）
+    EXECUTION_COST_MODE: int = 0
+    # spread：half-spread（bps），買=price*(1+hs*1e-4)，賣=price*(1-hs*1e-4)
+    SPREAD_HALF_BPS: float = 0.0
+    # min_notional：單筆名目金額（abs(delta_size)*price）門檻；低於門檻即不成交（含減倉/平倉）
+    MIN_NOTIONAL: float = 0.0
+    # slippage（交易量比例）：
+    # slip_bps_t = base + vol_coeff * vol_proxy + size_coeff * size_ratio
+    # 其中 size_ratio = abs(delta_notional) / max(ADV_notional, 1e-8)
+    SLIP_BASE_BPS: float = 0.0
+    SLIP_VOL_COEFF: float = 0.0
+    SLIP_SIZE_COEFF: float = 15.0
+    # ADV 回顧天數（以 5m bar 計算名目之 rolling 平均）
+    ADV_LOOKBACK_DAYS: int = 30
+
     # -------------------------------------------------------------------------
     # 視窗與步數
     # -------------------------------------------------------------------------

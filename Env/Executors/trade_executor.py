@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Dict
+import numpy as np
 
 
 @dataclass
@@ -45,6 +46,13 @@ class TradeExecutor:
         stop_loss_atr: float = 2.5, # 止損距離（ATR 倍數）
         stop_loss_liq_buffer_pct: float = 0.0, # 止損相對強平價的安全緩衝（比例）
         min_position_change: float = 0.0, # 最小調倉幅度 (0.0 ~ 1.0)
+        # ---- execution cost parameters ----
+        execution_cost_mode: int = 0,
+        spread_half_bps: float = 0.0,
+        min_notional: float = 0.0,
+        slip_base_bps: float = 0.0,
+        slip_vol_coeff: float = 0.0,
+        slip_size_coeff: float = 15.0,
     ) -> None:
         self.fee_rate = float(fee_rate)# 交易手續費
         self.leverage = float(leverage)# 槓桿倍數
@@ -67,6 +75,7 @@ class TradeExecutor:
         self.closed_trades: List[Dict[str, float]] = []# 已平倉交易
         # 逐回合統計
         self.total_fees: float = 0.0
+        self.total_slippage_cost: float = 0.0
         self.long_close_count: int = 0
         self.short_close_count: int = 0
         self.long_entry_count: int = 0
@@ -81,6 +90,14 @@ class TradeExecutor:
         # trailing stop 只使用「上一根已完成 K」的 high/low 來推進，並在本根以當前 low/high 判斷是否觸發。
         self._prev_bar_high: float | None = None
         self._prev_bar_low: float | None = None
+
+        # ---- execution cost params store ----
+        self.execution_cost_mode = int(execution_cost_mode)
+        self.spread_half_bps = float(spread_half_bps)
+        self.min_notional = float(min_notional)
+        self.slip_base_bps = float(slip_base_bps)
+        self.slip_vol_coeff = float(slip_vol_coeff)
+        self.slip_size_coeff = float(slip_size_coeff)
 
     def _clamp_stop_loss_before_liquidation(self, *, current_price: float) -> None:
         """
@@ -132,6 +149,7 @@ class TradeExecutor:
         self.used_margin = 0.0# 已使用保證金
         self.closed_trades = []# 已平倉交易
         self.total_fees = 0.0
+        self.total_slippage_cost = 0.0
         self.long_close_count = 0
         self.short_close_count = 0
         self.long_entry_count = 0
@@ -253,9 +271,12 @@ class TradeExecutor:
         low: float, # 當前最低價
         equity: float, # 當前權益
         atr: float = 0.0, # ATR（用於計算止損距離）
-        risk_base: float | None = None # 用於計算倉位大小的基準金額 (預設為 None，若 None 則使用 wallet_balance)
+        risk_base: float | None = None, # 用於計算倉位大小的基準金額 (預設為 None，若 None 則使用 wallet_balance)
+        bar_volume: float = 0.0,
+        adv_notional: float = 0.0,
     ) -> None:
         # 重置本步觸發標記
+        self.liq_triggered = False
         self.stop_loss_triggered = False
 
         # 不論本步是否因為 deadband/資金不足而提早 return，都要快取本根 K 線 high/low
@@ -292,7 +313,12 @@ class TradeExecutor:
                     except (TypeError, ValueError):
                         # debug print 不應中斷訓練流程
                         pass
-                    self._close_position(liq_price)
+                    self._close_position(
+                        liq_price,
+                        bar_volume=float(bar_volume),
+                        adv_notional=float(adv_notional),
+                        ignore_min_notional=True,
+                    )
                     self.liq_triggered = True
                     return
 
@@ -301,7 +327,12 @@ class TradeExecutor:
                 if (self.position.size > 0 and low <= self.position.stop_loss_price) or \
                    (self.position.size < 0 and high >= self.position.stop_loss_price):
                     # 觸發止損，強制平倉（回測假設：以 stop_loss_price 成交）
-                    self._close_position(self.position.stop_loss_price)
+                    self._close_position(
+                        self.position.stop_loss_price,
+                        bar_volume=float(bar_volume),
+                        adv_notional=float(adv_notional),
+                        ignore_min_notional=True,
+                    )
                     self.stop_loss_triggered = True
                     return  # 止損後不再執行其他邏輯
 
@@ -336,24 +367,24 @@ class TradeExecutor:
             # 3. 若無持倉，則依目標倉位數量開倉
             if self.position.size == 0.0:
                 if abs(target_size) >= self.min_trade_qty:
-                    self._increase_position(delta_size=target_size, price=current_price, atr=atr)
+                    self._increase_position(delta_size=target_size, price=current_price, atr=atr, bar_volume=float(bar_volume), adv_notional=float(adv_notional))
             else:
                 # 若方向反轉，先平舊倉再依新方向開倉
                 if self.position.size * target_size < 0:
-                    self._close_position(price=current_price)
+                    self._close_position(price=current_price, bar_volume=float(bar_volume), adv_notional=float(adv_notional))
                     # 平倉後依基準金額重算目標數量
                     target_size = (base_amount * position_percent * self.leverage) / current_price if current_price > 0 else 0.0
                     if abs(target_size) >= self.min_trade_qty:
-                        self._increase_position(delta_size=target_size, price=current_price, atr=atr)
+                        self._increase_position(delta_size=target_size, price=current_price, atr=atr, bar_volume=float(bar_volume), adv_notional=float(adv_notional))
                 else:
                     delta = target_size - self.position.size
                     if abs(delta) >= self.min_trade_qty:
                         if (self.position.size > 0 and delta < 0) or (self.position.size < 0 and delta > 0):
                             # 減倉
-                            self._reduce_position(delta_size=delta, price=current_price)
+                            self._reduce_position(delta_size=delta, price=current_price, bar_volume=float(bar_volume), adv_notional=float(adv_notional))
                         else:
                             # 加倉
-                            self._increase_position(delta_size=delta, price=current_price, atr=atr)
+                            self._increase_position(delta_size=delta, price=current_price, atr=atr, bar_volume=float(bar_volume), adv_notional=float(adv_notional))
         finally:
             # 將本根 K 線 high/low 快取到下一步使用（trailing stop 只吃上一根）
             self._cache_prev_bar(high=high, low=low)
@@ -369,6 +400,28 @@ class TradeExecutor:
         #     self.position.take_profit_price = 0.0
        #     self.position.stop_loss_price = 0.0
 
+    # ---------- 成交成本輔助 ----------
+    def _apply_spread(self, price: float, side: str) -> float:
+        if not (int(self.execution_cost_mode) & 1):
+            return float(price)
+        hs = float(self.spread_half_bps) * 1e-4
+        return float(price) * (1.0 + hs) if side == "buy" else float(price) * (1.0 - hs)
+
+    def _slippage_bps_t(self, *, delta_notional: float, bar_volume: float, adv_notional: float) -> float:
+        if not (int(self.execution_cost_mode) & 4):
+            return 0.0
+        # 若無 ADV，保底不為 0
+        adv = float(max(adv_notional, 1e-8))
+        size_ratio = float(abs(delta_notional)) / adv
+        # 目前 vol_proxy 暫設 0（可日後以標準化成交量替代）
+        slip_bps = float(self.slip_base_bps) + float(self.slip_vol_coeff) * 0.0 + float(self.slip_size_coeff) * float(size_ratio)
+        return max(0.0, float(slip_bps))
+
+    def _maybe_min_notional_block(self, *, trade_notional: float) -> bool:
+        if not (int(self.execution_cost_mode) & 2):
+            return False
+        return bool(float(trade_notional) < float(self.min_notional))
+
     # ---------- 內部操作 ----------
     def _fee(self, notional: float) -> float:
         return abs(notional) * (self.fee_rate /100)# 手續費 = 名目金額 * 手續費率(%)
@@ -377,7 +430,7 @@ class TradeExecutor:
         return abs(size) * price / self.leverage
 
     # 加倉
-    def _increase_position(self, *, delta_size: float, price: float, atr: float = 0.0) -> None:
+    def _increase_position(self, *, delta_size: float, price: float, atr: float = 0.0, bar_volume: float = 0.0, adv_notional: float = 0.0) -> None:
         """
         同向加倉（或空倉 -> 開倉）。
 
@@ -420,7 +473,16 @@ class TradeExecutor:
         required_after = float(self._required_margin(desired_size, new_entry)) if (abs(desired_size) > 1e-12 and new_entry > 0.0) else 0.0
         additional_margin = float(max(0.0, required_after - required_before))
 
-        trade_notional = abs(float(delta_size)) * float(price)
+        # 嚴格名目門檻（含減倉/平倉）：若開關開啟、名目過小則不成交
+        trade_notional_plain = abs(float(delta_size)) * float(price)
+        if self._maybe_min_notional_block(trade_notional=trade_notional_plain):
+            return
+
+        # 決定方向（buy/sell）並套用 spread 調整成交價
+        side = "buy" if float(delta_size) > 0.0 else "sell"
+        fill_price = float(self._apply_spread(price, side))
+
+        trade_notional = abs(float(delta_size)) * float(fill_price)
         fee = float(self._fee(trade_notional))
 
         if self.available_balance() < additional_margin + fee:
@@ -453,7 +515,17 @@ class TradeExecutor:
         self.position.size = float(desired_size)
         # 同步 used_margin（保證 isolated 強平價不會因低估 collateral 而失真）
         self.used_margin = float(max(0.0, required_after))
+        # 扣手續費
         self.wallet_balance = float(self.wallet_balance) - float(fee)
+        # 計算並扣除體量滑點成本（不改 entry 價、只影響餘額）
+        try:
+            slip_bps_t = float(self._slippage_bps_t(delta_notional=trade_notional, bar_volume=float(bar_volume), adv_notional=float(adv_notional)))
+            slip_cost = float(trade_notional) * float(slip_bps_t) * 1e-4
+            if slip_cost > 0.0 and np.isfinite(slip_cost):  # type: ignore[name-defined]
+                self.wallet_balance = float(self.wallet_balance) - float(slip_cost)
+                self.total_slippage_cost += float(slip_cost)
+        except Exception:
+            pass
         self.total_fees += fee
 
         # 設定/更新止損價 (固定 ATR 倍數)
@@ -500,26 +572,44 @@ class TradeExecutor:
                 self.max_trade_loss_pct = roi_pct
 
     # 減倉
-    def _reduce_position(self, *, delta_size: float, price: float) -> None:
+    def _reduce_position(self, *, delta_size: float, price: float, bar_volume: float = 0.0, adv_notional: float = 0.0) -> None:
         # delta_size 與當前持倉方向相反；以下計算實際平倉數量
         close_size = -delta_size  # 平倉數量（與現有持倉同號）
         current_entry_price = self.position.entry_price # Capture entry price
         
         was_long = self.position.size > 0
+        # 名目門檻：若過小則不成交
+        trade_notional_plain = abs(float(close_size)) * float(price)
+        if self._maybe_min_notional_block(trade_notional=trade_notional_plain):
+            return
+        # side 與 spread
+        side = "sell" if was_long else "buy"
+        fill_price = float(self._apply_spread(price, side))
+
         if was_long:
             close_size = min(abs(close_size), abs(self.position.size))
-            realized_pnl = (price - current_entry_price) * close_size
+            realized_pnl = (fill_price - current_entry_price) * close_size
             new_size = self.position.size - close_size
         else:
             close_size = min(abs(close_size), abs(self.position.size))
-            realized_pnl = (current_entry_price - price) * close_size
+            realized_pnl = (current_entry_price - fill_price) * close_size
             new_size = - (abs(self.position.size) - close_size)
 
-        fee = self._fee(close_size * price)
+        fee = self._fee(close_size * fill_price)
         # 以 entry_price 為基準釋放初始保證金（並在最後同步 used_margin）
         margin_release = self._required_margin(close_size, current_entry_price)
 
         self.wallet_balance += realized_pnl - fee
+        # 體量滑點成本
+        try:
+            trade_notional = abs(float(close_size)) * float(fill_price)
+            slip_bps_t = float(self._slippage_bps_t(delta_notional=trade_notional, bar_volume=float(bar_volume), adv_notional=float(adv_notional)))
+            slip_cost = float(trade_notional) * float(slip_bps_t) * 1e-4
+            if slip_cost > 0.0 and np.isfinite(slip_cost):  # type: ignore[name-defined]
+                self.wallet_balance = float(self.wallet_balance) - float(slip_cost)
+                self.total_slippage_cost += float(slip_cost)
+        except Exception:
+            pass
         self.used_margin = max(0.0, self.used_margin - margin_release)
         self.position.size = new_size
         if self.position.size == 0.0:
@@ -541,7 +631,7 @@ class TradeExecutor:
         self.closed_trades.append({
             'side': 'long' if was_long else 'short',
             'size': float(close_size),
-            'price': float(price),
+            'price': float(fill_price),
             'fee': float(fee),
             'realized_pnl': float(realized_pnl),
             'type': 'reduce'
@@ -551,20 +641,43 @@ class TradeExecutor:
         self._update_max_loss(realized_pnl, close_size, current_entry_price)
 
     # 平倉
-    def _close_position(self, price: float) -> None:
+    def _close_position(
+        self,
+        price: float,
+        *,
+        bar_volume: float = 0.0,
+        adv_notional: float = 0.0,
+        ignore_min_notional: bool = False,
+    ) -> None:
         if self.position.size == 0.0:
             return
         size_to_close = abs(self.position.size)
         current_entry_price = self.position.entry_price # Capture entry price
         
         was_long = self.position.size > 0
+        # 名目門檻
+        trade_notional_plain = abs(float(size_to_close)) * float(price)
+        if (not bool(ignore_min_notional)) and self._maybe_min_notional_block(trade_notional=trade_notional_plain):
+            return
+        side = "sell" if was_long else "buy"
+        fill_price = float(self._apply_spread(price, side))
         if was_long:
-            realized_pnl = (price - current_entry_price) * size_to_close
+            realized_pnl = (fill_price - current_entry_price) * size_to_close
         else:
-            realized_pnl = (current_entry_price - price) * size_to_close
+            realized_pnl = (current_entry_price - fill_price) * size_to_close
 
-        fee = self._fee(size_to_close * price)
+        fee = self._fee(size_to_close * fill_price)
         self.wallet_balance += realized_pnl - fee
+        # 體量滑點成本
+        try:
+            trade_notional = abs(float(size_to_close)) * float(fill_price)
+            slip_bps_t = float(self._slippage_bps_t(delta_notional=trade_notional, bar_volume=float(bar_volume), adv_notional=float(adv_notional)))
+            slip_cost = float(trade_notional) * float(slip_bps_t) * 1e-4
+            if slip_cost > 0.0 and np.isfinite(slip_cost):  # type: ignore[name-defined]
+                self.wallet_balance = float(self.wallet_balance) - float(slip_cost)
+                self.total_slippage_cost += float(slip_cost)
+        except Exception:
+            pass
         self.used_margin = 0.0
         self.position = PositionState()  # 重置（包含 stop_loss_price）
         # 統計
@@ -577,7 +690,7 @@ class TradeExecutor:
         self.closed_trades.append({
             'side': 'long' if was_long else 'short',
             'size': float(size_to_close),
-            'price': float(price),
+            'price': float(fill_price),
             'fee': float(fee),
             'realized_pnl': float(realized_pnl),
             'type': 'close'
@@ -628,3 +741,6 @@ class TradeExecutor:
 
         return max(0.0, price)
 
+    # ---------- 指標查詢 ----------
+    def get_total_slippage_cost(self) -> float:
+        return float(self.total_slippage_cost)
