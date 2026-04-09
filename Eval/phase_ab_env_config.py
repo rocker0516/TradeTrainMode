@@ -31,7 +31,7 @@ class PhaseABEnvConfig:
     # §5c：中性區仍成交時主線固定扣分（與 regime_alignment 分開）；0=關閉
     NEUTRAL_TRADE_PENALTY_WEIGHT: float = 0.005
 
-    EVAL_MIN_EPISODE_STEPS: int = 1
+    EVAL_MIN_EPISODE_STEPS: int = 288 * 7
     # Guardrail baseline（可由 CLI 覆寫）
     DEFAULT_BASELINE_REPORT_PATH: str = (
         "logs/phase_B_lr10_lb001_rs100_rb3e-05_cb003_ntp0005_lf007_fas3000000_cfs100000_fg10_fw2000000_eval.json"

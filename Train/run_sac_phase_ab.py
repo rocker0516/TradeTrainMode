@@ -840,25 +840,25 @@ def main() -> None:
     parser.add_argument("--timesteps", type=int, default=12_000_000) # 288 * 21 * 48 * 20 = 261,360,000
     parser.add_argument("--n-envs", type=int, default=64)
     parser.add_argument("--lambda-risk", type=float, default=0.1, help="Phase B 時 cost_risk（事件型）的權重")
-    parser.add_argument("--lambda-buffer", type=float, default=0.0001, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
-    parser.add_argument("--lambda-turnover", type=float, default=0.0001, help="Phase B 時 cost_turnover（換手成本）的權重")
+    parser.add_argument("--lambda-buffer", type=float, default=0.001, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
+    parser.add_argument("--lambda-turnover", type=float, default=0.0005, help="Phase B 時 cost_turnover（換手成本）的權重")
     parser.add_argument(
         "--turnover-quadratic-coef",
         type=float,
-        default=20.0,
+        default=200.0,
         help="cost_turnover 非線性二次懲罰係數；越大越專打高換手",
     )
     parser.add_argument(
         "--turnover-quadratic-threshold",
         type=float,
-        default=0.001,
+        default=0.002,
         help="cost_turnover 啟動二次懲罰的門檻（正規化 turnover ratio）",
     )
     parser.add_argument("--reward-scale", type=float, default=1.0, help="Phase B 時主線 reward 放大倍數")
     parser.add_argument(
         "--penalize-turnover-reduction",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="turnover 成本線是否連減碼/平倉也計罰（預設只罰加曝險）",
     )
     parser.add_argument(
