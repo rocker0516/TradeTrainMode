@@ -142,6 +142,7 @@ class PhaseABEvaluator:
                 "final_balance": 0.0,
                 "episode_cost_risk_sum": 0.0,
                 "episode_cost_risk_dense_sum": 0.0,
+                "episode_cost_turnover_sum": 0.0,
                 "override_rate": 0.0,
                 "tracking_error": 0.0,
                 "execution_rate": 0.0,
@@ -158,6 +159,7 @@ class PhaseABEvaluator:
                 "ep_return": 0.0,
                 "ep_cost_risk_sum": 0.0,
                 "ep_cost_risk_dense_sum": 0.0,
+                "ep_cost_turnover_sum": 0.0,
                 "ep_death_count": 0,
                 "ep_max_drawdown": 0.0,
                 "ep_fee_paid": 0.0,
@@ -192,6 +194,8 @@ class PhaseABEvaluator:
                         episode_item["episode_cost_risk_sum"] = float(info["episode_cost_risk_sum"])
                     if "episode_cost_risk_dense_sum" in info:
                         episode_item["episode_cost_risk_dense_sum"] = float(info["episode_cost_risk_dense_sum"])
+                    if "episode_cost_turnover_sum" in info:
+                        episode_item["episode_cost_turnover_sum"] = float(info["episode_cost_turnover_sum"])
                     if info.get("terminated") or info.get("truncated"):
                         episode_item["episode_steps"] = int(info.get("episode_steps", 0))
                         episode_item["termination_reason"] = str(info.get("termination_reason") or "")
@@ -213,6 +217,7 @@ class PhaseABEvaluator:
                             "ep_return",
                             "ep_cost_risk_sum",
                             "ep_cost_risk_dense_sum",
+                            "ep_cost_turnover_sum",
                             "ep_death_count",
                             "ep_max_drawdown",
                             "ep_fee_paid",
@@ -247,8 +252,9 @@ class PhaseABEvaluator:
                 term = str(episode_item.get("termination_reason") or "")[:18]
                 cost = float(episode_item.get("episode_cost_risk_sum", 0.0))
                 cost_dense = float(episode_item.get("episode_cost_risk_dense_sum", 0.0))
+                cost_turnover = float(episode_item.get("episode_cost_turnover_sum", 0.0))
                 print(
-                    f"[Eval]   {ep:3d}  log_ret={log_ret:8.4f}  bal={bal:8.1f}  profit={profit:8.1f}  steps={steps:5d}  {term:18s}  cost_risk={cost:.4f}  cost_dense={cost_dense:.4f}",
+                    f"[Eval]   {ep:3d}  log_ret={log_ret:8.4f}  bal={bal:8.1f}  profit={profit:8.1f}  steps={steps:5d}  {term:18s}  cost_risk={cost:.4f}  cost_dense={cost_dense:.4f}  cost_turnover={cost_turnover:.4f}",
                     flush=True,
                 )
         return episodes
@@ -265,6 +271,7 @@ class PhaseABEvaluator:
             "final_balance",
             "episode_cost_risk_sum",
             "episode_cost_risk_dense_sum",
+            "episode_cost_turnover_sum",
             "override_rate",
             "tracking_error",
             "execution_rate",
@@ -280,6 +287,7 @@ class PhaseABEvaluator:
             "ep_return",
             "ep_cost_risk_sum",
             "ep_cost_risk_dense_sum",
+            "ep_cost_turnover_sum",
             "ep_death_count",
             "ep_max_drawdown",
             "ep_fee_paid",
@@ -395,11 +403,11 @@ class PhaseABEvaluator:
             f"episodes={payload.get('episodes')} "
             f"deterministic={payload.get('deterministic')}"
         )
-        # 每回合摘要表：ep, log_return, balance, profit, steps, termination_reason, cost_risk, cost_dense
+        # 每回合摘要表：ep, log_return, balance, profit, steps, termination_reason, cost_risk, cost_dense, cost_turnover
         if results:
             print("[Eval] --- 每回合 ---")
             print(
-                "[Eval]   ep  log_return  balance   profit   steps  term_reason           cost_risk  cost_dense"
+                "[Eval]   ep  log_return  balance   profit   steps  term_reason           cost_risk  cost_dense  cost_turnover"
             )
             for r in results:
                 ep = int(r.get("episode_index", 0))
@@ -410,8 +418,9 @@ class PhaseABEvaluator:
                 term = str(r.get("termination_reason") or "")[:18]
                 cost = float(r.get("episode_cost_risk_sum", 0.0))
                 cost_dense = float(r.get("episode_cost_risk_dense_sum", 0.0))
+                cost_turnover = float(r.get("episode_cost_turnover_sum", 0.0))
                 print(
-                    f"[Eval]   {ep:3d}  {log_ret:10.4f}  {bal:8.1f}  {profit:8.1f}  {steps:5d}  {term:18s}  {cost:.4f}  {cost_dense:.4f}"
+                    f"[Eval]   {ep:3d}  {log_ret:10.4f}  {bal:8.1f}  {profit:8.1f}  {steps:5d}  {term:18s}  {cost:.4f}  {cost_dense:.4f}  {cost_turnover:.4f}"
                 )
         for key in (
             "episode_log_return_sum",
@@ -421,6 +430,7 @@ class PhaseABEvaluator:
             "episode_steps",
             "episode_cost_risk_sum",
             "episode_cost_risk_dense_sum",
+            "episode_cost_turnover_sum",
             "override_rate",
             "tracking_error",
             "execution_rate",
@@ -434,6 +444,7 @@ class PhaseABEvaluator:
             "ep_return",
             "ep_cost_risk_sum",
             "ep_cost_risk_dense_sum",
+            "ep_cost_turnover_sum",
             "ep_death_count",
             "ep_max_drawdown",
             "ep_fee_paid",

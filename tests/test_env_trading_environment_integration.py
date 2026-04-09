@@ -240,6 +240,8 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
     env_kwargs = {}
     if sc.name == "max_step_change_limits_build_up":
         env_kwargs["max_step_pos_change_pct"] = 0.05
+        # 單步約 5% 容量變化；預設 min_position_change=0.2 會被 executor deadband 擋成不成交
+        env_kwargs["min_position_change"] = 0.0
     if sc.name == "min_position_change_deadband_skips_tiny_trade":
         env_kwargs["min_position_change"] = 0.2
     if sc.name == "flip_allowed":
@@ -306,11 +308,14 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
             "cost",
             "cost_risk",
             "cost_risk_dense",
+            "cost_turnover",
+            "turnover_anchor_equity",
+            "turnover_scale_used",
             "cost_breakdown",
         ):
             assert k in info
         assert isinstance(info["cost_breakdown"], dict)
-        for k in ("death_cost", "dense_buffer_cost"):
+        for k in ("death_cost", "dense_buffer_cost", "turnover_cost"):
             assert k in info["cost_breakdown"]
 
     # --- position checks ---
@@ -396,6 +401,86 @@ def test_trading_environment_integration_scenarios(sc: Scenario, patch_env_load_
     if sc.expect.get("opened_with_stop_disabled"):
         assert abs(float(env.executor.position.size)) > 1e-12
         bd = info.get("cost_breakdown", {})
-        assert "dense_buffer_cost" in bd and "death_cost" in bd
+        assert "dense_buffer_cost" in bd and "death_cost" in bd and "turnover_cost" in bd
 
+
+def test_cost_turnover_positive_on_exposure_increase(
+    patch_env_load_data, make_synth_market
+) -> None:
+    market = make_synth_market(n_5m=120, n_1d=60, start_price=100.0, step_5m=0.0, spread_5m=1.0)
+    _trend_1d_for_regime_gate(market.df_1d, bull=True)
+    patch_env_load_data(market=market)
+
+    env = _mk_env(patch_env_load_data)
+    _, _ = env.reset(seed=1)
+
+    _, _, _, _, info = env.step(np.array([1.0], dtype=np.float32))
+
+    assert "cost_turnover" in info
+    assert float(info["cost_turnover"]) > 0.0
+    assert float(info["cost_breakdown"]["turnover_cost"]) == pytest.approx(float(info["cost_turnover"]))
+
+
+def test_cost_turnover_reduction_respects_flag(
+    patch_env_load_data, make_synth_market
+) -> None:
+    market = make_synth_market(n_5m=120, n_1d=60, start_price=100.0, step_5m=0.0, spread_5m=1.0)
+    _trend_1d_for_regime_gate(market.df_1d, bull=True)
+    patch_env_load_data(market=market)
+
+    env_default = _mk_env(patch_env_load_data)
+    _, _ = env_default.reset(seed=1)
+    env_default.step(np.array([1.0], dtype=np.float32))
+    _, _, _, _, info_default = env_default.step(np.array([0.0], dtype=np.float32))
+
+    env_penalize_reduction = _mk_env(
+        patch_env_load_data,
+        penalize_turnover_reduction=True,
+    )
+    _, _ = env_penalize_reduction.reset(seed=1)
+    env_penalize_reduction.step(np.array([1.0], dtype=np.float32))
+    _, _, _, _, info_penalize = env_penalize_reduction.step(np.array([0.0], dtype=np.float32))
+
+    assert float(info_default["cost_turnover"]) == pytest.approx(0.0)
+    assert float(info_penalize["cost_turnover"]) > 0.0
+
+
+def test_turnover_info_exposes_anchor_and_scale(
+    patch_env_load_data, make_synth_market
+) -> None:
+    market = make_synth_market(n_5m=120, n_1d=60, start_price=100.0, step_5m=0.0, spread_5m=1.0)
+    _trend_1d_for_regime_gate(market.df_1d, bull=True)
+    patch_env_load_data(market=market)
+
+    env = _mk_env(patch_env_load_data, turnover_anchor_update_steps=999999)
+    _, _ = env.reset(seed=1)
+    _, _, _, _, info = env.step(np.array([0.0], dtype=np.float32))
+
+    assert "turnover_anchor_equity" in info and "turnover_scale_used" in info
+    lev = float(env.leverage)
+    assert float(info["turnover_scale_used"]) == pytest.approx(
+        float(info["turnover_anchor_equity"]) * lev, rel=0.0, abs=1e-6
+    )
+
+
+def test_turnover_anchor_refreshes_on_interval(
+    patch_env_load_data, make_synth_market
+) -> None:
+    """間隔到達時 anchor 應更新為當下 wallet（與 last_equity 分離的錨點）。"""
+    market = make_synth_market(n_5m=120, n_1d=60, start_price=100.0, step_5m=0.0, spread_5m=1.0)
+    _trend_1d_for_regime_gate(market.df_1d, bull=True)
+    patch_env_load_data(market=market)
+
+    env = _mk_env(
+        patch_env_load_data,
+        turnover_anchor_update_steps=1,
+        turnover_anchor_source="wallet_balance",
+    )
+    _, _ = env.reset(seed=1)
+    env.step(np.array([0.0], dtype=np.float32))
+    _, _, _, _, info = env.step(np.array([0.0], dtype=np.float32))
+
+    assert float(info["turnover_anchor_equity"]) == pytest.approx(
+        float(env.executor.wallet_balance), rel=0.0, abs=1e-4
+    )
 

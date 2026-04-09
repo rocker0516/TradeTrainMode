@@ -27,7 +27,9 @@ class Config:
     MIN_NOTIONAL: float = 0.0
     # slippage（交易量比例）：
     # slip_bps_t = base + vol_coeff * vol_proxy + size_coeff * size_ratio
-    # 其中 size_ratio = abs(delta_notional) / max(ADV_notional, 1e-8)
+    # 其中：
+    # - vol_proxy = abs(delta_notional) / max(bar_notional, 1e-8)   # 當前 bar 成交參與率
+    # - size_ratio = abs(delta_notional) / max(ADV_notional, 1e-8) # 相對長期平均流動性
     SLIP_BASE_BPS: float = 0.0
     SLIP_VOL_COEFF: float = 0.0
     SLIP_SIZE_COEFF: float = 15.0

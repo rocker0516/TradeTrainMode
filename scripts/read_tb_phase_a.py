@@ -13,10 +13,13 @@ KEYS = [
     "episode_stats/final_balance_mean",
     "episode_stats/cost_risk_sum_mean",
     "episode_stats/cost_risk_dense_sum_mean",
+    "episode_stats/cost_turnover_sum_mean",
     "episode_stats/auxiliary_main_ratio",
     "episode_stats/trade_count_mean",
     "episode_stats/total_fees_mean",
     "episode_stats/fees_profit_ratio_mean",
+    "reward_decomp/cost_turnover_used_mean",
+    "reward_decomp/penalty_turnover_mean",
 ]
 
 
@@ -55,8 +58,9 @@ def main() -> None:
 
     print(
         "step,log_return_mean,final_balance_mean,cost_risk_mean,"
-        "cost_risk_dense_mean,auxiliary_main_ratio,trade_count_mean,"
-        "total_fees_mean,fees_profit_ratio"
+        "cost_risk_dense_mean,cost_turnover_sum_mean,auxiliary_main_ratio,"
+        "trade_count_mean,total_fees_mean,fees_profit_ratio,"
+        "cost_turnover_used_mean,penalty_turnover_mean"
     )
     for step in steps_primary:
         row = [str(step)]

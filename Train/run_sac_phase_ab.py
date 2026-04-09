@@ -65,9 +65,11 @@ class TradingEnvPhaseA(TradingEnvironment):
 
 class RiskOnlyPenaltyWrapper(gym.Wrapper):
     """
-    Phase B：reward_mod = reward_scale * reward - lambda_risk * cost_risk - lambda_buffer * cost_risk_dense。
+    Phase B：reward_mod = reward_scale * reward - lambda_risk * cost_risk
+    - lambda_buffer * cost_risk_dense - lambda_turnover * cost_turnover。
     不把 cost_trade_freq / cost_flat 放進懲罰，避免主線被約束吞掉。
     cost_risk 為事件型（死亡）；cost_risk_dense 為每步 dense 緩衝懲罰（方案 B 獨立通道）。
+    cost_turnover 為獨立換手成本通道，可透過環境開關控制減碼/平倉是否也計罰。
     交易手續費僅透過環境 PnL（transaction_fee）反映，不再使用 cost_fric 懲罰通道。
     """
 
@@ -76,26 +78,31 @@ class RiskOnlyPenaltyWrapper(gym.Wrapper):
         env: gym.Env,
         lambda_risk: float = 0.05,
         lambda_buffer: float = 0.1,
+        lambda_turnover: float = 0.0,
         reward_scale: float = 10.0,
     ) -> None:
         super().__init__(env)
         self.lambda_risk = float(lambda_risk)
         self.lambda_buffer = float(lambda_buffer)
+        self.lambda_turnover = float(lambda_turnover)
         self.reward_scale = float(reward_scale)
 
     def step(self, action: Any) -> tuple[Any, float, bool, bool, dict]:
         obs, reward, terminated, truncated, info = self.env.step(action)
         cost_risk = float(info.get("cost_risk", 0.0))
         cost_risk_dense = float(info.get("cost_risk_dense", 0.0))
+        cost_turnover = float(info.get("cost_turnover", 0.0))
         reward_mod = (
             self.reward_scale * float(reward)
             - self.lambda_risk * cost_risk
             - self.lambda_buffer * cost_risk_dense
+            - self.lambda_turnover * cost_turnover
         )
         info["reward_raw"] = float(reward)
         info["reward_mod"] = float(reward_mod)
         info["cost_risk_used"] = cost_risk
         info["cost_risk_dense_used"] = cost_risk_dense
+        info["cost_turnover_used"] = cost_turnover
         return obs, reward_mod, terminated, truncated, info
 
 
@@ -182,6 +189,7 @@ class PhaseABStatsCallback(BaseCallback):
         lambda_buffer: Optional[float] = None,
         reward_scale: Optional[float] = None,
         lambda_risk: Optional[float] = None,
+        lambda_turnover: Optional[float] = None,
     ) -> None:
         super().__init__(verbose=verbose)
         self.log_freq = max(1, int(log_freq))
@@ -191,6 +199,7 @@ class PhaseABStatsCallback(BaseCallback):
         self._conviction_bonus_buf: list[float] = []
         self._cost_risk_buf: list[float] = []
         self._cost_risk_dense_buf: list[float] = []
+        self._cost_turnover_buf: list[float] = []
         self._trade_count_buf: list[float] = []
         self._total_fees_buf: list[float] = []
         self._profit_buf: list[float] = []
@@ -199,12 +208,14 @@ class PhaseABStatsCallback(BaseCallback):
         self._reward_mod_step: list[float] = []
         self._cost_risk_used_step: list[float] = []
         self._cost_risk_dense_used_step: list[float] = []
+        self._cost_turnover_used_step: list[float] = []
         self._tb_log_dir = (tb_log_dir or "").strip()
         self._tb_writer = None
         self._latest_log_return_mean: Optional[float] = None
         self._reward_scale = float(reward_scale) if reward_scale is not None else None
         self._lambda_risk = float(lambda_risk) if lambda_risk is not None else None
         self._lambda_buffer = float(lambda_buffer) if lambda_buffer is not None else None
+        self._lambda_turnover = float(lambda_turnover) if lambda_turnover is not None else None
         if self._tb_log_dir:
             try:
                 from torch.utils.tensorboard import SummaryWriter
@@ -269,6 +280,11 @@ class PhaseABStatsCallback(BaseCallback):
                     self._cost_risk_dense_buf.append(float(info["episode_cost_risk_dense_sum"]))
                 except (TypeError, ValueError):
                     pass
+            if "episode_cost_turnover_sum" in info:
+                try:
+                    self._cost_turnover_buf.append(float(info["episode_cost_turnover_sum"]))
+                except (TypeError, ValueError):
+                    pass
             if "episode_trade_count" in info:
                 try:
                     self._trade_count_buf.append(float(info["episode_trade_count"]))
@@ -305,6 +321,11 @@ class PhaseABStatsCallback(BaseCallback):
                     self._cost_risk_dense_used_step.append(float(info["cost_risk_dense_used"]))
                 except (TypeError, ValueError):
                     pass
+            if "cost_turnover_used" in info:
+                try:
+                    self._cost_turnover_used_step.append(float(info["cost_turnover_used"]))
+                except (TypeError, ValueError):
+                    pass
 
         # --- 每 log_freq 步：寫入 action 統計（logger 僅 stdout）+ episode_stats / reward_decomp 寫入 TensorBoard ---
         if self.n_calls % self.log_freq != 0:
@@ -335,6 +356,10 @@ class PhaseABStatsCallback(BaseCallback):
                     val = float(np.mean(self._cost_risk_dense_buf))
                     self.logger.record("episode_stats/cost_risk_dense_sum_mean", val)
                     self._tb_writer.add_scalar("episode_stats/cost_risk_dense_sum_mean", val, step)
+                if self._cost_turnover_buf:
+                    val = float(np.mean(self._cost_turnover_buf))
+                    self.logger.record("episode_stats/cost_turnover_sum_mean", val)
+                    self._tb_writer.add_scalar("episode_stats/cost_turnover_sum_mean", val, step)
                 if self._trade_count_buf:
                     val = float(np.mean(self._trade_count_buf))
                     self.logger.record("episode_stats/trade_count_mean", val)
@@ -384,6 +409,11 @@ class PhaseABStatsCallback(BaseCallback):
                     self._tb_writer.add_scalar("reward_decomp/cost_risk_dense_used_mean", mean_cd, step)
                     if self._lambda_buffer is not None:
                         self._tb_writer.add_scalar("reward_decomp/penalty_dense_mean", self._lambda_buffer * mean_cd, step)
+                if self._cost_turnover_used_step:
+                    mean_ct = float(np.mean(self._cost_turnover_used_step))
+                    self._tb_writer.add_scalar("reward_decomp/cost_turnover_used_mean", mean_ct, step)
+                    if self._lambda_turnover is not None:
+                        self._tb_writer.add_scalar("reward_decomp/penalty_turnover_mean", self._lambda_turnover * mean_ct, step)
             except Exception:
                 pass
         # 保留原有 logger key 以相容既有腳本，並清空 buffer
@@ -409,6 +439,8 @@ class PhaseABStatsCallback(BaseCallback):
             self._cost_risk_buf.clear()
         if self._cost_risk_dense_buf:
             self._cost_risk_dense_buf.clear()
+        if self._cost_turnover_buf:
+            self._cost_turnover_buf.clear()
         if self._trade_count_buf:
             self._trade_count_buf.clear()
         if self._total_fees_buf:
@@ -423,6 +455,8 @@ class PhaseABStatsCallback(BaseCallback):
             self._cost_risk_used_step.clear()
         if self._cost_risk_dense_used_step:
             self._cost_risk_dense_used_step.clear()
+        if self._cost_turnover_used_step:
+            self._cost_turnover_used_step.clear()
 
         overrides: list[float] = []
         tracking_errors: list[float] = []
@@ -466,6 +500,7 @@ def make_env(
     phase: str,
     lambda_risk: float = 0.05,
     lambda_buffer: float = 0.1,
+    lambda_turnover: float = 0.0,
     reward_scale: float = 10.0,
     action_repeat: int = 1,
     anneal_steps: int = 0,
@@ -475,7 +510,8 @@ def make_env(
     """
     回傳一個 thunk：呼叫後建立一個 Phase A 或 Phase B 的環境。
     主線 log_return 不變；輔助 regime/conviction 依 anneal_steps 線性退火（0=不退火）。
-    Phase B 時套用 cost_risk（事件型）與 cost_risk_dense（dense 緩衝懲罰）雙通道（無 cost_fric）。
+    Phase B 時套用 cost_risk（事件型）、cost_risk_dense（dense 緩衝懲罰）、
+    cost_turnover（換手成本）三通道（無 cost_fric）。
     """
 
     def thunk() -> gym.Env:
@@ -491,6 +527,7 @@ def make_env(
                 env,
                 lambda_risk=lambda_risk,
                 lambda_buffer=lambda_buffer,
+                lambda_turnover=lambda_turnover,
                 reward_scale=reward_scale,
             )
         if action_repeat and action_repeat > 1:
@@ -519,12 +556,20 @@ def get_phase_ab_env_kwargs(
     slip_vol_coeff: float = 0.0,
     slip_size_coeff: float = 15.0,
     adv_lookback_days: int = 30,
+    penalize_turnover_reduction: bool = False,
+    turnover_quadratic_coef: float = 10.0,
+    turnover_quadratic_threshold: float = 0.02,
+    turnover_anchor_update_steps: int = 288,
+    turnover_anchor_source: str = "wallet_balance",
 ) -> dict[str, Any]:
     """
     Phase A/B 共用的 env 參數：減少 hard override、主線 log-return。
     可選：小權重 regime/conviction 輔助 reward，讓「做對方向」有額外正訊號。
     訓練/評估時間切分：data_split_enabled=True 時，data_mode="train" 用非最近 N 月，
     data_mode="eval" 用最近 holdout_months 月，避免評估用訓練見過的資料。
+
+    turnover_anchor_update_steps / turnover_anchor_source：
+        換手成本 turnover_ratio 的分母採 rolling anchor，參數交給 TradingEnvironment。
     """
     try:
         from Eval.train_config import TrainConfig
@@ -572,6 +617,11 @@ def get_phase_ab_env_kwargs(
         slip_vol_coeff=float(slip_vol_coeff),
         slip_size_coeff=float(slip_size_coeff),
         adv_lookback_days=int(adv_lookback_days),
+        penalize_turnover_reduction=bool(penalize_turnover_reduction),
+        turnover_quadratic_coef=float(turnover_quadratic_coef),
+        turnover_quadratic_threshold=float(turnover_quadratic_threshold),
+        turnover_anchor_update_steps=int(turnover_anchor_update_steps),
+        turnover_anchor_source=str(turnover_anchor_source),
     )
     # 評估端若沿用預設 min_episode_steps，常會把可選起點範圍壓縮到單一點，
     # 導致每次 reset 都是同一起點。eval 模式改為放寬，確保 random_start 可生效。
@@ -654,6 +704,7 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
         self._final_balance_buf: list[float] = []
         self._cost_risk_buf: list[float] = []
         self._cost_risk_dense_buf: list[float] = []
+        self._cost_turnover_buf: list[float] = []
         self._override_buf: list[float] = []
         self._tracking_error_buf: list[float] = []
         self._execution_buf: list[float] = []
@@ -683,6 +734,11 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
                 if "episode_cost_risk_dense_sum" in info:
                     try:
                         self._cost_risk_dense_buf.append(float(info["episode_cost_risk_dense_sum"]))
+                    except (TypeError, ValueError):
+                        pass
+                if "episode_cost_turnover_sum" in info:
+                    try:
+                        self._cost_turnover_buf.append(float(info["episode_cost_turnover_sum"]))
                     except (TypeError, ValueError):
                         pass
 
@@ -758,6 +814,9 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
         if self._cost_risk_dense_buf:
             metrics["cost_risk_dense_sum_mean"] = float(np.mean(self._cost_risk_dense_buf))
             self._cost_risk_dense_buf.clear()
+        if self._cost_turnover_buf:
+            metrics["cost_turnover_sum_mean"] = float(np.mean(self._cost_turnover_buf))
+            self._cost_turnover_buf.clear()
         if self._override_buf:
             metrics["override_rate"] = float(np.mean(self._override_buf))
             self._override_buf.clear()
@@ -781,11 +840,43 @@ def main() -> None:
     parser.add_argument("--timesteps", type=int, default=12_000_000) # 288 * 21 * 48 * 20 = 261,360,000
     parser.add_argument("--n-envs", type=int, default=64)
     parser.add_argument("--lambda-risk", type=float, default=0.1, help="Phase B 時 cost_risk（事件型）的權重")
-    parser.add_argument("--lambda-buffer", type=float, default=0.001, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
+    parser.add_argument("--lambda-buffer", type=float, default=0.0001, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
+    parser.add_argument("--lambda-turnover", type=float, default=0.0001, help="Phase B 時 cost_turnover（換手成本）的權重")
+    parser.add_argument(
+        "--turnover-quadratic-coef",
+        type=float,
+        default=20.0,
+        help="cost_turnover 非線性二次懲罰係數；越大越專打高換手",
+    )
+    parser.add_argument(
+        "--turnover-quadratic-threshold",
+        type=float,
+        default=0.001,
+        help="cost_turnover 啟動二次懲罰的門檻（正規化 turnover ratio）",
+    )
     parser.add_argument("--reward-scale", type=float, default=1.0, help="Phase B 時主線 reward 放大倍數")
+    parser.add_argument(
+        "--penalize-turnover-reduction",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="turnover 成本線是否連減碼/平倉也計罰（預設只罰加曝險）",
+    )
+    parser.add_argument(
+        "--turnover-anchor-update-steps",
+        type=int,
+        default=288,
+        help="turnover 正規化錨點更新間隔（環境 step 數）；越大越不易因短期獲利稀釋換手懲罰",
+    )
+    parser.add_argument(
+        "--turnover-anchor-source",
+        type=str,
+        choices=["wallet_balance", "equity"],
+        default="wallet_balance",
+        help="錨點更新時取值：wallet_balance 較穩；equity 含未實現損益",
+    )
     parser.add_argument("--action-repeat", type=int, default=1, help="Frame skip，1=每步決策")
     parser.add_argument("--device", type=str, default="auto")
-    parser.add_argument("--log-freq", type=int, default=10_000, help="PhaseAB 統計與 log 間隔（步數）")
+    parser.add_argument("--log-freq", type=int, default=1_000, help="PhaseAB 統計與 log 間隔（步數）")
     # 訓練/評估時間切分（預設：訓練用過去、評估用最近 N 月，避免評估用訓練見過的資料）
     parser.add_argument("--holdout-months", type=int, default=1, help="評估用最近 N 個月資料；訓練用其餘過去資料（與 --no-data-split 互斥）")
     parser.add_argument("--no-data-split", action="store_true", help="停用訓練/評估時間切分，訓練與評估皆用完整資料")
@@ -802,12 +893,12 @@ def main() -> None:
     parser.add_argument("--conviction-trend-min-strength", type=float, default=0.5, help="Conviction 生效最小趨勢強度")
     parser.add_argument("--anneal-steps", type=int, default=0, help="輔助 reward 退火步數（0=不退火，regime/conviction 全程滿權重）")
     # ---- Execution cost 開關與參數 ----
-    parser.add_argument("--execution-cost-mode", type=int, default=3, help="成交成本 bitmask：1=spread, 2=min_notional, 4=slippage，可相加組合（例 7=全開）")
-    parser.add_argument("--spread-half-bps", type=float, default=1.0, help="half-spread（bps）；買加價、賣減價")
-    parser.add_argument("--min-notional", type=float, default=10.0, help="名目金額門檻，低於門檻則不成交（含減倉/平倉）")
-    parser.add_argument("--slip-base-bps", type=float, default=0.25, help="體量滑點：base bps")
-    parser.add_argument("--slip-vol-coeff", type=float, default=0.0, help="體量滑點：成交量代理係數（目前 vol_proxy=0，如需可自定）")
-    parser.add_argument("--slip-size-coeff", type=float, default=8.0, help="體量滑點：size_ratio 係數（Δ名目/ADV 名目）")
+    parser.add_argument("--execution-cost-mode", type=int, default=7, help="成交成本 bitmask：1=spread, 2=min_notional, 4=slippage，可相加組合（例 7=全開）")
+    parser.add_argument("--spread-half-bps", type=float, default=1.5, help="half-spread（bps）；買加價、賣減價")
+    parser.add_argument("--min-notional", type=float, default=15.0, help="名目金額門檻，低於門檻則不成交（含減倉/平倉）")
+    parser.add_argument("--slip-base-bps", type=float, default=0.5, help="體量滑點：base bps")
+    parser.add_argument("--slip-vol-coeff", type=float, default=3.0, help="體量滑點：當前 bar 成交參與率係數（trade_notional / bar_notional）")
+    parser.add_argument("--slip-size-coeff", type=float, default=10.0, help="體量滑點：size_ratio 係數（Δ名目/ADV 名目）")
     parser.add_argument("--adv-lookback-days", type=int, default=30, help="ADV 名目回顧天數（以 5m bar 計算 rolling 平均）")
     # 評估參數（可訓練中觸發、訓練後觸發，或 eval-only）
     parser.add_argument("--eval-only", action="store_true", help="只做評估，不進行訓練")
@@ -867,6 +958,11 @@ def main() -> None:
     def _path_prefix() -> str:
         return (
             f"phase_{args.phase}_lr{str(args.lambda_risk).replace('.', '')}_lb{str(args.lambda_buffer).replace('.', '')}"
+            f"_lt{str(args.lambda_turnover).replace('.', '')}"
+            f"_tqc{str(args.turnover_quadratic_coef).replace('.', '')}"
+            f"_tqt{str(args.turnover_quadratic_threshold).replace('.', '')}"
+            f"_tau{str(args.turnover_anchor_update_steps).replace('.', '')}"
+            f"_tas{str(args.turnover_anchor_source).replace('_', '')}"
             f"_rs{str(args.reward_scale).replace('.', '')}_rb{str(args.regime_bonus_weight).replace('.', '')}_cb{str(args.conviction_bonus_weight).replace('.', '')}"
             f"_ntp{str(args.neutral_trade_penalty_weight).replace('.', '')}"
             f"_sl{str(3).replace('.', '')}"
@@ -874,8 +970,10 @@ def main() -> None:
             f"_hs{str(args.spread_half_bps).replace('.', '')}"
             f"_mn{str(args.min_notional).replace('.', '')}"
             f"_sb{str(args.slip_base_bps).replace('.', '')}"
-            f"_sc{str(args.slip_size_coeff).replace('.', '')}"
+            f"_sv{str(args.slip_vol_coeff).replace('.', '')}"
+            f"_ss{str(args.slip_size_coeff).replace('.', '')}"
             f"_ad{str(args.adv_lookback_days).replace('.', '')}"
+            f"_ptr{int(bool(args.penalize_turnover_reduction))}"
         )
     if not (getattr(args, "eval_report_path", "") or "").strip():
         args.eval_report_path = f"logs/{_path_prefix()}_eval.json"
@@ -908,6 +1006,11 @@ def main() -> None:
         slip_vol_coeff=args.slip_vol_coeff,
         slip_size_coeff=args.slip_size_coeff,
         adv_lookback_days=args.adv_lookback_days,
+        penalize_turnover_reduction=args.penalize_turnover_reduction,
+        turnover_quadratic_coef=args.turnover_quadratic_coef,
+        turnover_quadratic_threshold=args.turnover_quadratic_threshold,
+        turnover_anchor_update_steps=args.turnover_anchor_update_steps,
+        turnover_anchor_source=args.turnover_anchor_source,
     )
     env_kwargs_eval = get_phase_ab_env_kwargs(
         regime_bonus_weight=args.regime_bonus_weight,
@@ -926,12 +1029,18 @@ def main() -> None:
         slip_vol_coeff=args.slip_vol_coeff,
         slip_size_coeff=args.slip_size_coeff,
         adv_lookback_days=args.adv_lookback_days,
+        penalize_turnover_reduction=args.penalize_turnover_reduction,
+        turnover_quadratic_coef=args.turnover_quadratic_coef,
+        turnover_quadratic_threshold=args.turnover_quadratic_threshold,
+        turnover_anchor_update_steps=args.turnover_anchor_update_steps,
+        turnover_anchor_source=args.turnover_anchor_source,
     )
 
     eval_env_thunk = make_env(
         phase=args.phase,
         lambda_risk=args.lambda_risk,
         lambda_buffer=args.lambda_buffer,
+        lambda_turnover=args.lambda_turnover,
         reward_scale=args.reward_scale,
         action_repeat=args.action_repeat,
         anneal_steps=args.anneal_steps,
@@ -961,6 +1070,7 @@ def main() -> None:
                 phase=args.phase,
                 lambda_risk=args.lambda_risk,
                 lambda_buffer=args.lambda_buffer,
+                lambda_turnover=args.lambda_turnover,
                 reward_scale=args.reward_scale,
                 action_repeat=args.action_repeat,
                 anneal_steps=args.anneal_steps,
@@ -979,6 +1089,7 @@ def main() -> None:
             lambda_buffer=args.lambda_buffer if args.phase == "B" else None,
             reward_scale=args.reward_scale if args.phase == "B" else None,
             lambda_risk=args.lambda_risk if args.phase == "B" else None,
+            lambda_turnover=args.lambda_turnover if args.phase == "B" else None,
         ),
     ]
     eval_trigger = _build_eval_trigger(args)
@@ -1008,7 +1119,7 @@ def main() -> None:
         from stable_baselines3.common.logger import configure
         model.set_logger(configure(None, ["stdout"]))
 
-    model.learn(total_timesteps=args.timesteps, callback=callbacks, progress_bar=True, log_interval=10_000)
+    model.learn(total_timesteps=args.timesteps, callback=callbacks, progress_bar=True)
     os.makedirs(os.path.dirname(args.save_path) or ".", exist_ok=True)
     model.save(args.save_path)
     vec_env.close()
@@ -1026,6 +1137,7 @@ def main() -> None:
             phase=args.phase,
             lambda_risk=args.lambda_risk,
             lambda_buffer=args.lambda_buffer,
+            lambda_turnover=args.lambda_turnover,
             reward_scale=args.reward_scale,
             action_repeat=args.action_repeat,
             anneal_steps=args.anneal_steps,

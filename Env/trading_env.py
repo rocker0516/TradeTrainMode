@@ -56,6 +56,7 @@ class _StepPrices:
     atr_est: float
     # 交易量與 ADV 名目（供成交成本/slippage 使用）
     bar_volume: float
+    bar_notional: float
     adv_notional: float
 
 
@@ -75,7 +76,9 @@ class TradingEnvironment(gym.Env):
             df_5m: 5分鐘線數據 (主要執行時間軸)
             df_1d: 日線數據 (背景趨勢參考)
             env_id: 環境 ID (用於 Log)
-            **kwargs: 覆寫 Config 的參數
+            **kwargs: 覆寫 Config 的參數。可含 turnover_anchor_update_steps（錨點更新間隔步數）、
+                turnover_anchor_source（wallet_balance 或 equity，錨點刷新取值來源）。
+
         """
         super(TradingEnvironment, self).__init__()
         
@@ -120,6 +123,15 @@ class TradingEnvironment(gym.Env):
         self.slip_vol_coeff = float(kwargs.get("slip_vol_coeff", getattr(Config, "SLIP_VOL_COEFF", 0.0)))
         self.slip_size_coeff = float(kwargs.get("slip_size_coeff", getattr(Config, "SLIP_SIZE_COEFF", 15.0)))
         self.adv_lookback_days = int(kwargs.get("adv_lookback_days", getattr(Config, "ADV_LOOKBACK_DAYS", 30)))
+        self.penalize_turnover_reduction = bool(kwargs.get("penalize_turnover_reduction", False))
+        self.turnover_quadratic_coef = float(kwargs.get("turnover_quadratic_coef", 10.0))
+        self.turnover_quadratic_threshold = float(kwargs.get("turnover_quadratic_threshold", 0.02))
+        # turnover 正規化分母：rolling anchor（與 daily_risk_base 分開，避免與倉位上限耦合）
+        self.turnover_anchor_update_steps = int(max(1, int(kwargs.get("turnover_anchor_update_steps", 288))))
+        _tas = str(kwargs.get("turnover_anchor_source", "wallet_balance")).lower().strip()
+        if _tas not in {"wallet_balance", "equity"}:
+            raise ValueError("turnover_anchor_source must be 'wallet_balance' or 'equity'")
+        self.turnover_anchor_source = _tas
 
         # ---- Train/Eval split (optional; to prevent data leakage) ----
         # 語義：
@@ -158,21 +170,6 @@ class TradingEnvironment(gym.Env):
         else:
             self.df_5m, self.df_1d = load_data()
 
-        # ---- Precompute ADV notional rolling average (for slippage model) ----
-        try:
-            df5 = self.df_5m
-            close_col = "close"
-            vol_col = "volume"
-            if close_col in df5.columns and vol_col in df5.columns:
-                notional = (pd.Series(df5[close_col]).astype(float) * pd.Series(df5[vol_col]).astype(float))
-                win = max(1, int(self.adv_lookback_days) * 288)
-                adv_notional = notional.rolling(window=win, min_periods=1).mean().astype(float)
-                self._adv_notional_arr = adv_notional.to_numpy(copy=False)
-            else:
-                self._adv_notional_arr = np.zeros(len(df5), dtype=float)
-        except Exception:
-            self._adv_notional_arr = np.zeros(len(self.df_5m), dtype=float)
-
         # ---- Apply train/eval split by recent months ----
         if self.data_split_enabled and self.data_mode in {"train", "eval"}:
             self.df_5m, self.df_1d = self._split_train_eval_by_recent_months(
@@ -181,6 +178,13 @@ class TradingEnvironment(gym.Env):
                 holdout_months=int(self.holdout_months),
                 mode=str(self.data_mode),
             )
+
+        # ---- Precompute ADV notional rolling average (for slippage model) ----
+        # 必須在 train/eval split 之後重建，避免 current_step 對到切分前的索引。
+        self._adv_notional_arr = self._build_adv_notional_array(
+            df_5m=self.df_5m,
+            adv_lookback_days=int(self.adv_lookback_days),
+        )
 
         # 2. 初始化組件
         # Market Data (傳入兩個 DataFrame，並指定目標交易對)
@@ -308,7 +312,10 @@ class TradingEnvironment(gym.Env):
         # Cost / Constraint（供 Lagrangian-SAC 使用）
         # 注意：reward 與 cost 分離，cost 透過 info 回傳，方便訓練端做 λ 更新與解析。
         # 僅保留死亡懲罰 (Liq / Bankrupt) 與 dense 緩衝（cost_risk_dense）；摩擦不進成本通道。
-        self.cost_calculator = CostCalculator()
+        self.cost_calculator = CostCalculator(
+            turnover_quadratic_coef=float(self.turnover_quadratic_coef),
+            turnover_quadratic_threshold=float(self.turnover_quadratic_threshold),
+        )
 
         # Runtime State
         self.current_step = 0
@@ -340,6 +347,8 @@ class TradingEnvironment(gym.Env):
         self.episode_cost_risk_sum = 0.0
         # 本回合 cost_risk_dense 累計（dense 緩衝懲罰，方案 B 獨立通道）
         self.episode_cost_risk_dense_sum = 0.0
+        # 本回合 turnover 成本累計（獨立通道，可設定減碼是否也計罰）
+        self.episode_cost_turnover_sum = 0.0
 
         # Action-conditioned effects cache (for next obs)
         self._last_action_effects = {}
@@ -359,6 +368,8 @@ class TradingEnvironment(gym.Env):
         self.stop_loss_cooldown = 0
         self.daily_risk_base = 0.0
         self.last_risk_base_update_step = 0
+        self.turnover_anchor_equity = 0.0
+        self.last_turnover_anchor_update_step = 0
 
     def _record_step_events(
         self,
@@ -440,6 +451,34 @@ class TradingEnvironment(gym.Env):
         except Exception:
             # render helper must never break training
             return
+
+    @staticmethod
+    def _build_adv_notional_array(
+        *,
+        df_5m: "pd.DataFrame",
+        adv_lookback_days: int,
+    ) -> "np.ndarray":
+        """
+        以 5m close * volume 建立 ADV 名目 rolling mean。
+
+        Args:
+            df_5m: 5m 市場資料。
+            adv_lookback_days: ADV 回看天數。
+
+        Returns:
+            與 `df_5m` 同長度的 ADV 名目陣列；若資料缺欄位或轉型失敗則回傳 0 陣列。
+        """
+        try:
+            close_col = "close"
+            vol_col = "volume"
+            if close_col not in df_5m.columns or vol_col not in df_5m.columns:
+                return np.zeros(len(df_5m), dtype=float)
+            notional = pd.Series(df_5m[close_col]).astype(float) * pd.Series(df_5m[vol_col]).astype(float)
+            win = max(1, int(adv_lookback_days) * 288)
+            adv_notional = notional.rolling(window=win, min_periods=1).mean().astype(float)
+            return adv_notional.to_numpy(copy=False)
+        except Exception:
+            return np.zeros(len(df_5m), dtype=float)
 
     @staticmethod
     def _split_train_eval_by_recent_months(
@@ -565,6 +604,7 @@ class TradingEnvironment(gym.Env):
         self.episode_neutral_trade_penalty_sum = 0.0
         self.episode_cost_risk_sum = 0.0
         self.episode_cost_risk_dense_sum = 0.0
+        self.episode_cost_turnover_sum = 0.0
 
         self.last_trade_step = -999999
         self.position_entry_step = None
@@ -578,7 +618,9 @@ class TradingEnvironment(gym.Env):
         self.stop_loss_cooldown = 0
         self.daily_risk_base = self.initial_balance
         self.last_risk_base_update_step = self.current_step
-        
+        self.turnover_anchor_equity = float(self.initial_balance)
+        self.last_turnover_anchor_update_step = int(self.current_step)
+
         self._last_action_effects = {
             "expected_fee_if_trade": 0.0,
             "predicted_used_margin_after_action": 0.0,
@@ -874,6 +916,7 @@ class TradingEnvironment(gym.Env):
         episode_neutral_trade_penalty_sum: float = 0.0,
         episode_cost_risk_sum: float = 0.0,
         episode_cost_risk_dense_sum: float = 0.0,
+        episode_cost_turnover_sum: float = 0.0,
         terminated: bool = False,
         truncated: bool = False,
         termination_reason: Optional[str] = None,
@@ -899,6 +942,7 @@ class TradingEnvironment(gym.Env):
             episode_neutral_trade_penalty_sum: 本回合中性區成交 penalty 累計（≤0）
             episode_cost_risk_sum: 本回合 cost_risk 累計（TensorBoard 用）
             episode_cost_risk_dense_sum: 本回合 cost_risk_dense 累計（dense 緩衝懲罰）
+            episode_cost_turnover_sum: 本回合 turnover 成本累計
             terminated: Gymnasium terminated（自然終止）
             truncated: Gymnasium truncated（時間/資料截斷）
             termination_reason: 終止原因（若結束回合）
@@ -937,6 +981,7 @@ class TradingEnvironment(gym.Env):
             info["episode_neutral_trade_penalty_sum"] = float(episode_neutral_trade_penalty_sum)
             info["episode_cost_risk_sum"] = float(episode_cost_risk_sum)
             info["episode_cost_risk_dense_sum"] = float(episode_cost_risk_dense_sum)
+            info["episode_cost_turnover_sum"] = float(episode_cost_turnover_sum)
             info["fees_to_equity_ratio"] = (
                 float(getattr(self.executor, "total_fees", 0.0)) / float(max(1e-8, new_equity))
             )
@@ -983,6 +1028,7 @@ class TradingEnvironment(gym.Env):
             info["ep_return"] = ep_ret
             info["ep_cost_risk_sum"] = float(episode_cost_risk_sum)
             info["ep_cost_risk_dense_sum"] = float(episode_cost_risk_dense_sum)
+            info["ep_cost_turnover_sum"] = float(episode_cost_turnover_sum)
             info["ep_death_count"] = int(
                 int(getattr(self, "episode_stop_loss_count", 0)) + int(getattr(self, "episode_liq_count", 0))
             )
@@ -1037,6 +1083,21 @@ class TradingEnvironment(gym.Env):
             self.daily_risk_base = float(self.executor.wallet_balance)
             self.last_risk_base_update_step = self.current_step
 
+    def _maybe_update_turnover_anchor(self, *, last_equity: float) -> None:
+        """
+        以固定間隔更新 turnover 成本正規化用的 anchor_equity（分段錨定，避免資金短期變大立刻稀釋換手懲罰）。
+
+        Args:
+            last_equity: 本 step 執行前、以當前 bar 收盤價計算的權益（與 step() 內 last_equity 同口徑）。
+        """
+        update_every = int(max(1, self.turnover_anchor_update_steps))
+        if (int(self.current_step) - int(self.last_turnover_anchor_update_step)) >= update_every:
+            if str(self.turnover_anchor_source).lower().strip() == "equity":
+                self.turnover_anchor_equity = float(max(float(last_equity), 1e-8))
+            else:
+                self.turnover_anchor_equity = float(max(float(self.executor.wallet_balance), 1e-8))
+            self.last_turnover_anchor_update_step = int(self.current_step)
+
     def _prepare_step_prices(self, metrics: Dict[str, Any]) -> _StepPrices:
         """
         從 market metrics 萃取 step() 會用到的價格資訊。
@@ -1051,11 +1112,15 @@ class TradingEnvironment(gym.Env):
         current_high = float(metrics["high"])
         current_low = float(metrics["low"])
         atr_est = float(metrics["atr_ratio"]) * current_price
-        # bar volume 與 ADV 名目
+        # bar volume / 當前 bar 名目 / ADV 名目
         try:
             bar_volume = float(self.market_data.df_5m["volume"].iloc[self.current_step])
         except Exception:
             bar_volume = 0.0
+        try:
+            bar_notional = float(current_price) * float(bar_volume)
+        except Exception:
+            bar_notional = 0.0
         try:
             adv_notional = float(self._adv_notional_arr[self.current_step])
         except Exception:
@@ -1066,6 +1131,7 @@ class TradingEnvironment(gym.Env):
             current_low=current_low,
             atr_est=atr_est,
             bar_volume=bar_volume,
+            bar_notional=bar_notional,
             adv_notional=adv_notional,
         )
 
@@ -1183,6 +1249,7 @@ class TradingEnvironment(gym.Env):
             atr=prices.atr_est,
             risk_base=self.daily_risk_base,
             bar_volume=prices.bar_volume,
+            bar_notional=prices.bar_notional,
             adv_notional=prices.adv_notional,
         )
         # 執行後真實倉位比例（executor 可能因 min_trade_qty / deadband 未動，故以實際持倉為準）
@@ -1304,12 +1371,15 @@ class TradingEnvironment(gym.Env):
         last_equity: float,
         new_equity: float,
         new_size: float,
-    ) -> Tuple[float, bool, float, float, float]:
+    ) -> Tuple[float, bool, float, float, float, float]:
         """
         計算 reward 會用到的中間特徵。
 
+        Args:
+            last_equity: 本步執行前權益；turnover 分母已改用 turnover_anchor_equity，保留參數供呼叫端一致。
+
         Returns:
-            (position_change, traded, position_change_norm, turnover_ratio, current_dd)
+            (position_change, traded, position_change_norm, turnover_ratio, turnover_ratio_full, current_dd)
         """
         position_change = float(abs(new_size - self._last_position_size))
         traded = bool(position_change > 1e-8)
@@ -1323,12 +1393,20 @@ class TradingEnvironment(gym.Env):
         # c_to ∝ max(0, |pos_{t+1}| - |pos_t|)
         exposure_increase_qty = max(0.0, abs(float(new_size)) - abs(float(self._last_position_size)))
         turnover_notional_change = float(exposure_increase_qty) * float(current_price)
-        turnover_scale = max(last_equity * self.leverage, 1e-8)
+        turnover_scale = max(float(self.turnover_anchor_equity) * float(self.leverage), 1e-8)
         turnover_ratio = turnover_notional_change / turnover_scale
+        turnover_ratio_full = (float(position_change) * float(current_price)) / turnover_scale
 
         current_dd = (self.max_equity_so_far - new_equity) / self.max_equity_so_far if self.max_equity_so_far > 0 else 0.0
 
-        return position_change, traded, position_change_norm, turnover_ratio, float(current_dd)
+        return (
+            position_change,
+            traded,
+            position_change_norm,
+            turnover_ratio,
+            float(turnover_ratio_full),
+            float(current_dd),
+        )
 
     def _update_episode_event_counters(self) -> Tuple[bool, bool]:
         """
@@ -1367,6 +1445,7 @@ class TradingEnvironment(gym.Env):
         prices = self._prepare_step_prices(metrics)
         self._maybe_update_daily_risk_base()
         last_equity = float(self.executor.equity(prices.current_price))
+        self._maybe_update_turnover_anchor(last_equity=last_equity)
         prev_size = float(self._last_position_size)
 
         # 2. Process action + execute
@@ -1402,7 +1481,14 @@ class TradingEnvironment(gym.Env):
         self._recover_risk_budget(new_equity=new_equity)
 
         # 6. Reward features + episode events
-        position_change, traded, position_change_norm, turnover_ratio, current_dd = self._compute_reward_features(
+        (
+            position_change,
+            traded,
+            position_change_norm,
+            turnover_ratio,
+            turnover_ratio_full,
+            current_dd,
+        ) = self._compute_reward_features(
             current_price=prices.current_price,
             last_equity=last_equity,
             new_equity=new_equity,
@@ -1544,11 +1630,15 @@ class TradingEnvironment(gym.Env):
             episode_steps=int(self.episode_steps),
             episode_max_steps=int(self.episode_max_steps),
             initial_balance=float(self.initial_balance),
+            turnover_ratio=float(turnover_ratio),
+            turnover_ratio_full=float(turnover_ratio_full),
+            penalize_turnover_reduction=bool(self.penalize_turnover_reduction),
         )
 
         # 本回合 cost_risk / cost_risk_dense 累計（供 TensorBoard；須在 _build_step_info 前累加當步）
         self.episode_cost_risk_sum += float(cost_out.get("cost_risk", 0.0))
         self.episode_cost_risk_dense_sum += float(cost_out.get("cost_risk_dense", 0.0))
+        self.episode_cost_turnover_sum += float(cost_out.get("cost_turnover", 0.0))
         # ---- Record render events (entry/reduce/close/flip/SL/LIQ) ----
         self._record_step_events(
             step_idx=step_idx,
@@ -1591,6 +1681,7 @@ class TradingEnvironment(gym.Env):
             episode_neutral_trade_penalty_sum=float(self.episode_neutral_trade_penalty_sum),
             episode_cost_risk_sum=float(self.episode_cost_risk_sum),
             episode_cost_risk_dense_sum=float(self.episode_cost_risk_dense_sum),
+            episode_cost_turnover_sum=float(self.episode_cost_turnover_sum),
             terminated=bool(terminated),
             truncated=bool(truncated),
             termination_reason=termination_reason,
@@ -1605,6 +1696,10 @@ class TradingEnvironment(gym.Env):
             info["cost_risk"] = float(cost_out["cost_risk"])
         if "cost_risk_dense" in cost_out:
             info["cost_risk_dense"] = float(cost_out["cost_risk_dense"])
+        if "cost_turnover" in cost_out:
+            info["cost_turnover"] = float(cost_out["cost_turnover"])
+        info["turnover_anchor_equity"] = float(self.turnover_anchor_equity)
+        info["turnover_scale_used"] = float(max(float(self.turnover_anchor_equity) * float(self.leverage), 1e-8))
         # 交易頻率成本：本步有持倉變化則 1.0，否則 0.0（供「最近 N 步交易比例」約束使用）
         position_changed = abs(float(new_size) - float(prev_size)) > 1e-9
         info["cost_trade_freq"] = 1.0 if position_changed else 0.0
