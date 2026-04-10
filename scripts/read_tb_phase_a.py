@@ -12,6 +12,10 @@ KEYS = [
     "episode_stats/log_return_sum_mean",
     "episode_stats/final_balance_mean",
     "episode_stats/cost_risk_sum_mean",
+    "episode_stats/episode_death_rate_mean",
+    "episode_stats/episode_steps_mean",
+    "episode_stats/episode_liq_count_mean",
+    "episode_stats/episode_stop_loss_count_mean",
     "episode_stats/cost_risk_dense_sum_mean",
     "episode_stats/cost_turnover_sum_mean",
     "episode_stats/auxiliary_main_ratio",
@@ -58,6 +62,7 @@ def main() -> None:
 
     print(
         "step,log_return_mean,final_balance_mean,cost_risk_mean,"
+        "episode_death_rate_mean,episode_steps_mean,episode_liq_count_mean,episode_stop_loss_count_mean,"
         "cost_risk_dense_mean,cost_turnover_sum_mean,auxiliary_main_ratio,"
         "trade_count_mean,total_fees_mean,fees_profit_ratio,"
         "cost_turnover_used_mean,penalty_turnover_mean"

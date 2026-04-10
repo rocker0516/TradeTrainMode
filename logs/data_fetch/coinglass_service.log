@@ -31,3 +31,15 @@
 2026-04-09 03:37:08,389 | INFO | Fetching 1000PEPEUSDT from 2026-04-07 00:00:00 to 2026-04-08 03:36:13.517551
 2026-04-09 03:37:20,989 | INFO | Saved Data/1000PEPEUSDT_futures_volume_coinglass_5years_1d.csv
 2026-04-09 03:37:26,431 | INFO | Sleeping 86400s
+2026-04-10 03:37:30,800 | INFO | Cycle 4 started
+2026-04-10 03:37:30,829 | INFO | Fetching BTCUSDT from 2026-04-08 00:00:00 to 2026-04-09 03:37:30.804021
+2026-04-10 03:37:43,600 | INFO | Saved Data/BTCUSDT_futures_volume_coinglass_5years_1d.csv
+2026-04-10 03:37:44,605 | INFO | Fetching ETHUSDT from 2026-04-08 00:00:00 to 2026-04-09 03:37:30.804021
+2026-04-10 03:37:57,236 | INFO | Saved Data/ETHUSDT_futures_volume_coinglass_5years_1d.csv
+2026-04-10 03:37:58,241 | INFO | Fetching SOLUSDT from 2026-04-08 00:00:00 to 2026-04-09 03:37:30.804021
+2026-04-10 03:38:10,969 | INFO | Saved Data/SOLUSDT_futures_volume_coinglass_5years_1d.csv
+2026-04-10 03:38:11,973 | INFO | Fetching DOGEUSDT from 2026-04-08 00:00:00 to 2026-04-09 03:37:30.804021
+2026-04-10 03:38:24,590 | INFO | Saved Data/DOGEUSDT_futures_volume_coinglass_5years_1d.csv
+2026-04-10 03:38:25,595 | INFO | Fetching 1000PEPEUSDT from 2026-04-09 00:00:00 to 2026-04-09 03:37:30.804021
+2026-04-10 03:38:38,196 | INFO | Saved Data/1000PEPEUSDT_futures_volume_coinglass_5years_1d.csv
+2026-04-10 03:38:43,721 | INFO | Sleeping 86400s

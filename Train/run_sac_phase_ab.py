@@ -37,6 +37,7 @@ from Eval.eval_triggers import (
 )
 from Eval.phase_ab_env_config import PhaseABEnvConfig
 from Eval.phase_ab_evaluator import PhaseABEvaluator, build_single_env_builder
+from Eval.post_eval_judgment import format_judgment_summary, judge_payload
 from Eval.post_train_holdout_rollout import (
     post_train_max_episode_steps_cap,
     run_holdout_rollout_and_show_live_render,
@@ -169,6 +170,17 @@ class ActionStatsInfoWrapper(gym.Wrapper):
         return env
 
 
+def _episode_death_flag(info: dict[str, Any]) -> float:
+    """依 episode info 判斷該回合是否以死亡事件收尾。"""
+    try:
+        if "episode_cost_risk_sum" in info:
+            return 1.0 if float(info["episode_cost_risk_sum"]) > 0.0 else 0.0
+    except (TypeError, ValueError):
+        pass
+    termination_reason = str(info.get("termination_reason") or "")
+    return 1.0 if termination_reason in {"liq_triggered", "balance_insufficient"} else 0.0
+
+
 # ---------------------------------------------------------------------------
 # Callback：每 N 步彙總 override_rate、tracking_error、execution_rate
 # ---------------------------------------------------------------------------
@@ -200,6 +212,10 @@ class PhaseABStatsCallback(BaseCallback):
         self._cost_risk_buf: list[float] = []
         self._cost_risk_dense_buf: list[float] = []
         self._cost_turnover_buf: list[float] = []
+        self._episode_steps_buf: list[float] = []
+        self._episode_liq_count_buf: list[float] = []
+        self._episode_stop_loss_count_buf: list[float] = []
+        self._episode_death_flag_buf: list[float] = []
         self._trade_count_buf: list[float] = []
         self._total_fees_buf: list[float] = []
         self._profit_buf: list[float] = []
@@ -285,6 +301,27 @@ class PhaseABStatsCallback(BaseCallback):
                     self._cost_turnover_buf.append(float(info["episode_cost_turnover_sum"]))
                 except (TypeError, ValueError):
                     pass
+            if "episode_steps" in info:
+                try:
+                    self._episode_steps_buf.append(float(info["episode_steps"]))
+                except (TypeError, ValueError):
+                    pass
+            if "episode_liq_count" in info:
+                try:
+                    self._episode_liq_count_buf.append(float(info["episode_liq_count"]))
+                except (TypeError, ValueError):
+                    pass
+            if "episode_stop_loss_count" in info:
+                try:
+                    self._episode_stop_loss_count_buf.append(float(info["episode_stop_loss_count"]))
+                except (TypeError, ValueError):
+                    pass
+            if (
+                "episode_cost_risk_sum" in info
+                or "termination_reason" in info
+                or "episode_liq_count" in info
+            ):
+                self._episode_death_flag_buf.append(_episode_death_flag(info))
             if "episode_trade_count" in info:
                 try:
                     self._trade_count_buf.append(float(info["episode_trade_count"]))
@@ -360,6 +397,22 @@ class PhaseABStatsCallback(BaseCallback):
                     val = float(np.mean(self._cost_turnover_buf))
                     self.logger.record("episode_stats/cost_turnover_sum_mean", val)
                     self._tb_writer.add_scalar("episode_stats/cost_turnover_sum_mean", val, step)
+                if self._episode_steps_buf:
+                    val = float(np.mean(self._episode_steps_buf))
+                    self.logger.record("episode_stats/episode_steps_mean", val)
+                    self._tb_writer.add_scalar("episode_stats/episode_steps_mean", val, step)
+                if self._episode_liq_count_buf:
+                    val = float(np.mean(self._episode_liq_count_buf))
+                    self.logger.record("episode_stats/episode_liq_count_mean", val)
+                    self._tb_writer.add_scalar("episode_stats/episode_liq_count_mean", val, step)
+                if self._episode_stop_loss_count_buf:
+                    val = float(np.mean(self._episode_stop_loss_count_buf))
+                    self.logger.record("episode_stats/episode_stop_loss_count_mean", val)
+                    self._tb_writer.add_scalar("episode_stats/episode_stop_loss_count_mean", val, step)
+                if self._episode_death_flag_buf:
+                    val = float(np.mean(self._episode_death_flag_buf))
+                    self.logger.record("episode_stats/episode_death_rate_mean", val)
+                    self._tb_writer.add_scalar("episode_stats/episode_death_rate_mean", val, step)
                 if self._trade_count_buf:
                     val = float(np.mean(self._trade_count_buf))
                     self.logger.record("episode_stats/trade_count_mean", val)
@@ -441,6 +494,14 @@ class PhaseABStatsCallback(BaseCallback):
             self._cost_risk_dense_buf.clear()
         if self._cost_turnover_buf:
             self._cost_turnover_buf.clear()
+        if self._episode_steps_buf:
+            self._episode_steps_buf.clear()
+        if self._episode_liq_count_buf:
+            self._episode_liq_count_buf.clear()
+        if self._episode_stop_loss_count_buf:
+            self._episode_stop_loss_count_buf.clear()
+        if self._episode_death_flag_buf:
+            self._episode_death_flag_buf.clear()
         if self._trade_count_buf:
             self._trade_count_buf.clear()
         if self._total_fees_buf:
@@ -690,6 +751,7 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
         trigger: Optional[CompositeTrigger],
         log_freq: int = 1000,
         eval_on_train_end: bool = True,
+        post_eval_callback: Optional[Callable[[dict[str, Any]], None]] = None,
         verbose: int = 1,
     ) -> None:
         super().__init__(verbose=verbose)
@@ -697,6 +759,7 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
         self.trigger = trigger
         self.log_freq = max(1, int(log_freq))
         self.eval_on_train_end = bool(eval_on_train_end)
+        self.post_eval_callback = post_eval_callback
         self.eval_count = 0
         self.last_eval_step: Optional[int] = None
         self._latest_metrics: dict[str, float] = {}
@@ -705,6 +768,10 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
         self._cost_risk_buf: list[float] = []
         self._cost_risk_dense_buf: list[float] = []
         self._cost_turnover_buf: list[float] = []
+        self._episode_steps_buf: list[float] = []
+        self._episode_liq_count_buf: list[float] = []
+        self._episode_stop_loss_count_buf: list[float] = []
+        self._episode_death_flag_buf: list[float] = []
         self._override_buf: list[float] = []
         self._tracking_error_buf: list[float] = []
         self._execution_buf: list[float] = []
@@ -741,6 +808,27 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
                         self._cost_turnover_buf.append(float(info["episode_cost_turnover_sum"]))
                     except (TypeError, ValueError):
                         pass
+                if "episode_steps" in info:
+                    try:
+                        self._episode_steps_buf.append(float(info["episode_steps"]))
+                    except (TypeError, ValueError):
+                        pass
+                if "episode_liq_count" in info:
+                    try:
+                        self._episode_liq_count_buf.append(float(info["episode_liq_count"]))
+                    except (TypeError, ValueError):
+                        pass
+                if "episode_stop_loss_count" in info:
+                    try:
+                        self._episode_stop_loss_count_buf.append(float(info["episode_stop_loss_count"]))
+                    except (TypeError, ValueError):
+                        pass
+                if (
+                    "episode_cost_risk_sum" in info
+                    or "termination_reason" in info
+                    or "episode_liq_count" in info
+                ):
+                    self._episode_death_flag_buf.append(_episode_death_flag(info))
 
                 try:
                     self._override_buf.append(float(info.get("action_overridden_flag", 0.0)))
@@ -766,12 +854,13 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
         )
         if self.trigger.should_evaluate(context):
             current_step = int(getattr(self, "num_timesteps", self.n_calls))
-            self.evaluator.evaluate(
+            payload = self.evaluator.evaluate(
                 model=self.model,
                 reason="train_trigger",
                 step=current_step,
                 print_result=True,
             )
+            self._dispatch_post_eval(payload)
             self.eval_count += 1
             self.last_eval_step = current_step
         return True
@@ -791,14 +880,21 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
         )
         # 訓練結束評估預設強制執行；若你要受 trigger 控制，可自行改為 trigger 判斷
         _ = context
-        self.evaluator.evaluate(
+        payload = self.evaluator.evaluate(
             model=self.model,
             reason="training_end",
             step=current_step,
             print_result=True,
         )
+        self._dispatch_post_eval(payload)
         self.eval_count += 1
         self.last_eval_step = current_step
+
+    def _dispatch_post_eval(self, payload: dict[str, Any]) -> None:
+        """將評估 payload 交給外部 judgment hook。"""
+        if self.post_eval_callback is None:
+            return
+        self.post_eval_callback(payload)
 
     def _collect_metrics(self) -> dict[str, float]:
         metrics: dict[str, float] = {}
@@ -817,6 +913,18 @@ class PhaseABEvaluationTriggerCallback(BaseCallback):
         if self._cost_turnover_buf:
             metrics["cost_turnover_sum_mean"] = float(np.mean(self._cost_turnover_buf))
             self._cost_turnover_buf.clear()
+        if self._episode_steps_buf:
+            metrics["episode_steps_mean"] = float(np.mean(self._episode_steps_buf))
+            self._episode_steps_buf.clear()
+        if self._episode_liq_count_buf:
+            metrics["episode_liq_count_mean"] = float(np.mean(self._episode_liq_count_buf))
+            self._episode_liq_count_buf.clear()
+        if self._episode_stop_loss_count_buf:
+            metrics["episode_stop_loss_count_mean"] = float(np.mean(self._episode_stop_loss_count_buf))
+            self._episode_stop_loss_count_buf.clear()
+        if self._episode_death_flag_buf:
+            metrics["episode_death_rate_mean"] = float(np.mean(self._episode_death_flag_buf))
+            self._episode_death_flag_buf.clear()
         if self._override_buf:
             metrics["override_rate"] = float(np.mean(self._override_buf))
             self._override_buf.clear()
@@ -840,8 +948,8 @@ def main() -> None:
     parser.add_argument("--timesteps", type=int, default=12_000_000) # 288 * 21 * 48 * 20 = 261,360,000
     parser.add_argument("--n-envs", type=int, default=64)
     parser.add_argument("--lambda-risk", type=float, default=0.1, help="Phase B 時 cost_risk（事件型）的權重")
-    parser.add_argument("--lambda-buffer", type=float, default=0.001, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
-    parser.add_argument("--lambda-turnover", type=float, default=0.0005, help="Phase B 時 cost_turnover（換手成本）的權重")
+    parser.add_argument("--lambda-buffer", type=float, default=0.0001, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
+    parser.add_argument("--lambda-turnover", type=float, default=0.0001, help="Phase B 時 cost_turnover（換手成本）的權重")
     parser.add_argument(
         "--turnover-quadratic-coef",
         type=float,
@@ -858,7 +966,7 @@ def main() -> None:
     parser.add_argument(
         "--penalize-turnover-reduction",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="turnover 成本線是否連減碼/平倉也計罰（預設只罰加曝險）",
     )
     parser.add_argument(
@@ -1058,10 +1166,16 @@ def main() -> None:
         max_drawdown_ratio=args.max_dd_ratio,
         max_trade_count_ratio=args.max_trade_count_ratio,
     )
+
+    def _print_judgment(payload: dict[str, Any]) -> None:
+        """評估後印出 P0/P1/P2 judgment 摘要。"""
+        print(format_judgment_summary(judge_payload(payload)))
+
     if args.eval_only:
         model_path = args.eval_model_path.strip() or args.save_path
         model = SAC.load(model_path, device=args.device)
-        evaluator.evaluate(model=model, reason="eval_only", step=None, print_result=True)
+        payload = evaluator.evaluate(model=model, reason="eval_only", step=None, print_result=True)
+        _print_judgment(payload)
         return
 
     vec_env: VecEnv = DummyVecEnv(
@@ -1100,6 +1214,7 @@ def main() -> None:
                 trigger=eval_trigger,
                 log_freq=args.log_freq,
                 eval_on_train_end=args.eval_on_train_end,
+                post_eval_callback=_print_judgment,
                 verbose=1,
             )
         )
