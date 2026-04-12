@@ -45,6 +45,50 @@ def _clip(series: pd.Series, low: float = -5.0, high: float = 5.0) -> pd.Series:
     return series.clip(lower=low, upper=high)
 
 
+def _prev_or_current(series: pd.Series) -> pd.Series:
+    """取得前一值；首筆缺值時退化為當前值，避免用 bfill 引入未來資訊。"""
+    s = series.astype(float)
+    prev = s.shift(1)
+    return prev.where(prev.notna(), s)
+
+
+def _past_only_long_std(
+    series: pd.Series,
+    *,
+    window: int,
+    min_periods: int,
+    fallback: float = 1e-8,
+) -> pd.Series:
+    """長窗 std 僅使用歷史資料；資料不足時退化為 expanding std，而不是 bfill 未來值。"""
+    s = series.astype(float)
+    roll_std = s.rolling(int(window), min_periods=int(min_periods)).std().replace(0.0, np.nan)
+    expanding_std = s.expanding(min_periods=max(2, int(min_periods))).std().replace(0.0, np.nan)
+    return roll_std.fillna(expanding_std).fillna(float(fallback))
+
+
+def _past_only_reference_level(
+    series: pd.Series,
+    event_mask: pd.Series,
+    *,
+    mode: str,
+) -> pd.Series:
+    """
+    取得最近一次已確認事件的參考價位。
+
+    - 僅用 ffill 傳遞已發生事件。
+    - 在尚未出現任何事件前，用 expanding min/max 當保守 fallback，避免 bfill 未來 swing。
+    """
+    s = series.astype(float)
+    events = s.where(event_mask.astype(bool)).ffill()
+    if mode == "low":
+        fallback = s.expanding(min_periods=1).min()
+    elif mode == "high":
+        fallback = s.expanding(min_periods=1).max()
+    else:
+        raise ValueError(f"Unsupported mode: {mode}")
+    return events.fillna(fallback)
+
+
 def _heavy_field_features(
     series: pd.Series,
     *,
@@ -247,13 +291,7 @@ class FeatureTransformer:
         log_c = np.log(np.clip(c, 1e-12, None))
         log_ret = log_c.diff().fillna(0.0)
         rv_20 = log_ret.rolling(20, min_periods=5).std().fillna(0.0)
-        rv_288 = (
-            log_ret.rolling(288, min_periods=20)
-            .std()
-            .replace(0.0, np.nan)
-            .bfill()
-            .fillna(1e-8)
-        )
+        rv_288 = _past_only_long_std(log_ret, window=288, min_periods=20)
         rv_ratio = (rv_20 / rv_288).replace([np.inf, -np.inf], np.nan).fillna(0.0)
         return rv_ratio
 
@@ -317,7 +355,7 @@ class FeatureTransformer:
         log_c = _safe_log(c)
         ret_1 = log_c.diff().fillna(0.0)
         ret_15m = ret_1.rolling(window=3, min_periods=1).sum()
-        prev_c = c.shift(1).bfill()
+        prev_c = _prev_or_current(c)
         range_raw = (h - l) / np.clip(prev_c, 1e-12, None)
         body_raw = (c - o) / np.clip(prev_c, 1e-12, None)
         
@@ -405,7 +443,7 @@ class FeatureTransformer:
         # === 近期做多流動性區（僅 dist_to_long_liq_zone_atr）===
         left_swing, right_swing = 2, 2
         swing_low = (l.shift(1).rolling(left_swing, min_periods=1).min() > l) & (l < l.shift(-1).rolling(right_swing, min_periods=1).min())
-        recent_swing_low = l.where(swing_low).ffill().bfill()
+        recent_swing_low = _past_only_reference_level(l, swing_low, mode="low")
         dist_to_long_liq_zone_atr = ((c - recent_swing_low) / atr_est).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
 
         # scale/clip 版本（僅輸出用到的）
@@ -522,8 +560,9 @@ class FeatureTransformer:
             down_s = (-delta_s).clip(lower=0.0)
             rs_s = up_s.rolling(14, min_periods=5).mean() / np.clip(down_s.rolling(14, min_periods=5).mean(), 1e-12, None)
             rsi_14_s = (((100.0 - (100.0 / (1.0 + rs_s))).fillna(50.0) - 50.0) / 50.0).clip(-1.0, 1.0).astype(float)
-            body_raw_s = (cs - os) / np.clip(cs.shift(1).bfill(), 1e-12, None)
-            range_raw_s = (hs - ls) / np.clip(cs.shift(1).bfill(), 1e-12, None)
+            prev_cs = _prev_or_current(cs)
+            body_raw_s = (cs - os) / np.clip(prev_cs, 1e-12, None)
+            range_raw_s = (hs - ls) / np.clip(prev_cs, 1e-12, None)
             body_range_ratio_s = (body_raw_s / (range_raw_s + 1e-12)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
             volume_impact_s = np.abs(ret1_s) / (vs + 1e-12)
             volume_impact_scale_s = volume_impact_s.replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0.0, 0.001)
@@ -534,8 +573,8 @@ class FeatureTransformer:
             left_swing_s, right_swing_s = 2, 2
             swing_high_s = (hs.shift(1).rolling(left_swing_s, min_periods=1).max() < hs) & (hs > hs.shift(-1).rolling(right_swing_s, min_periods=1).max())
             swing_low_s = (ls.shift(1).rolling(left_swing_s, min_periods=1).min() > ls) & (ls < ls.shift(-1).rolling(right_swing_s, min_periods=1).min())
-            recent_swing_high_s = hs.where(swing_high_s).ffill().bfill()
-            recent_swing_low_s = ls.where(swing_low_s).ffill().bfill()
+            recent_swing_high_s = _past_only_reference_level(hs, swing_high_s, mode="high")
+            recent_swing_low_s = _past_only_reference_level(ls, swing_low_s, mode="low")
             dist_to_long_liq_zone_atr_s = ((cs - recent_swing_low_s) / atr_est_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
             dist_to_short_liq_zone_atr_s = ((recent_swing_high_s - cs) / atr_est_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
 
@@ -674,7 +713,7 @@ class FeatureTransformer:
         ret_15m = ret_1.rolling(window=3, min_periods=1).sum()
         ret_1h = ret_1.rolling(window=12, min_periods=1).sum()
 
-        prev_c = c.shift(1).bfill()
+        prev_c = _prev_or_current(c)
         range_raw = (h - l) / np.clip(prev_c, 1e-12, None)
         body_raw = (c - o) / np.clip(prev_c, 1e-12, None)
 
@@ -770,7 +809,7 @@ class FeatureTransformer:
         # 其他穩健補強：abs_ret、4h 報酬、HL range、chop、trend flip rate
         abs_ret_1 = ret_1.abs()
         ret_4h = ret_1.rolling(window=48, min_periods=1).sum()
-        hl_range_20 = ((h.rolling(20, min_periods=10).max() - l.rolling(20, min_periods=10).min()) / np.clip(c.shift(1).bfill(), 1e-12, None))
+        hl_range_20 = ((h.rolling(20, min_periods=10).max() - l.rolling(20, min_periods=10).min()) / np.clip(_prev_or_current(c), 1e-12, None))
 
         # Choppiness (48)：log10( sum(TR) / (HH-LL) )，轉到 [0,1] 後再映射 [-1,1]
         tr1 = pd.concat([(h - l), (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1).fillna(0.0)
@@ -1051,8 +1090,9 @@ class FeatureTransformer:
         ret_3d = ret_1d.rolling(window=3, min_periods=1).sum()
         ret_7d = ret_1d.rolling(window=7, min_periods=1).sum()
         ret_14d = ret_1d.rolling(window=14, min_periods=1).sum()
-        range_1d = (high_1d - low_1d) / np.maximum(close_1d.shift(1).bfill(), 1e-12)
-        body_1d = (close_1d - open_1d) / np.maximum(close_1d.shift(1).bfill(), 1e-12)
+        prev_close_1d = _prev_or_current(close_1d)
+        range_1d = (high_1d - low_1d) / np.maximum(prev_close_1d, 1e-12)
+        body_1d = (close_1d - open_1d) / np.maximum(prev_close_1d, 1e-12)
 
         vol_ma20 = volume_1d.rolling(20, min_periods=1).mean().replace(0.0, np.nan).fillna(1.0)
         volume_log_1d = np.log(np.clip(volume_1d / vol_ma20, 1e-12, None))
@@ -1258,8 +1298,9 @@ class FeatureTransformer:
             ema12_s = self._ema(cs_1d, 12)
             ema48_s = self._ema(cs_1d, 48)
             ema_12_48_spread_raw_s = ((ema12_s - ema48_s) / np.clip(ema48_s, 1e-12, None)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-0.5, 0.5)
-            range_raw_s = (high_1d_s - low_1d_s) / np.clip(cs_1d.shift(1).bfill(), 1e-12, None)
-            body_raw_s = (cs_1d - os_1d) / np.clip(cs_1d.shift(1).bfill(), 1e-12, None)
+            prev_cs_1d = _prev_or_current(cs_1d)
+            range_raw_s = (high_1d_s - low_1d_s) / np.clip(prev_cs_1d, 1e-12, None)
+            body_raw_s = (cs_1d - os_1d) / np.clip(prev_cs_1d, 1e-12, None)
             body_range_ratio_s = (body_raw_s / (range_raw_s + 1e-12)).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-1.0, 1.0)
 
             delta_s = cs_1d.diff().fillna(0.0)
@@ -1296,8 +1337,8 @@ class FeatureTransformer:
             swing_low_1d_s = (low_1d_s.shift(1).rolling(left_swing_1d_s, min_periods=1).min() > low_1d_s) & (
                 low_1d_s < low_1d_s.shift(-1).rolling(right_swing_1d_s, min_periods=1).min()
             )
-            recent_swing_high_1d_s = high_1d_s.where(swing_high_1d_s).ffill().bfill()
-            recent_swing_low_1d_s = low_1d_s.where(swing_low_1d_s).ffill().bfill()
+            recent_swing_high_1d_s = _past_only_reference_level(high_1d_s, swing_high_1d_s, mode="high")
+            recent_swing_low_1d_s = _past_only_reference_level(low_1d_s, swing_low_1d_s, mode="low")
             dist_to_long_liq_zone_atr_1d_s = ((cs_1d - recent_swing_low_1d_s) / atr_1d_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
             dist_to_short_liq_zone_atr_1d_s = ((recent_swing_high_1d_s - cs_1d) / atr_1d_s).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(-5.0, 5.0)
             n_sweep_1d_s = max(3, z_window_1d // 10)

@@ -63,6 +63,10 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+TRADES_PER_DAY_WARN_THRESHOLD = 80.0
+TRADE_RATE_WARN_THRESHOLD = TRADES_PER_DAY_WARN_THRESHOLD / 288.0
+
+
 def _summary_stat(payload: dict[str, Any], key: str, stat: str = "mean") -> float:
     """讀取 payload.summary[key][stat]；缺值時回傳 0。"""
 
@@ -157,6 +161,10 @@ def extract_judgment_metrics(payload: dict[str, Any]) -> dict[str, float | bool 
     economics_guardrail_pass = _guardrail_pass(payload, "profit_guardrail")
     dd_guardrail_pass = _guardrail_pass(payload, "max_dd_guardrail")
     trade_guardrail_pass = _guardrail_pass(payload, "trade_count_guardrail")
+    episode_steps_mean = _summary_stat(payload, "episode_steps")
+    trade_count_mean = _summary_stat(payload, "episode_trade_count")
+    trade_rate = trade_count_mean / max(episode_steps_mean, 1e-8)
+    trades_per_day = trade_count_mean / max(episode_steps_mean / 288.0, 1e-8)
 
     return {
         "episodes": _safe_int(payload.get("episodes", len(results)), default=len(results)),
@@ -164,8 +172,11 @@ def extract_judgment_metrics(payload: dict[str, Any]) -> dict[str, float | bool 
         "profit_mean": _summary_stat(payload, "profit"),
         "profit_std": _summary_stat(payload, "profit", stat="std"),
         "profit_per_trade_mean": _summary_stat(payload, "profit_per_trade"),
-        "episode_trade_count_mean": _summary_stat(payload, "episode_trade_count"),
+        "episode_trade_count_mean": trade_count_mean,
         "episode_trade_count_std": _summary_stat(payload, "episode_trade_count", stat="std"),
+        "episode_steps_mean": episode_steps_mean,
+        "trade_rate": trade_rate,
+        "trades_per_day": trades_per_day,
         "total_fees_mean": _summary_stat(payload, "total_fees"),
         "episode_max_dd_mean": _summary_stat(payload, "episode_max_dd"),
         "episode_max_dd_std": _summary_stat(payload, "episode_max_dd", stat="std"),
@@ -300,6 +311,8 @@ def _judge_p1_objective(
     high_churn_negative = _safe_int(metrics.get("high_churn_negative_episode_count", 0))
     execution_rate_mean = _safe_float(metrics.get("execution_rate_mean", 0.0))
     trade_count_mean = _safe_float(metrics.get("episode_trade_count_mean", 0.0))
+    trade_rate = _safe_float(metrics.get("trade_rate", 0.0))
+    trades_per_day = _safe_float(metrics.get("trades_per_day", 0.0))
     total_fees_mean = _safe_float(metrics.get("total_fees_mean", 0.0))
     profit_mean = _safe_float(metrics.get("profit_mean", 0.0))
 
@@ -314,19 +327,29 @@ def _judge_p1_objective(
             evidence={
                 "profit_mean": profit_mean,
                 "trade_count_mean": trade_count_mean,
+                "trade_rate": trade_rate,
+                "trades_per_day": trades_per_day,
                 "total_fees_mean": total_fees_mean,
                 "execution_rate_mean": execution_rate_mean,
                 "low_churn_positive_episode_count": low_churn_positive,
                 "high_churn_negative_episode_count": high_churn_negative,
             },
         )
-    if profit_mean > 0.0 and (trade_count_mean >= 200.0 or execution_rate_mean >= 0.25):
+    if profit_mean > 0.0 and (
+        trades_per_day >= TRADES_PER_DAY_WARN_THRESHOLD
+        or trade_rate >= TRADE_RATE_WARN_THRESHOLD
+        or execution_rate_mean >= 0.25
+    ):
         return JudgmentItem(
             status=JudgmentStatus.WARN,
             reason="雖有獲利，但策略仍高度依賴頻繁成交，可能與上線目標不一致。",
             evidence={
                 "profit_mean": profit_mean,
                 "trade_count_mean": trade_count_mean,
+                "trade_rate": trade_rate,
+                "trades_per_day": trades_per_day,
+                "trade_rate_warn_threshold": TRADE_RATE_WARN_THRESHOLD,
+                "trades_per_day_warn_threshold": TRADES_PER_DAY_WARN_THRESHOLD,
                 "execution_rate_mean": execution_rate_mean,
                 "low_churn_positive_episode_count": low_churn_positive,
                 "high_churn_negative_episode_count": high_churn_negative,
@@ -338,6 +361,8 @@ def _judge_p1_objective(
         evidence={
             "profit_mean": profit_mean,
             "trade_count_mean": trade_count_mean,
+            "trade_rate": trade_rate,
+            "trades_per_day": trades_per_day,
             "execution_rate_mean": execution_rate_mean,
             "low_churn_positive_episode_count": low_churn_positive,
             "high_churn_negative_episode_count": high_churn_negative,

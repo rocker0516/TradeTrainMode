@@ -1002,8 +1002,8 @@ def main() -> None:
         help="中性區（無 Gate A/C）且本步成交時，主線 reward 固定扣分（不隨 regime/conviction 退火）",
     )
     parser.add_argument("--conviction-bonus-weight", type=float, default=0.0003, help="Conviction 順向 bonus 權重（強訊號+大倉+同向加分）")
-    parser.add_argument("--conviction-min-abs-pos", type=float, default=0.4, help="Conviction 生效最小持倉比例")
-    parser.add_argument("--conviction-trend-min-strength", type=float, default=0.5, help="Conviction 生效最小趨勢強度")
+    parser.add_argument("--conviction-min-abs-pos", type=float, default=0.6, help="Conviction 生效最小持倉比例")
+    parser.add_argument("--conviction-trend-min-strength", type=float, default=0.7, help="Conviction 生效最小趨勢強度")
     parser.add_argument("--anneal-steps", type=int, default=0, help="輔助 reward 退火步數（0=不退火，regime/conviction 全程滿權重）")
     # ---- Execution cost 開關與參數 ----
     parser.add_argument("--execution-cost-mode", type=int, default=7, help="成交成本 bitmask：1=spread, 2=min_notional, 4=slippage，可相加組合（例 7=全開）")

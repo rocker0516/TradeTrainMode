@@ -1,0 +1,3 @@
+candidate,profit_mean,profit_per_trade_mean,trade_count_mean,total_fees_mean,fees_profit_ratio,episode_max_dd_mean,termination_balance_insufficient_count
+baseline_current,0.0,0.0,0.0,0.0,0.0,0.0,0.0
+minimal_signal,0.0,0.0,0.0,0.0,0.0,0.0,0.0

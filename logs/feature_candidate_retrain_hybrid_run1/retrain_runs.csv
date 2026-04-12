@@ -1,0 +1,4 @@
+candidate,seed,window_size,window_size_1d,profit_mean,profit_per_trade_mean,trade_count_mean,total_fees_mean,episode_max_dd_mean,termination_balance_insufficient_count,fees_profit_ratio
+baseline_current,42,24,12,0.0,0.0,0.0,0.0,0.0,0,0.0
+minimal_signal,42,12,6,-1.5990063950396576,0.03880053101245885,191.4,13.88081353378285,0.04261040012333982,0,8.680899324007136
+hybrid_minimal_signal,42,12,6,14.794057090344813,0.04687637892635794,316.0,25.123655949250008,0.0536285399313182,0,1.698226240160091

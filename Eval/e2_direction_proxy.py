@@ -912,7 +912,8 @@ def fit_predict_3class(
 ) -> Tuple[np.ndarray, float, float, Dict[str, float]]:
     """三分類：y in {-1,0,1}。回傳 test 預測、macro_f1、balanced_accuracy、輔助指標。"""
     le = LabelEncoder()
-    y_train_enc = le.fit_transform(y_train)
+    le.fit(np.array([-1, 0, 1], dtype=np.int32))
+    y_train_enc = le.transform(y_train)
     y_test_enc = le.transform(y_test)
 
     if use_lightgbm:

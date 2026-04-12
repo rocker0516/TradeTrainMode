@@ -27970,3 +27970,1011 @@ requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='api.binance.com', por
 2026-04-12 22:25:39,261 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241001
 2026-04-12 22:25:39,264 | INFO | [BinanceService] Stats avg_volume=384632018.05 avg_buy=188938739.53 avg_sell=195693278.52 avg_ratio=1.06
 2026-04-12 22:25:40,265 | INFO | Sleeping 300s
+2026-04-12 22:30:40,266 | INFO | Cycle 1546 started
+2026-04-12 22:30:40,266 | INFO | Target end_time=2026-04-12 22:30:40.266853
+2026-04-12 22:30:40,619 | INFO | Fetching BTCUSDT from 2026-04-12 14:30:00 to 2026-04-12 22:30:40.266853
+2026-04-12 22:30:44,708 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241002
+2026-04-12 22:30:44,712 | INFO | [BinanceService] Stats avg_volume=752.62 avg_buy=373.75 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 22:30:46,054 | INFO | Fetching ETHUSDT from 2026-04-12 14:30:00 to 2026-04-12 22:30:40.266853
+2026-04-12 22:30:49,720 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241002
+2026-04-12 22:30:49,723 | INFO | [BinanceService] Stats avg_volume=14319.33 avg_buy=7075.36 avg_sell=7243.97 avg_ratio=1.09
+2026-04-12 22:30:51,063 | INFO | Fetching SOLUSDT from 2026-04-12 14:30:00 to 2026-04-12 22:30:40.266853
+2026-04-12 22:30:54,729 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241002
+2026-04-12 22:30:54,736 | INFO | [BinanceService] Stats avg_volume=79116.19 avg_buy=38903.99 avg_sell=40212.21 avg_ratio=1.07
+2026-04-12 22:30:56,089 | INFO | Fetching DOGEUSDT from 2026-04-12 14:30:00 to 2026-04-12 22:30:40.266853
+2026-04-12 22:30:59,588 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241002
+2026-04-12 22:30:59,590 | INFO | [BinanceService] Stats avg_volume=24250033.36 avg_buy=11850062.78 avg_sell=12399970.58 avg_ratio=1.08
+2026-04-12 22:31:00,949 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 14:30:00 to 2026-04-12 22:30:40.266853
+2026-04-12 22:31:04,890 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241002
+2026-04-12 22:31:04,893 | INFO | [BinanceService] Stats avg_volume=384630879.88 avg_buy=188938131.48 avg_sell=195692748.40 avg_ratio=1.06
+2026-04-12 22:31:05,895 | INFO | Sleeping 300s
+2026-04-12 22:36:05,895 | INFO | Cycle 1547 started
+2026-04-12 22:36:05,895 | INFO | Target end_time=2026-04-12 22:36:05.895922
+2026-04-12 22:36:06,295 | INFO | Fetching BTCUSDT from 2026-04-12 14:35:00 to 2026-04-12 22:36:05.895922
+2026-04-12 22:36:09,716 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241003
+2026-04-12 22:36:09,719 | INFO | [BinanceService] Stats avg_volume=752.61 avg_buy=373.75 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 22:36:11,075 | INFO | Fetching ETHUSDT from 2026-04-12 14:35:00 to 2026-04-12 22:36:05.895922
+2026-04-12 22:36:14,564 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241003
+2026-04-12 22:36:14,568 | INFO | [BinanceService] Stats avg_volume=14319.31 avg_buy=7075.35 avg_sell=7243.97 avg_ratio=1.09
+2026-04-12 22:36:15,919 | INFO | Fetching SOLUSDT from 2026-04-12 14:35:00 to 2026-04-12 22:36:05.895922
+2026-04-12 22:36:19,280 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241003
+2026-04-12 22:36:19,283 | INFO | [BinanceService] Stats avg_volume=79116.72 avg_buy=38904.09 avg_sell=40212.63 avg_ratio=1.07
+2026-04-12 22:36:20,637 | INFO | Fetching DOGEUSDT from 2026-04-12 14:35:00 to 2026-04-12 22:36:05.895922
+2026-04-12 22:36:24,147 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241003
+2026-04-12 22:36:24,151 | INFO | [BinanceService] Stats avg_volume=24249961.53 avg_buy=11850033.58 avg_sell=12399927.95 avg_ratio=1.08
+2026-04-12 22:36:25,533 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 14:35:00 to 2026-04-12 22:36:05.895922
+2026-04-12 22:36:28,890 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241003
+2026-04-12 22:36:28,893 | INFO | [BinanceService] Stats avg_volume=384629618.89 avg_buy=188937495.87 avg_sell=195692123.02 avg_ratio=1.06
+2026-04-12 22:36:29,895 | INFO | Sleeping 300s
+2026-04-12 22:41:29,897 | INFO | Cycle 1548 started
+2026-04-12 22:41:29,898 | INFO | Target end_time=2026-04-12 22:41:29.898012
+2026-04-12 22:41:30,233 | INFO | Fetching BTCUSDT from 2026-04-12 14:40:00 to 2026-04-12 22:41:29.898012
+2026-04-12 22:41:33,610 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241004
+2026-04-12 22:41:33,614 | INFO | [BinanceService] Stats avg_volume=752.61 avg_buy=373.74 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 22:41:34,991 | INFO | Fetching ETHUSDT from 2026-04-12 14:40:00 to 2026-04-12 22:41:29.898012
+2026-04-12 22:41:38,323 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241004
+2026-04-12 22:41:38,327 | INFO | [BinanceService] Stats avg_volume=14319.33 avg_buy=7075.36 avg_sell=7243.97 avg_ratio=1.09
+2026-04-12 22:41:39,684 | INFO | Fetching SOLUSDT from 2026-04-12 14:40:00 to 2026-04-12 22:41:29.898012
+2026-04-12 22:41:42,926 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241004
+2026-04-12 22:41:42,930 | INFO | [BinanceService] Stats avg_volume=79117.23 avg_buy=38904.42 avg_sell=40212.81 avg_ratio=1.07
+2026-04-12 22:41:44,281 | INFO | Fetching DOGEUSDT from 2026-04-12 14:40:00 to 2026-04-12 22:41:29.898012
+2026-04-12 22:41:47,982 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241004
+2026-04-12 22:41:47,986 | INFO | [BinanceService] Stats avg_volume=24249907.23 avg_buy=11849995.96 avg_sell=12399911.27 avg_ratio=1.08
+2026-04-12 22:41:49,376 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 14:40:00 to 2026-04-12 22:41:29.898012
+2026-04-12 22:41:52,917 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241004
+2026-04-12 22:41:52,921 | INFO | [BinanceService] Stats avg_volume=384628871.20 avg_buy=188936983.25 avg_sell=195691887.94 avg_ratio=1.06
+2026-04-12 22:41:53,922 | INFO | Sleeping 300s
+2026-04-12 22:46:53,923 | INFO | Cycle 1549 started
+2026-04-12 22:46:53,923 | INFO | Target end_time=2026-04-12 22:46:53.923377
+2026-04-12 22:46:54,280 | INFO | Fetching BTCUSDT from 2026-04-12 14:45:00 to 2026-04-12 22:46:53.923377
+2026-04-12 22:46:57,709 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241005
+2026-04-12 22:46:57,711 | INFO | [BinanceService] Stats avg_volume=752.62 avg_buy=373.75 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 22:46:59,052 | INFO | Fetching ETHUSDT from 2026-04-12 14:45:00 to 2026-04-12 22:46:53.923377
+2026-04-12 22:47:02,331 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241005
+2026-04-12 22:47:02,336 | INFO | [BinanceService] Stats avg_volume=14319.51 avg_buy=7075.44 avg_sell=7244.07 avg_ratio=1.09
+2026-04-12 22:47:03,685 | INFO | Fetching SOLUSDT from 2026-04-12 14:45:00 to 2026-04-12 22:46:53.923377
+2026-04-12 22:47:06,946 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241005
+2026-04-12 22:47:06,950 | INFO | [BinanceService] Stats avg_volume=79118.44 avg_buy=38904.82 avg_sell=40213.62 avg_ratio=1.07
+2026-04-12 22:47:08,310 | INFO | Fetching DOGEUSDT from 2026-04-12 14:45:00 to 2026-04-12 22:46:53.923377
+2026-04-12 22:47:11,788 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241005
+2026-04-12 22:47:11,792 | INFO | [BinanceService] Stats avg_volume=24250330.68 avg_buy=11850052.21 avg_sell=12400278.47 avg_ratio=1.08
+2026-04-12 22:47:13,167 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 14:45:00 to 2026-04-12 22:46:53.923377
+2026-04-12 22:47:16,610 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241005
+2026-04-12 22:47:16,614 | INFO | [BinanceService] Stats avg_volume=384630040.64 avg_buy=188937277.12 avg_sell=195692763.52 avg_ratio=1.06
+2026-04-12 22:47:17,615 | INFO | Sleeping 300s
+2026-04-12 22:52:17,615 | INFO | Cycle 1550 started
+2026-04-12 22:52:17,615 | INFO | Target end_time=2026-04-12 22:52:17.615956
+2026-04-12 22:52:17,978 | INFO | Fetching BTCUSDT from 2026-04-12 14:50:00 to 2026-04-12 22:52:17.615956
+2026-04-12 22:52:21,567 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241006
+2026-04-12 22:52:21,571 | INFO | [BinanceService] Stats avg_volume=752.62 avg_buy=373.75 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 22:52:22,940 | INFO | Fetching ETHUSDT from 2026-04-12 14:50:00 to 2026-04-12 22:52:17.615956
+2026-04-12 22:52:26,463 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241006
+2026-04-12 22:52:26,468 | INFO | [BinanceService] Stats avg_volume=14319.53 avg_buy=7075.44 avg_sell=7244.08 avg_ratio=1.09
+2026-04-12 22:52:27,779 | INFO | Fetching SOLUSDT from 2026-04-12 14:50:00 to 2026-04-12 22:52:17.615956
+2026-04-12 22:52:31,252 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241006
+2026-04-12 22:52:31,256 | INFO | [BinanceService] Stats avg_volume=79119.29 avg_buy=38905.41 avg_sell=40213.89 avg_ratio=1.07
+2026-04-12 22:52:32,616 | INFO | Fetching DOGEUSDT from 2026-04-12 14:50:00 to 2026-04-12 22:52:17.615956
+2026-04-12 22:52:36,060 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241006
+2026-04-12 22:52:36,063 | INFO | [BinanceService] Stats avg_volume=24250349.83 avg_buy=11850071.36 avg_sell=12400278.47 avg_ratio=1.08
+2026-04-12 22:52:37,434 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 14:50:00 to 2026-04-12 22:52:17.615956
+2026-04-12 22:52:40,815 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241006
+2026-04-12 22:52:40,818 | INFO | [BinanceService] Stats avg_volume=384629564.20 avg_buy=188937035.50 avg_sell=195692528.69 avg_ratio=1.06
+2026-04-12 22:52:41,819 | INFO | Sleeping 300s
+2026-04-12 22:57:41,820 | INFO | Cycle 1551 started
+2026-04-12 22:57:41,820 | INFO | Target end_time=2026-04-12 22:57:41.820433
+2026-04-12 22:57:42,162 | INFO | Fetching BTCUSDT from 2026-04-12 14:55:00 to 2026-04-12 22:57:41.820433
+2026-04-12 22:57:45,641 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241007
+2026-04-12 22:57:45,645 | INFO | [BinanceService] Stats avg_volume=752.62 avg_buy=373.75 avg_sell=378.88 avg_ratio=1.12
+2026-04-12 22:57:47,000 | INFO | Fetching ETHUSDT from 2026-04-12 14:55:00 to 2026-04-12 22:57:41.820433
+2026-04-12 22:57:50,677 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241007
+2026-04-12 22:57:50,680 | INFO | [BinanceService] Stats avg_volume=14319.56 avg_buy=7075.47 avg_sell=7244.09 avg_ratio=1.09
+2026-04-12 22:57:52,022 | INFO | Fetching SOLUSDT from 2026-04-12 14:55:00 to 2026-04-12 22:57:41.820433
+2026-04-12 22:57:55,557 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241007
+2026-04-12 22:57:55,561 | INFO | [BinanceService] Stats avg_volume=79119.34 avg_buy=38905.47 avg_sell=40213.88 avg_ratio=1.07
+2026-04-12 22:57:56,900 | INFO | Fetching DOGEUSDT from 2026-04-12 14:55:00 to 2026-04-12 22:57:41.820433
+2026-04-12 22:58:00,493 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241007
+2026-04-12 22:58:00,497 | INFO | [BinanceService] Stats avg_volume=24250335.53 avg_buy=11850063.84 avg_sell=12400271.69 avg_ratio=1.08
+2026-04-12 22:58:01,873 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 14:55:00 to 2026-04-12 22:57:41.820433
+2026-04-12 22:58:05,693 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241007
+2026-04-12 22:58:05,696 | INFO | [BinanceService] Stats avg_volume=384629032.33 avg_buy=188936896.85 avg_sell=195692135.47 avg_ratio=1.06
+2026-04-12 22:58:06,698 | INFO | Sleeping 300s
+2026-04-12 23:03:06,699 | INFO | Cycle 1552 started
+2026-04-12 23:03:06,699 | INFO | Target end_time=2026-04-12 23:03:06.699047
+2026-04-12 23:03:07,056 | INFO | Fetching BTCUSDT from 2026-04-12 15:00:00 to 2026-04-12 23:03:06.699047
+2026-04-12 23:03:10,523 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241008
+2026-04-12 23:03:10,529 | INFO | [BinanceService] Stats avg_volume=752.62 avg_buy=373.75 avg_sell=378.88 avg_ratio=1.12
+2026-04-12 23:03:11,864 | INFO | Fetching ETHUSDT from 2026-04-12 15:00:00 to 2026-04-12 23:03:06.699047
+2026-04-12 23:03:15,208 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241008
+2026-04-12 23:03:15,211 | INFO | [BinanceService] Stats avg_volume=14319.57 avg_buy=7075.49 avg_sell=7244.09 avg_ratio=1.09
+2026-04-12 23:03:16,561 | INFO | Fetching SOLUSDT from 2026-04-12 15:00:00 to 2026-04-12 23:03:06.699047
+2026-04-12 23:03:19,905 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241008
+2026-04-12 23:03:19,909 | INFO | [BinanceService] Stats avg_volume=79119.19 avg_buy=38905.41 avg_sell=40213.78 avg_ratio=1.07
+2026-04-12 23:03:21,266 | INFO | Fetching DOGEUSDT from 2026-04-12 15:00:00 to 2026-04-12 23:03:06.699047
+2026-04-12 23:03:25,195 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241008
+2026-04-12 23:03:25,199 | INFO | [BinanceService] Stats avg_volume=24250382.69 avg_buy=11850050.13 avg_sell=12400332.56 avg_ratio=1.08
+2026-04-12 23:03:26,572 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 15:00:00 to 2026-04-12 23:03:06.699047
+2026-04-12 23:03:30,647 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241008
+2026-04-12 23:03:30,650 | INFO | [BinanceService] Stats avg_volume=384628040.30 avg_buy=188936347.81 avg_sell=195691692.50 avg_ratio=1.06
+2026-04-12 23:03:31,652 | INFO | Sleeping 300s
+2026-04-12 23:08:31,653 | INFO | Cycle 1553 started
+2026-04-12 23:08:31,653 | INFO | Target end_time=2026-04-12 23:08:31.653820
+2026-04-12 23:08:31,997 | INFO | Fetching BTCUSDT from 2026-04-12 15:05:00 to 2026-04-12 23:08:31.653820
+2026-04-12 23:08:35,599 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241009
+2026-04-12 23:08:35,603 | INFO | [BinanceService] Stats avg_volume=752.62 avg_buy=373.75 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 23:08:36,969 | INFO | Fetching ETHUSDT from 2026-04-12 15:05:00 to 2026-04-12 23:08:31.653820
+2026-04-12 23:08:40,352 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241009
+2026-04-12 23:08:40,356 | INFO | [BinanceService] Stats avg_volume=14319.56 avg_buy=7075.49 avg_sell=7244.07 avg_ratio=1.09
+2026-04-12 23:08:41,704 | INFO | Fetching SOLUSDT from 2026-04-12 15:05:00 to 2026-04-12 23:08:31.653820
+2026-04-12 23:08:44,987 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241009
+2026-04-12 23:08:44,990 | INFO | [BinanceService] Stats avg_volume=79119.11 avg_buy=38905.37 avg_sell=40213.74 avg_ratio=1.07
+2026-04-12 23:08:46,326 | INFO | Fetching DOGEUSDT from 2026-04-12 15:05:00 to 2026-04-12 23:08:31.653820
+2026-04-12 23:08:49,947 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241009
+2026-04-12 23:08:49,950 | INFO | [BinanceService] Stats avg_volume=24250316.42 avg_buy=11850021.14 avg_sell=12400295.28 avg_ratio=1.08
+2026-04-12 23:08:51,330 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 15:05:00 to 2026-04-12 23:08:31.653820
+2026-04-12 23:08:55,045 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241009
+2026-04-12 23:08:55,050 | INFO | [BinanceService] Stats avg_volume=384627256.60 avg_buy=188935964.46 avg_sell=195691292.15 avg_ratio=1.06
+2026-04-12 23:08:56,051 | INFO | Sleeping 300s
+2026-04-12 23:13:56,052 | INFO | Cycle 1554 started
+2026-04-12 23:13:56,052 | INFO | Target end_time=2026-04-12 23:13:56.052292
+2026-04-12 23:13:56,381 | INFO | Fetching BTCUSDT from 2026-04-12 15:10:00 to 2026-04-12 23:13:56.052292
+2026-04-12 23:14:00,071 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241010
+2026-04-12 23:14:00,073 | INFO | [BinanceService] Stats avg_volume=752.62 avg_buy=373.75 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 23:14:01,413 | INFO | Fetching ETHUSDT from 2026-04-12 15:10:00 to 2026-04-12 23:13:56.052292
+2026-04-12 23:14:04,858 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241010
+2026-04-12 23:14:04,861 | INFO | [BinanceService] Stats avg_volume=14319.55 avg_buy=7075.49 avg_sell=7244.06 avg_ratio=1.09
+2026-04-12 23:14:06,199 | INFO | Fetching SOLUSDT from 2026-04-12 15:10:00 to 2026-04-12 23:13:56.052292
+2026-04-12 23:14:09,607 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241010
+2026-04-12 23:14:09,611 | INFO | [BinanceService] Stats avg_volume=79119.05 avg_buy=38905.35 avg_sell=40213.70 avg_ratio=1.07
+2026-04-12 23:14:10,962 | INFO | Fetching DOGEUSDT from 2026-04-12 15:10:00 to 2026-04-12 23:13:56.052292
+2026-04-12 23:14:14,181 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241010
+2026-04-12 23:14:14,185 | INFO | [BinanceService] Stats avg_volume=24250258.69 avg_buy=11849994.52 avg_sell=12400264.16 avg_ratio=1.08
+2026-04-12 23:14:15,544 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 15:10:00 to 2026-04-12 23:13:56.052292
+2026-04-12 23:14:18,999 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241010
+2026-04-12 23:14:19,004 | INFO | [BinanceService] Stats avg_volume=384626538.11 avg_buy=188935339.15 avg_sell=195691198.96 avg_ratio=1.06
+2026-04-12 23:14:20,005 | INFO | Sleeping 300s
+2026-04-12 23:19:20,006 | INFO | Cycle 1555 started
+2026-04-12 23:19:20,007 | INFO | Target end_time=2026-04-12 23:19:20.007314
+2026-04-12 23:19:20,415 | INFO | Fetching BTCUSDT from 2026-04-12 15:15:00 to 2026-04-12 23:19:20.007314
+2026-04-12 23:19:23,707 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241011
+2026-04-12 23:19:23,710 | INFO | [BinanceService] Stats avg_volume=752.62 avg_buy=373.74 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 23:19:25,063 | INFO | Fetching ETHUSDT from 2026-04-12 15:15:00 to 2026-04-12 23:19:20.007314
+2026-04-12 23:19:28,684 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241011
+2026-04-12 23:19:28,688 | INFO | [BinanceService] Stats avg_volume=14319.54 avg_buy=7075.49 avg_sell=7244.05 avg_ratio=1.09
+2026-04-12 23:19:30,033 | INFO | Fetching SOLUSDT from 2026-04-12 15:15:00 to 2026-04-12 23:19:20.007314
+2026-04-12 23:19:33,157 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241011
+2026-04-12 23:19:33,160 | INFO | [BinanceService] Stats avg_volume=79119.38 avg_buy=38905.38 avg_sell=40214.00 avg_ratio=1.07
+2026-04-12 23:19:34,513 | INFO | Fetching DOGEUSDT from 2026-04-12 15:15:00 to 2026-04-12 23:19:20.007314
+2026-04-12 23:19:37,894 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241011
+2026-04-12 23:19:37,896 | INFO | [BinanceService] Stats avg_volume=24250237.87 avg_buy=11849973.57 avg_sell=12400264.31 avg_ratio=1.08
+2026-04-12 23:19:39,268 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 15:15:00 to 2026-04-12 23:19:20.007314
+2026-04-12 23:19:42,956 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241011
+2026-04-12 23:19:42,960 | INFO | [BinanceService] Stats avg_volume=384625598.10 avg_buy=188934788.96 avg_sell=195690809.14 avg_ratio=1.06
+2026-04-12 23:19:43,961 | INFO | Sleeping 300s
+2026-04-12 23:24:43,962 | INFO | Cycle 1556 started
+2026-04-12 23:24:43,962 | INFO | Target end_time=2026-04-12 23:24:43.962305
+2026-04-12 23:24:44,322 | INFO | Fetching BTCUSDT from 2026-04-12 15:20:00 to 2026-04-12 23:24:43.962305
+2026-04-12 23:24:47,618 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241012
+2026-04-12 23:24:47,624 | INFO | [BinanceService] Stats avg_volume=752.62 avg_buy=373.74 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 23:24:48,946 | INFO | Fetching ETHUSDT from 2026-04-12 15:20:00 to 2026-04-12 23:24:43.962305
+2026-04-12 23:24:52,512 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241012
+2026-04-12 23:24:52,516 | INFO | [BinanceService] Stats avg_volume=14319.50 avg_buy=7075.47 avg_sell=7244.03 avg_ratio=1.09
+2026-04-12 23:24:53,859 | INFO | Fetching SOLUSDT from 2026-04-12 15:20:00 to 2026-04-12 23:24:43.962305
+2026-04-12 23:24:57,039 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241012
+2026-04-12 23:24:57,042 | INFO | [BinanceService] Stats avg_volume=79119.20 avg_buy=38905.28 avg_sell=40213.92 avg_ratio=1.07
+2026-04-12 23:24:58,396 | INFO | Fetching DOGEUSDT from 2026-04-12 15:20:00 to 2026-04-12 23:24:43.962305
+2026-04-12 23:25:01,687 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241012
+2026-04-12 23:25:01,690 | INFO | [BinanceService] Stats avg_volume=24250179.60 avg_buy=11849948.05 avg_sell=12400231.55 avg_ratio=1.08
+2026-04-12 23:25:03,048 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 15:20:00 to 2026-04-12 23:24:43.962305
+2026-04-12 23:25:06,619 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241012
+2026-04-12 23:25:06,622 | INFO | [BinanceService] Stats avg_volume=384624337.07 avg_buy=188934150.85 avg_sell=195690186.22 avg_ratio=1.06
+2026-04-12 23:25:07,624 | INFO | Sleeping 300s
+2026-04-12 23:30:07,624 | INFO | Cycle 1557 started
+2026-04-12 23:30:07,624 | INFO | Target end_time=2026-04-12 23:30:07.624677
+2026-04-12 23:30:07,972 | INFO | Fetching BTCUSDT from 2026-04-12 15:25:00 to 2026-04-12 23:30:07.624677
+2026-04-12 23:30:11,381 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241014
+2026-04-12 23:30:11,385 | INFO | [BinanceService] Stats avg_volume=752.61 avg_buy=373.74 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 23:30:12,748 | INFO | Fetching ETHUSDT from 2026-04-12 15:25:00 to 2026-04-12 23:30:07.624677
+2026-04-12 23:30:16,315 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241014
+2026-04-12 23:30:16,318 | INFO | [BinanceService] Stats avg_volume=14319.41 avg_buy=7075.43 avg_sell=7243.98 avg_ratio=1.09
+2026-04-12 23:30:17,664 | INFO | Fetching SOLUSDT from 2026-04-12 15:25:00 to 2026-04-12 23:30:07.624677
+2026-04-12 23:30:20,907 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241014
+2026-04-12 23:30:20,911 | INFO | [BinanceService] Stats avg_volume=79118.74 avg_buy=38905.05 avg_sell=40213.68 avg_ratio=1.07
+2026-04-12 23:30:22,255 | INFO | Fetching DOGEUSDT from 2026-04-12 15:25:00 to 2026-04-12 23:30:07.624677
+2026-04-12 23:30:25,804 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241014
+2026-04-12 23:30:25,806 | INFO | [BinanceService] Stats avg_volume=24250054.90 avg_buy=11849865.01 avg_sell=12400189.89 avg_ratio=1.08
+2026-04-12 23:30:27,154 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 15:25:00 to 2026-04-12 23:30:07.624677
+2026-04-12 23:30:30,674 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241014
+2026-04-12 23:30:30,678 | INFO | [BinanceService] Stats avg_volume=384621538.84 avg_buy=188932733.54 avg_sell=195688805.29 avg_ratio=1.06
+2026-04-12 23:30:31,679 | INFO | Sleeping 300s
+2026-04-12 23:35:31,681 | INFO | Cycle 1558 started
+2026-04-12 23:35:31,681 | INFO | Target end_time=2026-04-12 23:35:31.681267
+2026-04-12 23:35:32,047 | INFO | Fetching BTCUSDT from 2026-04-12 15:35:00 to 2026-04-12 23:35:31.681267
+2026-04-12 23:35:35,557 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241015
+2026-04-12 23:35:35,561 | INFO | [BinanceService] Stats avg_volume=752.62 avg_buy=373.74 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 23:35:36,916 | INFO | Fetching ETHUSDT from 2026-04-12 15:35:00 to 2026-04-12 23:35:31.681267
+2026-04-12 23:35:40,298 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241015
+2026-04-12 23:35:40,302 | INFO | [BinanceService] Stats avg_volume=14319.48 avg_buy=7075.46 avg_sell=7244.02 avg_ratio=1.09
+2026-04-12 23:35:41,652 | INFO | Fetching SOLUSDT from 2026-04-12 15:35:00 to 2026-04-12 23:35:31.681267
+2026-04-12 23:35:45,107 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241015
+2026-04-12 23:35:45,110 | INFO | [BinanceService] Stats avg_volume=79119.08 avg_buy=38905.30 avg_sell=40213.77 avg_ratio=1.07
+2026-04-12 23:35:46,483 | INFO | Fetching DOGEUSDT from 2026-04-12 15:35:00 to 2026-04-12 23:35:31.681267
+2026-04-12 23:35:49,896 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241015
+2026-04-12 23:35:49,900 | INFO | [BinanceService] Stats avg_volume=24250051.92 avg_buy=11849874.55 avg_sell=12400177.38 avg_ratio=1.08
+2026-04-12 23:35:51,285 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 15:35:00 to 2026-04-12 23:35:31.681267
+2026-04-12 23:35:54,874 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241015
+2026-04-12 23:35:54,877 | INFO | [BinanceService] Stats avg_volume=384621274.14 avg_buy=188932524.61 avg_sell=195688749.53 avg_ratio=1.06
+2026-04-12 23:35:55,878 | INFO | Sleeping 300s
+2026-04-12 23:40:55,881 | INFO | Cycle 1559 started
+2026-04-12 23:40:55,881 | INFO | Target end_time=2026-04-12 23:40:55.881121
+2026-04-12 23:40:56,245 | INFO | Fetching BTCUSDT from 2026-04-12 15:40:00 to 2026-04-12 23:40:55.881121
+2026-04-12 23:40:59,747 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241016
+2026-04-12 23:40:59,752 | INFO | [BinanceService] Stats avg_volume=752.61 avg_buy=373.74 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 23:41:01,116 | INFO | Fetching ETHUSDT from 2026-04-12 15:40:00 to 2026-04-12 23:40:55.881121
+2026-04-12 23:41:04,821 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241016
+2026-04-12 23:41:04,825 | INFO | [BinanceService] Stats avg_volume=14319.46 avg_buy=7075.45 avg_sell=7244.02 avg_ratio=1.09
+2026-04-12 23:41:06,161 | INFO | Fetching SOLUSDT from 2026-04-12 15:40:00 to 2026-04-12 23:40:55.881121
+2026-04-12 23:41:09,581 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241016
+2026-04-12 23:41:09,585 | INFO | [BinanceService] Stats avg_volume=79118.92 avg_buy=38905.21 avg_sell=40213.71 avg_ratio=1.07
+2026-04-12 23:41:10,951 | INFO | Fetching DOGEUSDT from 2026-04-12 15:40:00 to 2026-04-12 23:40:55.881121
+2026-04-12 23:41:14,307 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241016
+2026-04-12 23:41:14,310 | INFO | [BinanceService] Stats avg_volume=24249981.32 avg_buy=11849842.73 avg_sell=12400138.59 avg_ratio=1.08
+2026-04-12 23:41:15,688 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 15:40:00 to 2026-04-12 23:40:55.881121
+2026-04-12 23:41:19,177 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241016
+2026-04-12 23:41:19,180 | INFO | [BinanceService] Stats avg_volume=384620259.14 avg_buy=188932021.01 avg_sell=195688238.13 avg_ratio=1.06
+2026-04-12 23:41:20,181 | INFO | Sleeping 300s
+2026-04-12 23:46:20,182 | INFO | Cycle 1560 started
+2026-04-12 23:46:20,182 | INFO | Target end_time=2026-04-12 23:46:20.182479
+2026-04-12 23:46:20,549 | INFO | Fetching BTCUSDT from 2026-04-12 15:45:00 to 2026-04-12 23:46:20.182479
+2026-04-12 23:46:24,224 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241017
+2026-04-12 23:46:24,228 | INFO | [BinanceService] Stats avg_volume=752.62 avg_buy=373.75 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 23:46:25,586 | INFO | Fetching ETHUSDT from 2026-04-12 15:45:00 to 2026-04-12 23:46:20.182479
+2026-04-12 23:46:29,305 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241017
+2026-04-12 23:46:29,307 | INFO | [BinanceService] Stats avg_volume=14319.45 avg_buy=7075.44 avg_sell=7244.01 avg_ratio=1.09
+2026-04-12 23:46:30,655 | INFO | Fetching SOLUSDT from 2026-04-12 15:45:00 to 2026-04-12 23:46:20.182479
+2026-04-12 23:46:34,403 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241017
+2026-04-12 23:46:34,407 | INFO | [BinanceService] Stats avg_volume=79118.75 avg_buy=38905.14 avg_sell=40213.61 avg_ratio=1.07
+2026-04-12 23:46:35,767 | INFO | Fetching DOGEUSDT from 2026-04-12 15:45:00 to 2026-04-12 23:46:20.182479
+2026-04-12 23:46:39,558 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241017
+2026-04-12 23:46:39,561 | INFO | [BinanceService] Stats avg_volume=24249910.41 avg_buy=11849812.94 avg_sell=12400097.47 avg_ratio=1.08
+2026-04-12 23:46:40,943 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 15:45:00 to 2026-04-12 23:46:20.182479
+2026-04-12 23:46:44,749 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241017
+2026-04-12 23:46:44,752 | INFO | [BinanceService] Stats avg_volume=384619531.95 avg_buy=188931550.05 avg_sell=195687981.90 avg_ratio=1.06
+2026-04-12 23:46:45,754 | INFO | Sleeping 300s
+2026-04-12 23:51:45,755 | INFO | Cycle 1561 started
+2026-04-12 23:51:45,755 | INFO | Target end_time=2026-04-12 23:51:45.755572
+2026-04-12 23:51:46,161 | INFO | Fetching BTCUSDT from 2026-04-12 15:50:00 to 2026-04-12 23:51:45.755572
+2026-04-12 23:51:49,846 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241018
+2026-04-12 23:51:49,849 | INFO | [BinanceService] Stats avg_volume=752.61 avg_buy=373.74 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 23:51:51,215 | INFO | Fetching ETHUSDT from 2026-04-12 15:50:00 to 2026-04-12 23:51:45.755572
+2026-04-12 23:51:54,929 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241018
+2026-04-12 23:51:54,931 | INFO | [BinanceService] Stats avg_volume=14319.42 avg_buy=7075.43 avg_sell=7243.99 avg_ratio=1.09
+2026-04-12 23:51:56,286 | INFO | Fetching SOLUSDT from 2026-04-12 15:50:00 to 2026-04-12 23:51:45.755572
+2026-04-12 23:51:59,555 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241018
+2026-04-12 23:51:59,559 | INFO | [BinanceService] Stats avg_volume=79118.57 avg_buy=38905.03 avg_sell=40213.54 avg_ratio=1.07
+2026-04-12 23:52:00,916 | INFO | Fetching DOGEUSDT from 2026-04-12 15:50:00 to 2026-04-12 23:51:45.755572
+2026-04-12 23:52:04,269 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241018
+2026-04-12 23:52:04,273 | INFO | [BinanceService] Stats avg_volume=24249839.67 avg_buy=11849785.76 avg_sell=12400053.92 avg_ratio=1.08
+2026-04-12 23:52:05,593 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 15:50:00 to 2026-04-12 23:51:45.755572
+2026-04-12 23:52:08,942 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241018
+2026-04-12 23:52:08,946 | INFO | [BinanceService] Stats avg_volume=384619050.72 avg_buy=188931390.17 avg_sell=195687660.55 avg_ratio=1.06
+2026-04-12 23:52:09,946 | INFO | Sleeping 300s
+2026-04-12 23:57:09,947 | INFO | Cycle 1562 started
+2026-04-12 23:57:09,947 | INFO | Target end_time=2026-04-12 23:57:09.947852
+2026-04-12 23:57:10,269 | INFO | Fetching BTCUSDT from 2026-04-12 15:55:00 to 2026-04-12 23:57:09.947852
+2026-04-12 23:57:13,765 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241019
+2026-04-12 23:57:13,769 | INFO | [BinanceService] Stats avg_volume=752.61 avg_buy=373.74 avg_sell=378.87 avg_ratio=1.12
+2026-04-12 23:57:15,135 | INFO | Fetching ETHUSDT from 2026-04-12 15:55:00 to 2026-04-12 23:57:09.947852
+2026-04-12 23:57:18,618 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241019
+2026-04-12 23:57:18,622 | INFO | [BinanceService] Stats avg_volume=14319.43 avg_buy=7075.45 avg_sell=7243.99 avg_ratio=1.09
+2026-04-12 23:57:19,968 | INFO | Fetching SOLUSDT from 2026-04-12 15:55:00 to 2026-04-12 23:57:09.947852
+2026-04-12 23:57:23,181 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241019
+2026-04-12 23:57:23,184 | INFO | [BinanceService] Stats avg_volume=79118.43 avg_buy=38904.98 avg_sell=40213.45 avg_ratio=1.07
+2026-04-12 23:57:24,542 | INFO | Fetching DOGEUSDT from 2026-04-12 15:55:00 to 2026-04-12 23:57:09.947852
+2026-04-12 23:57:28,359 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241019
+2026-04-12 23:57:28,363 | INFO | [BinanceService] Stats avg_volume=24249783.59 avg_buy=11849764.96 avg_sell=12400018.64 avg_ratio=1.08
+2026-04-12 23:57:29,737 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 15:55:00 to 2026-04-12 23:57:09.947852
+2026-04-12 23:57:33,350 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241019
+2026-04-12 23:57:33,354 | INFO | [BinanceService] Stats avg_volume=384618115.13 avg_buy=188930957.91 avg_sell=195687157.22 avg_ratio=1.06
+2026-04-12 23:57:34,354 | INFO | Sleeping 300s
+2026-04-13 00:02:34,355 | INFO | Cycle 1563 started
+2026-04-13 00:02:34,355 | INFO | Target end_time=2026-04-13 00:02:34.355638
+2026-04-13 00:02:34,690 | INFO | Fetching BTCUSDT from 2026-04-12 16:00:00 to 2026-04-13 00:02:34.355638
+2026-04-13 00:02:38,080 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241020
+2026-04-13 00:02:38,084 | INFO | [BinanceService] Stats avg_volume=752.61 avg_buy=373.74 avg_sell=378.87 avg_ratio=1.12
+2026-04-13 00:02:39,430 | INFO | Fetching ETHUSDT from 2026-04-12 16:00:00 to 2026-04-13 00:02:34.355638
+2026-04-13 00:02:42,793 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241020
+2026-04-13 00:02:42,797 | INFO | [BinanceService] Stats avg_volume=14319.41 avg_buy=7075.44 avg_sell=7243.97 avg_ratio=1.09
+2026-04-13 00:02:44,137 | INFO | Fetching SOLUSDT from 2026-04-12 16:00:00 to 2026-04-13 00:02:34.355638
+2026-04-13 00:02:47,361 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241020
+2026-04-13 00:02:47,364 | INFO | [BinanceService] Stats avg_volume=79118.25 avg_buy=38904.90 avg_sell=40213.36 avg_ratio=1.07
+2026-04-13 00:02:48,727 | INFO | Fetching DOGEUSDT from 2026-04-12 16:00:00 to 2026-04-13 00:02:34.355638
+2026-04-13 00:02:52,185 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241020
+2026-04-13 00:02:52,188 | INFO | [BinanceService] Stats avg_volume=24249729.20 avg_buy=11849736.62 avg_sell=12399992.57 avg_ratio=1.08
+2026-04-13 00:02:53,568 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 16:00:00 to 2026-04-13 00:02:34.355638
+2026-04-13 00:02:57,042 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241020
+2026-04-13 00:02:57,047 | INFO | [BinanceService] Stats avg_volume=384617110.54 avg_buy=188930442.17 avg_sell=195686668.37 avg_ratio=1.06
+2026-04-13 00:02:58,048 | INFO | Sleeping 300s
+2026-04-13 00:07:58,049 | INFO | Cycle 1564 started
+2026-04-13 00:07:58,049 | INFO | Target end_time=2026-04-13 00:07:58.049090
+2026-04-13 00:07:58,407 | INFO | Fetching BTCUSDT from 2026-04-12 16:05:00 to 2026-04-13 00:07:58.049090
+2026-04-13 00:08:01,648 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241021
+2026-04-13 00:08:01,653 | INFO | [BinanceService] Stats avg_volume=752.61 avg_buy=373.74 avg_sell=378.87 avg_ratio=1.12
+2026-04-13 00:08:03,004 | INFO | Fetching ETHUSDT from 2026-04-12 16:05:00 to 2026-04-13 00:07:58.049090
+2026-04-13 00:08:06,257 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241021
+2026-04-13 00:08:06,260 | INFO | [BinanceService] Stats avg_volume=14319.45 avg_buy=7075.46 avg_sell=7243.99 avg_ratio=1.09
+2026-04-13 00:08:07,608 | INFO | Fetching SOLUSDT from 2026-04-12 16:05:00 to 2026-04-13 00:07:58.049090
+2026-04-13 00:08:11,017 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241021
+2026-04-13 00:08:11,020 | INFO | [BinanceService] Stats avg_volume=79118.15 avg_buy=38904.89 avg_sell=40213.27 avg_ratio=1.07
+2026-04-13 00:08:12,388 | INFO | Fetching DOGEUSDT from 2026-04-12 16:05:00 to 2026-04-13 00:07:58.049090
+2026-04-13 00:08:15,840 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241021
+2026-04-13 00:08:15,843 | INFO | [BinanceService] Stats avg_volume=24249687.95 avg_buy=11849727.92 avg_sell=12399960.03 avg_ratio=1.08
+2026-04-13 00:08:17,215 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 16:05:00 to 2026-04-13 00:07:58.049090
+2026-04-13 00:08:20,955 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241021
+2026-04-13 00:08:20,959 | INFO | [BinanceService] Stats avg_volume=384616604.96 avg_buy=188930210.48 avg_sell=195686394.48 avg_ratio=1.06
+2026-04-13 00:08:21,959 | INFO | Sleeping 300s
+2026-04-13 00:13:21,960 | INFO | Cycle 1565 started
+2026-04-13 00:13:21,961 | INFO | Target end_time=2026-04-13 00:13:21.961237
+2026-04-13 00:13:22,331 | INFO | Fetching BTCUSDT from 2026-04-12 16:10:00 to 2026-04-13 00:13:21.961237
+2026-04-13 00:13:25,597 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241022
+2026-04-13 00:13:25,600 | INFO | [BinanceService] Stats avg_volume=752.61 avg_buy=373.74 avg_sell=378.87 avg_ratio=1.12
+2026-04-13 00:13:26,961 | INFO | Fetching ETHUSDT from 2026-04-12 16:10:00 to 2026-04-13 00:13:21.961237
+2026-04-13 00:13:30,360 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241022
+2026-04-13 00:13:30,363 | INFO | [BinanceService] Stats avg_volume=14319.42 avg_buy=7075.45 avg_sell=7243.97 avg_ratio=1.09
+2026-04-13 00:13:31,733 | INFO | Fetching SOLUSDT from 2026-04-12 16:10:00 to 2026-04-13 00:13:21.961237
+2026-04-13 00:13:35,097 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241022
+2026-04-13 00:13:35,100 | INFO | [BinanceService] Stats avg_volume=79117.96 avg_buy=38904.80 avg_sell=40213.16 avg_ratio=1.07
+2026-04-13 00:13:36,477 | INFO | Fetching DOGEUSDT from 2026-04-12 16:10:00 to 2026-04-13 00:13:21.961237
+2026-04-13 00:13:39,768 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241022
+2026-04-13 00:13:39,773 | INFO | [BinanceService] Stats avg_volume=24249667.34 avg_buy=11849744.65 avg_sell=12399922.69 avg_ratio=1.08
+2026-04-13 00:13:41,142 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 16:10:00 to 2026-04-13 00:13:21.961237
+2026-04-13 00:13:44,963 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241022
+2026-04-13 00:13:44,966 | INFO | [BinanceService] Stats avg_volume=384615527.55 avg_buy=188929695.38 avg_sell=195685832.17 avg_ratio=1.06
+2026-04-13 00:13:45,968 | INFO | Sleeping 300s
+2026-04-13 00:18:45,969 | INFO | Cycle 1566 started
+2026-04-13 00:18:45,969 | INFO | Target end_time=2026-04-13 00:18:45.969021
+2026-04-13 00:18:46,323 | INFO | Fetching BTCUSDT from 2026-04-12 16:15:00 to 2026-04-13 00:18:45.969021
+2026-04-13 00:18:49,610 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241023
+2026-04-13 00:18:49,614 | INFO | [BinanceService] Stats avg_volume=752.61 avg_buy=373.74 avg_sell=378.87 avg_ratio=1.12
+2026-04-13 00:18:50,971 | INFO | Fetching ETHUSDT from 2026-04-12 16:15:00 to 2026-04-13 00:18:45.969021
+2026-04-13 00:18:54,128 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241023
+2026-04-13 00:18:54,131 | INFO | [BinanceService] Stats avg_volume=14319.39 avg_buy=7075.44 avg_sell=7243.96 avg_ratio=1.09
+2026-04-13 00:18:55,488 | INFO | Fetching SOLUSDT from 2026-04-12 16:15:00 to 2026-04-13 00:18:45.969021
+2026-04-13 00:18:58,960 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241023
+2026-04-13 00:18:58,964 | INFO | [BinanceService] Stats avg_volume=79117.77 avg_buy=38904.68 avg_sell=40213.09 avg_ratio=1.07
+2026-04-13 00:19:00,335 | INFO | Fetching DOGEUSDT from 2026-04-12 16:15:00 to 2026-04-13 00:18:45.969021
+2026-04-13 00:19:03,601 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241023
+2026-04-13 00:19:03,604 | INFO | [BinanceService] Stats avg_volume=24249605.04 avg_buy=11849711.27 avg_sell=12399893.78 avg_ratio=1.08
+2026-04-13 00:19:04,984 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 16:15:00 to 2026-04-13 00:18:45.969021
+2026-04-13 00:19:08,443 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241023
+2026-04-13 00:19:08,446 | INFO | [BinanceService] Stats avg_volume=384614441.29 avg_buy=188929163.86 avg_sell=195685277.44 avg_ratio=1.06
+2026-04-13 00:19:09,448 | INFO | Sleeping 300s
+2026-04-13 00:24:09,449 | INFO | Cycle 1567 started
+2026-04-13 00:24:09,449 | INFO | Target end_time=2026-04-13 00:24:09.449305
+2026-04-13 00:24:09,799 | INFO | Fetching BTCUSDT from 2026-04-12 16:20:00 to 2026-04-13 00:24:09.449305
+2026-04-13 00:24:13,251 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241024
+2026-04-13 00:24:13,255 | INFO | [BinanceService] Stats avg_volume=752.60 avg_buy=373.74 avg_sell=378.86 avg_ratio=1.12
+2026-04-13 00:24:14,612 | INFO | Fetching ETHUSDT from 2026-04-12 16:20:00 to 2026-04-13 00:24:09.449305
+2026-04-13 00:24:18,313 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241024
+2026-04-13 00:24:18,316 | INFO | [BinanceService] Stats avg_volume=14319.36 avg_buy=7075.42 avg_sell=7243.94 avg_ratio=1.09
+2026-04-13 00:24:19,669 | INFO | Fetching SOLUSDT from 2026-04-12 16:20:00 to 2026-04-13 00:24:09.449305
+2026-04-13 00:24:23,201 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241024
+2026-04-13 00:24:23,205 | INFO | [BinanceService] Stats avg_volume=79117.54 avg_buy=38904.57 avg_sell=40212.97 avg_ratio=1.07
+2026-04-13 00:24:24,542 | INFO | Fetching DOGEUSDT from 2026-04-12 16:20:00 to 2026-04-13 00:24:09.449305
+2026-04-13 00:24:27,839 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241024
+2026-04-13 00:24:27,842 | INFO | [BinanceService] Stats avg_volume=24249535.57 avg_buy=11849681.69 avg_sell=12399853.88 avg_ratio=1.08
+2026-04-13 00:24:29,177 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 16:20:00 to 2026-04-13 00:24:09.449305
+2026-04-13 00:24:32,685 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241024
+2026-04-13 00:24:32,689 | INFO | [BinanceService] Stats avg_volume=384613209.23 avg_buy=188928567.86 avg_sell=195684641.37 avg_ratio=1.06
+2026-04-13 00:24:33,690 | INFO | Sleeping 300s
+2026-04-13 00:29:33,692 | INFO | Cycle 1568 started
+2026-04-13 00:29:33,693 | INFO | Target end_time=2026-04-13 00:29:33.693177
+2026-04-13 00:29:34,045 | INFO | Fetching BTCUSDT from 2026-04-12 16:25:00 to 2026-04-13 00:29:33.693177
+2026-04-13 00:29:37,764 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241025
+2026-04-13 00:29:37,768 | INFO | [BinanceService] Stats avg_volume=752.60 avg_buy=373.74 avg_sell=378.86 avg_ratio=1.12
+2026-04-13 00:29:39,113 | INFO | Fetching ETHUSDT from 2026-04-12 16:25:00 to 2026-04-13 00:29:33.693177
+2026-04-13 00:29:42,505 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241025
+2026-04-13 00:29:42,508 | INFO | [BinanceService] Stats avg_volume=14319.32 avg_buy=7075.40 avg_sell=7243.92 avg_ratio=1.09
+2026-04-13 00:29:43,861 | INFO | Fetching SOLUSDT from 2026-04-12 16:25:00 to 2026-04-13 00:29:33.693177
+2026-04-13 00:29:47,350 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241025
+2026-04-13 00:29:47,353 | INFO | [BinanceService] Stats avg_volume=79117.29 avg_buy=38904.47 avg_sell=40212.82 avg_ratio=1.07
+2026-04-13 00:29:48,715 | INFO | Fetching DOGEUSDT from 2026-04-12 16:25:00 to 2026-04-13 00:29:33.693177
+2026-04-13 00:29:52,101 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241025
+2026-04-13 00:29:52,104 | INFO | [BinanceService] Stats avg_volume=24249456.71 avg_buy=11849647.89 avg_sell=12399808.82 avg_ratio=1.08
+2026-04-13 00:29:53,467 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 16:25:00 to 2026-04-13 00:29:33.693177
+2026-04-13 00:29:57,013 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241025
+2026-04-13 00:29:57,015 | INFO | [BinanceService] Stats avg_volume=384611991.01 avg_buy=188927963.65 avg_sell=195684027.36 avg_ratio=1.06
+2026-04-13 00:29:58,017 | INFO | Sleeping 300s
+2026-04-13 00:34:58,018 | INFO | Cycle 1569 started
+2026-04-13 00:34:58,018 | INFO | Target end_time=2026-04-13 00:34:58.018671
+2026-04-13 00:34:58,371 | INFO | Fetching BTCUSDT from 2026-04-12 16:30:00 to 2026-04-13 00:34:58.018671
+2026-04-13 00:35:01,667 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241026
+2026-04-13 00:35:01,671 | INFO | [BinanceService] Stats avg_volume=752.60 avg_buy=373.74 avg_sell=378.86 avg_ratio=1.12
+2026-04-13 00:35:03,029 | INFO | Fetching ETHUSDT from 2026-04-12 16:30:00 to 2026-04-13 00:34:58.018671
+2026-04-13 00:35:06,424 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241026
+2026-04-13 00:35:06,430 | INFO | [BinanceService] Stats avg_volume=14319.29 avg_buy=7075.38 avg_sell=7243.91 avg_ratio=1.09
+2026-04-13 00:35:07,777 | INFO | Fetching SOLUSDT from 2026-04-12 16:30:00 to 2026-04-13 00:34:58.018671
+2026-04-13 00:35:11,031 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241026
+2026-04-13 00:35:11,035 | INFO | [BinanceService] Stats avg_volume=79117.12 avg_buy=38904.42 avg_sell=40212.70 avg_ratio=1.07
+2026-04-13 00:35:12,399 | INFO | Fetching DOGEUSDT from 2026-04-12 16:30:00 to 2026-04-13 00:34:58.018671
+2026-04-13 00:35:15,768 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241026
+2026-04-13 00:35:15,771 | INFO | [BinanceService] Stats avg_volume=24249377.58 avg_buy=11849611.61 avg_sell=12399765.97 avg_ratio=1.08
+2026-04-13 00:35:17,155 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 16:30:00 to 2026-04-13 00:34:58.018671
+2026-04-13 00:35:20,676 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241026
+2026-04-13 00:35:20,681 | INFO | [BinanceService] Stats avg_volume=384611149.02 avg_buy=188927629.45 avg_sell=195683519.57 avg_ratio=1.06
+2026-04-13 00:35:21,682 | INFO | Sleeping 300s
+2026-04-13 00:40:21,683 | INFO | Cycle 1570 started
+2026-04-13 00:40:21,683 | INFO | Target end_time=2026-04-13 00:40:21.683737
+2026-04-13 00:40:22,043 | INFO | Fetching BTCUSDT from 2026-04-12 16:35:00 to 2026-04-13 00:40:21.683737
+2026-04-13 00:40:25,373 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241028
+2026-04-13 00:40:25,377 | INFO | [BinanceService] Stats avg_volume=752.59 avg_buy=373.73 avg_sell=378.86 avg_ratio=1.12
+2026-04-13 00:40:26,737 | INFO | Fetching ETHUSDT from 2026-04-12 16:35:00 to 2026-04-13 00:40:21.683737
+2026-04-13 00:40:30,059 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241028
+2026-04-13 00:40:30,063 | INFO | [BinanceService] Stats avg_volume=14319.19 avg_buy=7075.33 avg_sell=7243.86 avg_ratio=1.09
+2026-04-13 00:40:31,402 | INFO | Fetching SOLUSDT from 2026-04-12 16:35:00 to 2026-04-13 00:40:21.683737
+2026-04-13 00:40:34,723 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241028
+2026-04-13 00:40:34,728 | INFO | [BinanceService] Stats avg_volume=79116.57 avg_buy=38904.13 avg_sell=40212.44 avg_ratio=1.07
+2026-04-13 00:40:36,087 | INFO | Fetching DOGEUSDT from 2026-04-12 16:35:00 to 2026-04-13 00:40:21.683737
+2026-04-13 00:40:39,489 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241028
+2026-04-13 00:40:39,493 | INFO | [BinanceService] Stats avg_volume=24249200.32 avg_buy=11849521.17 avg_sell=12399679.15 avg_ratio=1.08
+2026-04-13 00:40:40,876 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 16:35:00 to 2026-04-13 00:40:21.683737
+2026-04-13 00:40:44,389 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241028
+2026-04-13 00:40:44,392 | INFO | [BinanceService] Stats avg_volume=384608503.51 avg_buy=188926419.32 avg_sell=195682084.20 avg_ratio=1.06
+2026-04-13 00:40:45,393 | INFO | Sleeping 300s
+2026-04-13 00:45:45,395 | INFO | Cycle 1571 started
+2026-04-13 00:45:45,395 | INFO | Target end_time=2026-04-13 00:45:45.395158
+2026-04-13 00:45:45,741 | INFO | Fetching BTCUSDT from 2026-04-12 16:45:00 to 2026-04-13 00:45:45.395158
+2026-04-13 00:45:49,104 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241029
+2026-04-13 00:45:49,108 | INFO | [BinanceService] Stats avg_volume=752.59 avg_buy=373.73 avg_sell=378.86 avg_ratio=1.12
+2026-04-13 00:45:50,465 | INFO | Fetching ETHUSDT from 2026-04-12 16:45:00 to 2026-04-13 00:45:45.395158
+2026-04-13 00:45:53,971 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241029
+2026-04-13 00:45:53,975 | INFO | [BinanceService] Stats avg_volume=14319.17 avg_buy=7075.33 avg_sell=7243.84 avg_ratio=1.09
+2026-04-13 00:45:55,314 | INFO | Fetching SOLUSDT from 2026-04-12 16:45:00 to 2026-04-13 00:45:45.395158
+2026-04-13 00:45:58,519 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241029
+2026-04-13 00:45:58,522 | INFO | [BinanceService] Stats avg_volume=79116.36 avg_buy=38904.01 avg_sell=40212.35 avg_ratio=1.07
+2026-04-13 00:45:59,874 | INFO | Fetching DOGEUSDT from 2026-04-12 16:45:00 to 2026-04-13 00:45:45.395158
+2026-04-13 00:46:03,128 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241029
+2026-04-13 00:46:03,131 | INFO | [BinanceService] Stats avg_volume=24249154.81 avg_buy=11849500.16 avg_sell=12399654.65 avg_ratio=1.08
+2026-04-13 00:46:04,517 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 16:45:00 to 2026-04-13 00:45:45.395158
+2026-04-13 00:46:07,924 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241029
+2026-04-13 00:46:07,927 | INFO | [BinanceService] Stats avg_volume=384607438.76 avg_buy=188925947.49 avg_sell=195681491.27 avg_ratio=1.06
+2026-04-13 00:46:08,928 | INFO | Sleeping 300s
+2026-04-13 00:51:08,929 | INFO | Cycle 1572 started
+2026-04-13 00:51:08,929 | INFO | Target end_time=2026-04-13 00:51:08.929630
+2026-04-13 00:51:09,284 | INFO | Fetching BTCUSDT from 2026-04-12 16:50:00 to 2026-04-13 00:51:08.929630
+2026-04-13 00:51:12,566 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241030
+2026-04-13 00:51:12,569 | INFO | [BinanceService] Stats avg_volume=752.59 avg_buy=373.73 avg_sell=378.86 avg_ratio=1.12
+2026-04-13 00:51:13,925 | INFO | Fetching ETHUSDT from 2026-04-12 16:50:00 to 2026-04-13 00:51:08.929630
+2026-04-13 00:51:17,381 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241030
+2026-04-13 00:51:17,385 | INFO | [BinanceService] Stats avg_volume=14319.12 avg_buy=7075.31 avg_sell=7243.82 avg_ratio=1.09
+2026-04-13 00:51:18,717 | INFO | Fetching SOLUSDT from 2026-04-12 16:50:00 to 2026-04-13 00:51:08.929630
+2026-04-13 00:51:21,868 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241030
+2026-04-13 00:51:21,872 | INFO | [BinanceService] Stats avg_volume=79116.20 avg_buy=38903.91 avg_sell=40212.28 avg_ratio=1.07
+2026-04-13 00:51:23,211 | INFO | Fetching DOGEUSDT from 2026-04-12 16:50:00 to 2026-04-13 00:51:08.929630
+2026-04-13 00:51:26,618 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241030
+2026-04-13 00:51:26,622 | INFO | [BinanceService] Stats avg_volume=24249075.00 avg_buy=11849463.15 avg_sell=12399611.85 avg_ratio=1.08
+2026-04-13 00:51:27,990 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 16:50:00 to 2026-04-13 00:51:08.929630
+2026-04-13 00:51:31,420 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241030
+2026-04-13 00:51:31,423 | INFO | [BinanceService] Stats avg_volume=384606134.84 avg_buy=188925340.84 avg_sell=195680793.99 avg_ratio=1.06
+2026-04-13 00:51:32,424 | INFO | Sleeping 300s
+2026-04-13 00:56:32,425 | INFO | Cycle 1573 started
+2026-04-13 00:56:32,425 | INFO | Target end_time=2026-04-13 00:56:32.425920
+2026-04-13 00:56:32,766 | INFO | Fetching BTCUSDT from 2026-04-12 16:55:00 to 2026-04-13 00:56:32.425920
+2026-04-13 00:56:35,976 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241031
+2026-04-13 00:56:35,979 | INFO | [BinanceService] Stats avg_volume=752.59 avg_buy=373.73 avg_sell=378.86 avg_ratio=1.12
+2026-04-13 00:56:37,326 | INFO | Fetching ETHUSDT from 2026-04-12 16:55:00 to 2026-04-13 00:56:32.425920
+2026-04-13 00:56:40,698 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241031
+2026-04-13 00:56:40,702 | INFO | [BinanceService] Stats avg_volume=14319.09 avg_buy=7075.28 avg_sell=7243.81 avg_ratio=1.09
+2026-04-13 00:56:42,047 | INFO | Fetching SOLUSDT from 2026-04-12 16:55:00 to 2026-04-13 00:56:32.425920
+2026-04-13 00:56:45,248 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241031
+2026-04-13 00:56:45,252 | INFO | [BinanceService] Stats avg_volume=79116.02 avg_buy=38903.82 avg_sell=40212.20 avg_ratio=1.07
+2026-04-13 00:56:46,602 | INFO | Fetching DOGEUSDT from 2026-04-12 16:55:00 to 2026-04-13 00:56:32.425920
+2026-04-13 00:56:49,914 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241031
+2026-04-13 00:56:49,917 | INFO | [BinanceService] Stats avg_volume=24249000.39 avg_buy=11849422.78 avg_sell=12399577.61 avg_ratio=1.08
+2026-04-13 00:56:51,277 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 16:55:00 to 2026-04-13 00:56:32.425920
+2026-04-13 00:56:54,683 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241031
+2026-04-13 00:56:54,686 | INFO | [BinanceService] Stats avg_volume=384604815.54 avg_buy=188924651.11 avg_sell=195680164.43 avg_ratio=1.06
+2026-04-13 00:56:55,687 | INFO | Sleeping 300s
+2026-04-13 01:01:55,689 | INFO | Cycle 1574 started
+2026-04-13 01:01:55,689 | INFO | Target end_time=2026-04-13 01:01:55.689393
+2026-04-13 01:01:56,028 | INFO | Fetching BTCUSDT from 2026-04-12 17:00:00 to 2026-04-13 01:01:55.689393
+2026-04-13 01:01:59,337 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241032
+2026-04-13 01:01:59,340 | INFO | [BinanceService] Stats avg_volume=752.58 avg_buy=373.73 avg_sell=378.85 avg_ratio=1.12
+2026-04-13 01:02:00,686 | INFO | Fetching ETHUSDT from 2026-04-12 17:00:00 to 2026-04-13 01:01:55.689393
+2026-04-13 01:02:03,951 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241032
+2026-04-13 01:02:03,954 | INFO | [BinanceService] Stats avg_volume=14319.06 avg_buy=7075.27 avg_sell=7243.79 avg_ratio=1.09
+2026-04-13 01:02:05,295 | INFO | Fetching SOLUSDT from 2026-04-12 17:00:00 to 2026-04-13 01:01:55.689393
+2026-04-13 01:02:08,522 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241032
+2026-04-13 01:02:08,526 | INFO | [BinanceService] Stats avg_volume=79115.83 avg_buy=38903.72 avg_sell=40212.11 avg_ratio=1.07
+2026-04-13 01:02:09,879 | INFO | Fetching DOGEUSDT from 2026-04-12 17:00:00 to 2026-04-13 01:01:55.689393
+2026-04-13 01:02:13,145 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241032
+2026-04-13 01:02:13,149 | INFO | [BinanceService] Stats avg_volume=24249024.55 avg_buy=11849481.90 avg_sell=12399542.65 avg_ratio=1.08
+2026-04-13 01:02:14,519 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 17:00:00 to 2026-04-13 01:01:55.689393
+2026-04-13 01:02:17,976 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241032
+2026-04-13 01:02:17,979 | INFO | [BinanceService] Stats avg_volume=384604097.81 avg_buy=188924470.25 avg_sell=195679627.56 avg_ratio=1.06
+2026-04-13 01:02:18,980 | INFO | Sleeping 300s
+2026-04-13 01:07:18,981 | INFO | Cycle 1575 started
+2026-04-13 01:07:18,981 | INFO | Target end_time=2026-04-13 01:07:18.981651
+2026-04-13 01:07:19,325 | INFO | Fetching BTCUSDT from 2026-04-12 17:05:00 to 2026-04-13 01:07:18.981651
+2026-04-13 01:07:22,543 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241033
+2026-04-13 01:07:22,547 | INFO | [BinanceService] Stats avg_volume=752.58 avg_buy=373.73 avg_sell=378.85 avg_ratio=1.12
+2026-04-13 01:07:23,890 | INFO | Fetching ETHUSDT from 2026-04-12 17:05:00 to 2026-04-13 01:07:18.981651
+2026-04-13 01:07:27,145 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241033
+2026-04-13 01:07:27,150 | INFO | [BinanceService] Stats avg_volume=14319.05 avg_buy=7075.27 avg_sell=7243.77 avg_ratio=1.09
+2026-04-13 01:07:28,482 | INFO | Fetching SOLUSDT from 2026-04-12 17:05:00 to 2026-04-13 01:07:18.981651
+2026-04-13 01:07:31,715 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241033
+2026-04-13 01:07:31,720 | INFO | [BinanceService] Stats avg_volume=79115.64 avg_buy=38903.65 avg_sell=40211.99 avg_ratio=1.07
+2026-04-13 01:07:33,071 | INFO | Fetching DOGEUSDT from 2026-04-12 17:05:00 to 2026-04-13 01:07:18.981651
+2026-04-13 01:07:36,315 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241033
+2026-04-13 01:07:36,318 | INFO | [BinanceService] Stats avg_volume=24248965.58 avg_buy=11849456.57 avg_sell=12399509.01 avg_ratio=1.08
+2026-04-13 01:07:37,686 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 17:05:00 to 2026-04-13 01:07:18.981651
+2026-04-13 01:07:41,030 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241033
+2026-04-13 01:07:41,033 | INFO | [BinanceService] Stats avg_volume=384604305.65 avg_buy=188924808.80 avg_sell=195679496.84 avg_ratio=1.06
+2026-04-13 01:07:42,034 | INFO | Sleeping 300s
+2026-04-13 01:12:42,035 | INFO | Cycle 1576 started
+2026-04-13 01:12:42,035 | INFO | Target end_time=2026-04-13 01:12:42.035758
+2026-04-13 01:12:42,384 | INFO | Fetching BTCUSDT from 2026-04-12 17:10:00 to 2026-04-13 01:12:42.035758
+2026-04-13 01:12:45,753 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241034
+2026-04-13 01:12:45,756 | INFO | [BinanceService] Stats avg_volume=752.58 avg_buy=373.73 avg_sell=378.85 avg_ratio=1.12
+2026-04-13 01:12:47,118 | INFO | Fetching ETHUSDT from 2026-04-12 17:10:00 to 2026-04-13 01:12:42.035758
+2026-04-13 01:12:50,525 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241034
+2026-04-13 01:12:50,528 | INFO | [BinanceService] Stats avg_volume=14319.02 avg_buy=7075.26 avg_sell=7243.76 avg_ratio=1.09
+2026-04-13 01:12:51,870 | INFO | Fetching SOLUSDT from 2026-04-12 17:10:00 to 2026-04-13 01:12:42.035758
+2026-04-13 01:12:55,082 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241034
+2026-04-13 01:12:55,086 | INFO | [BinanceService] Stats avg_volume=79115.40 avg_buy=38903.53 avg_sell=40211.88 avg_ratio=1.07
+2026-04-13 01:12:56,448 | INFO | Fetching DOGEUSDT from 2026-04-12 17:10:00 to 2026-04-13 01:12:42.035758
+2026-04-13 01:12:59,797 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241034
+2026-04-13 01:12:59,800 | INFO | [BinanceService] Stats avg_volume=24248902.40 avg_buy=11849420.05 avg_sell=12399482.35 avg_ratio=1.08
+2026-04-13 01:13:01,170 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 17:10:00 to 2026-04-13 01:12:42.035758
+2026-04-13 01:13:04,647 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241034
+2026-04-13 01:13:04,652 | INFO | [BinanceService] Stats avg_volume=384603171.88 avg_buy=188924217.45 avg_sell=195678954.43 avg_ratio=1.06
+2026-04-13 01:13:05,653 | INFO | Sleeping 300s
+2026-04-13 01:18:05,654 | INFO | Cycle 1577 started
+2026-04-13 01:18:05,655 | INFO | Target end_time=2026-04-13 01:18:05.655273
+2026-04-13 01:18:05,991 | INFO | Fetching BTCUSDT from 2026-04-12 17:15:00 to 2026-04-13 01:18:05.655273
+2026-04-13 01:18:09,238 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241035
+2026-04-13 01:18:09,241 | INFO | [BinanceService] Stats avg_volume=752.58 avg_buy=373.73 avg_sell=378.85 avg_ratio=1.12
+2026-04-13 01:18:10,580 | INFO | Fetching ETHUSDT from 2026-04-12 17:15:00 to 2026-04-13 01:18:05.655273
+2026-04-13 01:18:14,120 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241035
+2026-04-13 01:18:14,124 | INFO | [BinanceService] Stats avg_volume=14318.97 avg_buy=7075.23 avg_sell=7243.73 avg_ratio=1.09
+2026-04-13 01:18:15,449 | INFO | Fetching SOLUSDT from 2026-04-12 17:15:00 to 2026-04-13 01:18:05.655273
+2026-04-13 01:18:18,592 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241035
+2026-04-13 01:18:18,596 | INFO | [BinanceService] Stats avg_volume=79115.13 avg_buy=38903.39 avg_sell=40211.74 avg_ratio=1.07
+2026-04-13 01:18:19,939 | INFO | Fetching DOGEUSDT from 2026-04-12 17:15:00 to 2026-04-13 01:18:05.655273
+2026-04-13 01:18:23,261 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241035
+2026-04-13 01:18:23,265 | INFO | [BinanceService] Stats avg_volume=24248831.83 avg_buy=11849388.43 avg_sell=12399443.40 avg_ratio=1.08
+2026-04-13 01:18:24,629 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 17:15:00 to 2026-04-13 01:18:05.655273
+2026-04-13 01:18:27,987 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241035
+2026-04-13 01:18:27,990 | INFO | [BinanceService] Stats avg_volume=384602163.25 avg_buy=188923784.79 avg_sell=195678378.46 avg_ratio=1.06
+2026-04-13 01:18:28,993 | INFO | Sleeping 300s
+2026-04-13 01:23:28,994 | INFO | Cycle 1578 started
+2026-04-13 01:23:28,994 | INFO | Target end_time=2026-04-13 01:23:28.994120
+2026-04-13 01:23:29,347 | INFO | Fetching BTCUSDT from 2026-04-12 17:20:00 to 2026-04-13 01:23:28.994120
+2026-04-13 01:23:32,811 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241036
+2026-04-13 01:23:32,815 | INFO | [BinanceService] Stats avg_volume=752.58 avg_buy=373.73 avg_sell=378.85 avg_ratio=1.12
+2026-04-13 01:23:34,170 | INFO | Fetching ETHUSDT from 2026-04-12 17:20:00 to 2026-04-13 01:23:28.994120
+2026-04-13 01:23:37,529 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241036
+2026-04-13 01:23:37,533 | INFO | [BinanceService] Stats avg_volume=14318.95 avg_buy=7075.23 avg_sell=7243.72 avg_ratio=1.09
+2026-04-13 01:23:38,858 | INFO | Fetching SOLUSDT from 2026-04-12 17:20:00 to 2026-04-13 01:23:28.994120
+2026-04-13 01:23:42,102 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241036
+2026-04-13 01:23:42,105 | INFO | [BinanceService] Stats avg_volume=79114.91 avg_buy=38903.32 avg_sell=40211.60 avg_ratio=1.07
+2026-04-13 01:23:43,434 | INFO | Fetching DOGEUSDT from 2026-04-12 17:20:00 to 2026-04-13 01:23:28.994120
+2026-04-13 01:23:46,662 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241036
+2026-04-13 01:23:46,665 | INFO | [BinanceService] Stats avg_volume=24248765.54 avg_buy=11849363.99 avg_sell=12399401.56 avg_ratio=1.08
+2026-04-13 01:23:48,032 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 17:20:00 to 2026-04-13 01:23:28.994120
+2026-04-13 01:23:51,334 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241036
+2026-04-13 01:23:51,338 | INFO | [BinanceService] Stats avg_volume=384601230.55 avg_buy=188923340.10 avg_sell=195677890.45 avg_ratio=1.06
+2026-04-13 01:23:52,340 | INFO | Sleeping 300s
+2026-04-13 01:28:52,341 | INFO | Cycle 1579 started
+2026-04-13 01:28:52,341 | INFO | Target end_time=2026-04-13 01:28:52.341640
+2026-04-13 01:28:52,687 | INFO | Fetching BTCUSDT from 2026-04-12 17:25:00 to 2026-04-13 01:28:52.341640
+2026-04-13 01:28:56,289 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241037
+2026-04-13 01:28:56,293 | INFO | [BinanceService] Stats avg_volume=752.57 avg_buy=373.72 avg_sell=378.85 avg_ratio=1.12
+2026-04-13 01:28:57,651 | INFO | Fetching ETHUSDT from 2026-04-12 17:25:00 to 2026-04-13 01:28:52.341640
+2026-04-13 01:29:02,192 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241037
+2026-04-13 01:29:02,195 | INFO | [BinanceService] Stats avg_volume=14318.93 avg_buy=7075.23 avg_sell=7243.71 avg_ratio=1.09
+2026-04-13 01:29:03,543 | INFO | Fetching SOLUSDT from 2026-04-12 17:25:00 to 2026-04-13 01:28:52.341640
+2026-04-13 01:29:07,116 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241037
+2026-04-13 01:29:07,120 | INFO | [BinanceService] Stats avg_volume=79114.79 avg_buy=38903.30 avg_sell=40211.49 avg_ratio=1.07
+2026-04-13 01:29:08,457 | INFO | Fetching DOGEUSDT from 2026-04-12 17:25:00 to 2026-04-13 01:28:52.341640
+2026-04-13 01:29:11,792 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241037
+2026-04-13 01:29:11,795 | INFO | [BinanceService] Stats avg_volume=24248696.20 avg_buy=11849330.17 avg_sell=12399366.03 avg_ratio=1.08
+2026-04-13 01:29:13,154 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 17:25:00 to 2026-04-13 01:28:52.341640
+2026-04-13 01:29:16,459 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241037
+2026-04-13 01:29:16,462 | INFO | [BinanceService] Stats avg_volume=384600060.58 avg_buy=188922770.42 avg_sell=195677290.16 avg_ratio=1.06
+2026-04-13 01:29:17,463 | INFO | Sleeping 300s
+2026-04-13 01:34:17,464 | INFO | Cycle 1580 started
+2026-04-13 01:34:17,464 | INFO | Target end_time=2026-04-13 01:34:17.464971
+2026-04-13 01:34:17,834 | INFO | Fetching BTCUSDT from 2026-04-12 17:30:00 to 2026-04-13 01:34:17.464971
+2026-04-13 01:34:21,466 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241038
+2026-04-13 01:34:21,469 | INFO | [BinanceService] Stats avg_volume=752.57 avg_buy=373.72 avg_sell=378.85 avg_ratio=1.12
+2026-04-13 01:34:22,806 | INFO | Fetching ETHUSDT from 2026-04-12 17:30:00 to 2026-04-13 01:34:17.464971
+2026-04-13 01:34:26,236 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241038
+2026-04-13 01:34:26,239 | INFO | [BinanceService] Stats avg_volume=14318.97 avg_buy=7075.26 avg_sell=7243.71 avg_ratio=1.09
+2026-04-13 01:34:27,597 | INFO | Fetching SOLUSDT from 2026-04-12 17:30:00 to 2026-04-13 01:34:17.464971
+2026-04-13 01:34:30,909 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241038
+2026-04-13 01:34:30,914 | INFO | [BinanceService] Stats avg_volume=79114.62 avg_buy=38903.24 avg_sell=40211.38 avg_ratio=1.07
+2026-04-13 01:34:32,255 | INFO | Fetching DOGEUSDT from 2026-04-12 17:30:00 to 2026-04-13 01:34:17.464971
+2026-04-13 01:34:35,620 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241038
+2026-04-13 01:34:35,622 | INFO | [BinanceService] Stats avg_volume=24248643.38 avg_buy=11849304.74 avg_sell=12399338.64 avg_ratio=1.08
+2026-04-13 01:34:37,005 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 17:30:00 to 2026-04-13 01:34:17.464971
+2026-04-13 01:34:40,725 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241038
+2026-04-13 01:34:40,728 | INFO | [BinanceService] Stats avg_volume=384599002.35 avg_buy=188922281.97 avg_sell=195676720.38 avg_ratio=1.06
+2026-04-13 01:34:41,730 | INFO | Sleeping 300s
+2026-04-13 01:39:41,731 | INFO | Cycle 1581 started
+2026-04-13 01:39:41,731 | INFO | Target end_time=2026-04-13 01:39:41.731250
+2026-04-13 01:39:42,077 | INFO | Fetching BTCUSDT from 2026-04-12 17:35:00 to 2026-04-13 01:39:41.731250
+2026-04-13 01:39:45,238 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241039
+2026-04-13 01:39:45,241 | INFO | [BinanceService] Stats avg_volume=752.57 avg_buy=373.72 avg_sell=378.85 avg_ratio=1.12
+2026-04-13 01:39:46,581 | INFO | Fetching ETHUSDT from 2026-04-12 17:35:00 to 2026-04-13 01:39:41.731250
+2026-04-13 01:39:50,026 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241039
+2026-04-13 01:39:50,030 | INFO | [BinanceService] Stats avg_volume=14318.96 avg_buy=7075.26 avg_sell=7243.70 avg_ratio=1.09
+2026-04-13 01:39:51,381 | INFO | Fetching SOLUSDT from 2026-04-12 17:35:00 to 2026-04-13 01:39:41.731250
+2026-04-13 01:39:54,888 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241039
+2026-04-13 01:39:54,891 | INFO | [BinanceService] Stats avg_volume=79114.49 avg_buy=38903.17 avg_sell=40211.32 avg_ratio=1.07
+2026-04-13 01:39:56,238 | INFO | Fetching DOGEUSDT from 2026-04-12 17:35:00 to 2026-04-13 01:39:41.731250
+2026-04-13 01:39:59,554 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241039
+2026-04-13 01:39:59,558 | INFO | [BinanceService] Stats avg_volume=24248573.03 avg_buy=11849270.04 avg_sell=12399302.99 avg_ratio=1.08
+2026-04-13 01:40:00,928 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 17:35:00 to 2026-04-13 01:39:41.731250
+2026-04-13 01:40:04,261 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241039
+2026-04-13 01:40:04,265 | INFO | [BinanceService] Stats avg_volume=384597810.56 avg_buy=188921742.29 avg_sell=195676068.27 avg_ratio=1.06
+2026-04-13 01:40:05,266 | INFO | Sleeping 300s
+2026-04-13 01:45:05,267 | INFO | Cycle 1582 started
+2026-04-13 01:45:05,267 | INFO | Target end_time=2026-04-13 01:45:05.267180
+2026-04-13 01:45:05,593 | INFO | Fetching BTCUSDT from 2026-04-12 17:40:00 to 2026-04-13 01:45:05.267180
+2026-04-13 01:45:08,684 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241041
+2026-04-13 01:45:08,688 | INFO | [BinanceService] Stats avg_volume=752.56 avg_buy=373.72 avg_sell=378.84 avg_ratio=1.12
+2026-04-13 01:45:10,016 | INFO | Fetching ETHUSDT from 2026-04-12 17:40:00 to 2026-04-13 01:45:05.267180
+2026-04-13 01:45:13,168 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241041
+2026-04-13 01:45:13,171 | INFO | [BinanceService] Stats avg_volume=14318.86 avg_buy=7075.21 avg_sell=7243.65 avg_ratio=1.09
+2026-04-13 01:45:14,497 | INFO | Fetching SOLUSDT from 2026-04-12 17:40:00 to 2026-04-13 01:45:05.267180
+2026-04-13 01:45:17,523 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241041
+2026-04-13 01:45:17,526 | INFO | [BinanceService] Stats avg_volume=79113.92 avg_buy=38902.90 avg_sell=40211.02 avg_ratio=1.07
+2026-04-13 01:45:18,859 | INFO | Fetching DOGEUSDT from 2026-04-12 17:40:00 to 2026-04-13 01:45:05.267180
+2026-04-13 01:45:22,045 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241041
+2026-04-13 01:45:22,049 | INFO | [BinanceService] Stats avg_volume=24248411.16 avg_buy=11849196.58 avg_sell=12399214.58 avg_ratio=1.08
+2026-04-13 01:45:23,396 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 17:40:00 to 2026-04-13 01:45:05.267180
+2026-04-13 01:45:26,683 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241041
+2026-04-13 01:45:26,687 | INFO | [BinanceService] Stats avg_volume=384594967.81 avg_buy=188920378.41 avg_sell=195674589.41 avg_ratio=1.06
+2026-04-13 01:45:27,687 | INFO | Sleeping 300s
+2026-04-13 01:50:27,688 | INFO | Cycle 1583 started
+2026-04-13 01:50:27,688 | INFO | Target end_time=2026-04-13 01:50:27.688512
+2026-04-13 01:50:28,054 | INFO | Fetching BTCUSDT from 2026-04-12 17:50:00 to 2026-04-13 01:50:27.688512
+2026-04-13 01:50:31,533 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241042
+2026-04-13 01:50:31,537 | INFO | [BinanceService] Stats avg_volume=752.56 avg_buy=373.72 avg_sell=378.84 avg_ratio=1.12
+2026-04-13 01:50:32,892 | INFO | Fetching ETHUSDT from 2026-04-12 17:50:00 to 2026-04-13 01:50:27.688512
+2026-04-13 01:50:36,417 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241042
+2026-04-13 01:50:36,421 | INFO | [BinanceService] Stats avg_volume=14318.83 avg_buy=7075.19 avg_sell=7243.63 avg_ratio=1.09
+2026-04-13 01:50:37,769 | INFO | Fetching SOLUSDT from 2026-04-12 17:50:00 to 2026-04-13 01:50:27.688512
+2026-04-13 01:50:41,209 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241042
+2026-04-13 01:50:41,212 | INFO | [BinanceService] Stats avg_volume=79113.71 avg_buy=38902.80 avg_sell=40210.91 avg_ratio=1.07
+2026-04-13 01:50:42,584 | INFO | Fetching DOGEUSDT from 2026-04-12 17:50:00 to 2026-04-13 01:50:27.688512
+2026-04-13 01:50:45,931 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241042
+2026-04-13 01:50:45,935 | INFO | [BinanceService] Stats avg_volume=24248344.13 avg_buy=11849169.56 avg_sell=12399174.56 avg_ratio=1.08
+2026-04-13 01:50:47,308 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 17:50:00 to 2026-04-13 01:50:27.688512
+2026-04-13 01:50:50,857 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241042
+2026-04-13 01:50:50,861 | INFO | [BinanceService] Stats avg_volume=384594159.71 avg_buy=188920174.72 avg_sell=195673984.99 avg_ratio=1.06
+2026-04-13 01:50:51,862 | INFO | Sleeping 300s
+2026-04-13 01:55:51,864 | INFO | Cycle 1584 started
+2026-04-13 01:55:51,864 | INFO | Target end_time=2026-04-13 01:55:51.864337
+2026-04-13 01:55:52,216 | INFO | Fetching BTCUSDT from 2026-04-12 17:55:00 to 2026-04-13 01:55:51.864337
+2026-04-13 01:55:55,813 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241043
+2026-04-13 01:55:55,817 | INFO | [BinanceService] Stats avg_volume=752.57 avg_buy=373.72 avg_sell=378.84 avg_ratio=1.12
+2026-04-13 01:55:57,173 | INFO | Fetching ETHUSDT from 2026-04-12 17:55:00 to 2026-04-13 01:55:51.864337
+2026-04-13 01:56:00,913 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241043
+2026-04-13 01:56:00,917 | INFO | [BinanceService] Stats avg_volume=14319.00 avg_buy=7075.29 avg_sell=7243.71 avg_ratio=1.09
+2026-04-13 01:56:02,255 | INFO | Fetching SOLUSDT from 2026-04-12 17:55:00 to 2026-04-13 01:55:51.864337
+2026-04-13 01:56:05,557 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241043
+2026-04-13 01:56:05,561 | INFO | [BinanceService] Stats avg_volume=79114.41 avg_buy=38903.37 avg_sell=40211.04 avg_ratio=1.07
+2026-04-13 01:56:06,923 | INFO | Fetching DOGEUSDT from 2026-04-12 17:55:00 to 2026-04-13 01:55:51.864337
+2026-04-13 01:56:10,345 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241043
+2026-04-13 01:56:10,348 | INFO | [BinanceService] Stats avg_volume=24248350.62 avg_buy=11849182.47 avg_sell=12399168.14 avg_ratio=1.08
+2026-04-13 01:56:11,724 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 17:55:00 to 2026-04-13 01:55:51.864337
+2026-04-13 01:56:15,704 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241043
+2026-04-13 01:56:15,707 | INFO | [BinanceService] Stats avg_volume=384596567.40 avg_buy=188921986.98 avg_sell=195674580.42 avg_ratio=1.06
+2026-04-13 01:56:16,708 | INFO | Sleeping 300s
+2026-04-13 02:01:16,709 | INFO | Cycle 1585 started
+2026-04-13 02:01:16,709 | INFO | Target end_time=2026-04-13 02:01:16.709703
+2026-04-13 02:01:17,048 | INFO | Fetching BTCUSDT from 2026-04-12 18:00:00 to 2026-04-13 02:01:16.709703
+2026-04-13 02:01:20,515 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241044
+2026-04-13 02:01:20,519 | INFO | [BinanceService] Stats avg_volume=752.56 avg_buy=373.72 avg_sell=378.84 avg_ratio=1.12
+2026-04-13 02:01:21,878 | INFO | Fetching ETHUSDT from 2026-04-12 18:00:00 to 2026-04-13 02:01:16.709703
+2026-04-13 02:01:25,894 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241044
+2026-04-13 02:01:25,898 | INFO | [BinanceService] Stats avg_volume=14319.03 avg_buy=7075.30 avg_sell=7243.73 avg_ratio=1.09
+2026-04-13 02:01:27,256 | INFO | Fetching SOLUSDT from 2026-04-12 18:00:00 to 2026-04-13 02:01:16.709703
+2026-04-13 02:01:30,624 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241044
+2026-04-13 02:01:30,626 | INFO | [BinanceService] Stats avg_volume=79114.33 avg_buy=38903.37 avg_sell=40210.96 avg_ratio=1.07
+2026-04-13 02:01:32,007 | INFO | Fetching DOGEUSDT from 2026-04-12 18:00:00 to 2026-04-13 02:01:16.709703
+2026-04-13 02:01:35,852 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241044
+2026-04-13 02:01:35,855 | INFO | [BinanceService] Stats avg_volume=24248371.58 avg_buy=11849169.30 avg_sell=12399202.28 avg_ratio=1.08
+2026-04-13 02:01:37,227 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 18:00:00 to 2026-04-13 02:01:16.709703
+2026-04-13 02:01:41,289 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241044
+2026-04-13 02:01:41,293 | INFO | [BinanceService] Stats avg_volume=384596101.12 avg_buy=188921873.53 avg_sell=195674227.59 avg_ratio=1.06
+2026-04-13 02:01:42,295 | INFO | Sleeping 300s
+2026-04-13 02:06:42,296 | INFO | Cycle 1586 started
+2026-04-13 02:06:42,296 | INFO | Target end_time=2026-04-13 02:06:42.296667
+2026-04-13 02:06:42,760 | INFO | Fetching BTCUSDT from 2026-04-12 18:05:00 to 2026-04-13 02:06:42.296667
+2026-04-13 02:06:46,212 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241045
+2026-04-13 02:06:46,216 | INFO | [BinanceService] Stats avg_volume=752.56 avg_buy=373.72 avg_sell=378.84 avg_ratio=1.12
+2026-04-13 02:06:47,591 | INFO | Fetching ETHUSDT from 2026-04-12 18:05:00 to 2026-04-13 02:06:42.296667
+2026-04-13 02:06:51,158 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241045
+2026-04-13 02:06:51,162 | INFO | [BinanceService] Stats avg_volume=14319.04 avg_buy=7075.31 avg_sell=7243.73 avg_ratio=1.09
+2026-04-13 02:06:52,516 | INFO | Fetching SOLUSDT from 2026-04-12 18:05:00 to 2026-04-13 02:06:42.296667
+2026-04-13 02:06:55,860 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241045
+2026-04-13 02:06:55,863 | INFO | [BinanceService] Stats avg_volume=79114.44 avg_buy=38903.41 avg_sell=40211.03 avg_ratio=1.07
+2026-04-13 02:06:57,234 | INFO | Fetching DOGEUSDT from 2026-04-12 18:05:00 to 2026-04-13 02:06:42.296667
+2026-04-13 02:07:00,603 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241045
+2026-04-13 02:07:00,606 | INFO | [BinanceService] Stats avg_volume=24248364.82 avg_buy=11849180.57 avg_sell=12399184.25 avg_ratio=1.08
+2026-04-13 02:07:01,995 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 18:05:00 to 2026-04-13 02:06:42.296667
+2026-04-13 02:07:05,810 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241045
+2026-04-13 02:07:05,814 | INFO | [BinanceService] Stats avg_volume=384595721.56 avg_buy=188921835.65 avg_sell=195673885.90 avg_ratio=1.06
+2026-04-13 02:07:06,816 | INFO | Sleeping 300s
+2026-04-13 02:12:06,818 | INFO | Cycle 1587 started
+2026-04-13 02:12:06,818 | INFO | Target end_time=2026-04-13 02:12:06.818301
+2026-04-13 02:12:07,187 | INFO | Fetching BTCUSDT from 2026-04-12 18:10:00 to 2026-04-13 02:12:06.818301
+2026-04-13 02:12:10,854 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241046
+2026-04-13 02:12:10,857 | INFO | [BinanceService] Stats avg_volume=752.56 avg_buy=373.72 avg_sell=378.84 avg_ratio=1.12
+2026-04-13 02:12:12,213 | INFO | Fetching ETHUSDT from 2026-04-12 18:10:00 to 2026-04-13 02:12:06.818301
+2026-04-13 02:12:15,660 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241046
+2026-04-13 02:12:15,663 | INFO | [BinanceService] Stats avg_volume=14319.02 avg_buy=7075.29 avg_sell=7243.72 avg_ratio=1.09
+2026-04-13 02:12:17,016 | INFO | Fetching SOLUSDT from 2026-04-12 18:10:00 to 2026-04-13 02:12:06.818301
+2026-04-13 02:12:20,466 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241046
+2026-04-13 02:12:20,469 | INFO | [BinanceService] Stats avg_volume=79114.24 avg_buy=38903.31 avg_sell=40210.93 avg_ratio=1.07
+2026-04-13 02:12:21,843 | INFO | Fetching DOGEUSDT from 2026-04-12 18:10:00 to 2026-04-13 02:12:06.818301
+2026-04-13 02:12:25,281 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241046
+2026-04-13 02:12:25,284 | INFO | [BinanceService] Stats avg_volume=24248298.19 avg_buy=11849145.74 avg_sell=12399152.45 avg_ratio=1.08
+2026-04-13 02:12:26,674 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 18:10:00 to 2026-04-13 02:12:06.818301
+2026-04-13 02:12:30,249 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241046
+2026-04-13 02:12:30,252 | INFO | [BinanceService] Stats avg_volume=384594989.52 avg_buy=188921435.78 avg_sell=195673553.75 avg_ratio=1.06
+2026-04-13 02:12:31,254 | INFO | Sleeping 300s
+2026-04-13 02:17:31,254 | INFO | Cycle 1588 started
+2026-04-13 02:17:31,254 | INFO | Target end_time=2026-04-13 02:17:31.254791
+2026-04-13 02:17:31,614 | INFO | Fetching BTCUSDT from 2026-04-12 18:15:00 to 2026-04-13 02:17:31.254791
+2026-04-13 02:17:35,157 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241047
+2026-04-13 02:17:35,161 | INFO | [BinanceService] Stats avg_volume=752.56 avg_buy=373.72 avg_sell=378.84 avg_ratio=1.12
+2026-04-13 02:17:36,511 | INFO | Fetching ETHUSDT from 2026-04-12 18:15:00 to 2026-04-13 02:17:31.254791
+2026-04-13 02:17:40,275 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241047
+2026-04-13 02:17:40,279 | INFO | [BinanceService] Stats avg_volume=14318.99 avg_buy=7075.29 avg_sell=7243.71 avg_ratio=1.09
+2026-04-13 02:17:41,622 | INFO | Fetching SOLUSDT from 2026-04-12 18:15:00 to 2026-04-13 02:17:31.254791
+2026-04-13 02:17:45,242 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241047
+2026-04-13 02:17:45,246 | INFO | [BinanceService] Stats avg_volume=79114.17 avg_buy=38903.33 avg_sell=40210.85 avg_ratio=1.07
+2026-04-13 02:17:46,599 | INFO | Fetching DOGEUSDT from 2026-04-12 18:15:00 to 2026-04-13 02:17:31.254791
+2026-04-13 02:17:50,063 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241047
+2026-04-13 02:17:50,066 | INFO | [BinanceService] Stats avg_volume=24248233.32 avg_buy=11849120.54 avg_sell=12399112.78 avg_ratio=1.08
+2026-04-13 02:17:51,443 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 18:15:00 to 2026-04-13 02:17:31.254791
+2026-04-13 02:17:55,016 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241047
+2026-04-13 02:17:55,020 | INFO | [BinanceService] Stats avg_volume=384594152.55 avg_buy=188920996.33 avg_sell=195673156.22 avg_ratio=1.06
+2026-04-13 02:17:56,021 | INFO | Sleeping 300s
+2026-04-13 02:22:56,022 | INFO | Cycle 1589 started
+2026-04-13 02:22:56,022 | INFO | Target end_time=2026-04-13 02:22:56.022810
+2026-04-13 02:22:56,371 | INFO | Fetching BTCUSDT from 2026-04-12 18:20:00 to 2026-04-13 02:22:56.022810
+2026-04-13 02:22:59,891 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241048
+2026-04-13 02:22:59,893 | INFO | [BinanceService] Stats avg_volume=752.56 avg_buy=373.72 avg_sell=378.84 avg_ratio=1.12
+2026-04-13 02:23:01,249 | INFO | Fetching ETHUSDT from 2026-04-12 18:20:00 to 2026-04-13 02:22:56.022810
+2026-04-13 02:23:05,034 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241048
+2026-04-13 02:23:05,041 | INFO | [BinanceService] Stats avg_volume=14318.98 avg_buy=7075.27 avg_sell=7243.71 avg_ratio=1.09
+2026-04-13 02:23:06,388 | INFO | Fetching SOLUSDT from 2026-04-12 18:20:00 to 2026-04-13 02:22:56.022810
+2026-04-13 02:23:09,813 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241048
+2026-04-13 02:23:09,816 | INFO | [BinanceService] Stats avg_volume=79113.95 avg_buy=38903.20 avg_sell=40210.75 avg_ratio=1.07
+2026-04-13 02:23:11,173 | INFO | Fetching DOGEUSDT from 2026-04-12 18:20:00 to 2026-04-13 02:22:56.022810
+2026-04-13 02:23:14,475 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241048
+2026-04-13 02:23:14,478 | INFO | [BinanceService] Stats avg_volume=24248164.66 avg_buy=11849082.44 avg_sell=12399082.22 avg_ratio=1.08
+2026-04-13 02:23:15,852 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 18:20:00 to 2026-04-13 02:22:56.022810
+2026-04-13 02:23:19,292 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241048
+2026-04-13 02:23:19,296 | INFO | [BinanceService] Stats avg_volume=384593590.89 avg_buy=188920650.44 avg_sell=195672940.45 avg_ratio=1.06
+2026-04-13 02:23:20,298 | INFO | Sleeping 300s
+2026-04-13 02:28:20,299 | INFO | Cycle 1590 started
+2026-04-13 02:28:20,299 | INFO | Target end_time=2026-04-13 02:28:20.299131
+2026-04-13 02:28:20,646 | INFO | Fetching BTCUSDT from 2026-04-12 18:25:00 to 2026-04-13 02:28:20.299131
+2026-04-13 02:28:24,156 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241049
+2026-04-13 02:28:24,160 | INFO | [BinanceService] Stats avg_volume=752.56 avg_buy=373.72 avg_sell=378.84 avg_ratio=1.12
+2026-04-13 02:28:25,530 | INFO | Fetching ETHUSDT from 2026-04-12 18:25:00 to 2026-04-13 02:28:20.299131
+2026-04-13 02:28:29,400 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241049
+2026-04-13 02:28:29,404 | INFO | [BinanceService] Stats avg_volume=14318.94 avg_buy=7075.25 avg_sell=7243.69 avg_ratio=1.09
+2026-04-13 02:28:30,755 | INFO | Fetching SOLUSDT from 2026-04-12 18:25:00 to 2026-04-13 02:28:20.299131
+2026-04-13 02:28:34,142 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241049
+2026-04-13 02:28:34,146 | INFO | [BinanceService] Stats avg_volume=79113.76 avg_buy=38903.12 avg_sell=40210.65 avg_ratio=1.07
+2026-04-13 02:28:35,503 | INFO | Fetching DOGEUSDT from 2026-04-12 18:25:00 to 2026-04-13 02:28:20.299131
+2026-04-13 02:28:38,912 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241049
+2026-04-13 02:28:38,916 | INFO | [BinanceService] Stats avg_volume=24248094.34 avg_buy=11849050.52 avg_sell=12399043.83 avg_ratio=1.08
+2026-04-13 02:28:40,303 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 18:25:00 to 2026-04-13 02:28:20.299131
+2026-04-13 02:28:43,921 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241049
+2026-04-13 02:28:43,924 | INFO | [BinanceService] Stats avg_volume=384592704.62 avg_buy=188920186.00 avg_sell=195672518.61 avg_ratio=1.06
+2026-04-13 02:28:44,925 | INFO | Sleeping 300s
+2026-04-13 02:33:44,926 | INFO | Cycle 1591 started
+2026-04-13 02:33:44,926 | INFO | Target end_time=2026-04-13 02:33:44.926446
+2026-04-13 02:33:45,276 | INFO | Fetching BTCUSDT from 2026-04-12 18:30:00 to 2026-04-13 02:33:44.926446
+2026-04-13 02:33:48,971 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241050
+2026-04-13 02:33:48,974 | INFO | [BinanceService] Stats avg_volume=752.55 avg_buy=373.72 avg_sell=378.84 avg_ratio=1.12
+2026-04-13 02:33:50,330 | INFO | Fetching ETHUSDT from 2026-04-12 18:30:00 to 2026-04-13 02:33:44.926446
+2026-04-13 02:33:53,776 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241050
+2026-04-13 02:33:53,779 | INFO | [BinanceService] Stats avg_volume=14318.91 avg_buy=7075.23 avg_sell=7243.67 avg_ratio=1.09
+2026-04-13 02:33:55,123 | INFO | Fetching SOLUSDT from 2026-04-12 18:30:00 to 2026-04-13 02:33:44.926446
+2026-04-13 02:33:58,741 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241050
+2026-04-13 02:33:58,745 | INFO | [BinanceService] Stats avg_volume=79113.57 avg_buy=38903.04 avg_sell=40210.53 avg_ratio=1.07
+2026-04-13 02:34:00,097 | INFO | Fetching DOGEUSDT from 2026-04-12 18:30:00 to 2026-04-13 02:33:44.926446
+2026-04-13 02:34:03,436 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241050
+2026-04-13 02:34:03,439 | INFO | [BinanceService] Stats avg_volume=24248016.67 avg_buy=11849012.15 avg_sell=12399004.52 avg_ratio=1.08
+2026-04-13 02:34:04,809 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 18:30:00 to 2026-04-13 02:33:44.926446
+2026-04-13 02:34:08,365 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241050
+2026-04-13 02:34:08,368 | INFO | [BinanceService] Stats avg_volume=384591683.98 avg_buy=188919720.89 avg_sell=195671963.09 avg_ratio=1.06
+2026-04-13 02:34:09,370 | INFO | Sleeping 300s
+2026-04-13 02:39:09,371 | INFO | Cycle 1592 started
+2026-04-13 02:39:09,372 | INFO | Target end_time=2026-04-13 02:39:09.372672
+2026-04-13 02:39:09,731 | INFO | Fetching BTCUSDT from 2026-04-12 18:35:00 to 2026-04-13 02:39:09.372672
+2026-04-13 02:39:13,313 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241051
+2026-04-13 02:39:13,316 | INFO | [BinanceService] Stats avg_volume=752.55 avg_buy=373.72 avg_sell=378.84 avg_ratio=1.12
+2026-04-13 02:39:14,677 | INFO | Fetching ETHUSDT from 2026-04-12 18:35:00 to 2026-04-13 02:39:09.372672
+2026-04-13 02:39:18,004 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241051
+2026-04-13 02:39:18,009 | INFO | [BinanceService] Stats avg_volume=14318.88 avg_buy=7075.23 avg_sell=7243.65 avg_ratio=1.09
+2026-04-13 02:39:19,366 | INFO | Fetching SOLUSDT from 2026-04-12 18:35:00 to 2026-04-13 02:39:09.372672
+2026-04-13 02:39:22,598 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241051
+2026-04-13 02:39:22,601 | INFO | [BinanceService] Stats avg_volume=79113.51 avg_buy=38903.10 avg_sell=40210.41 avg_ratio=1.07
+2026-04-13 02:39:23,962 | INFO | Fetching DOGEUSDT from 2026-04-12 18:35:00 to 2026-04-13 02:39:09.372672
+2026-04-13 02:39:27,313 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241051
+2026-04-13 02:39:27,317 | INFO | [BinanceService] Stats avg_volume=24247975.54 avg_buy=11849012.71 avg_sell=12398962.84 avg_ratio=1.08
+2026-04-13 02:39:28,699 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 18:35:00 to 2026-04-13 02:39:09.372672
+2026-04-13 02:39:32,178 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241051
+2026-04-13 02:39:32,181 | INFO | [BinanceService] Stats avg_volume=384590665.55 avg_buy=188919287.80 avg_sell=195671377.75 avg_ratio=1.06
+2026-04-13 02:39:33,182 | INFO | Sleeping 300s
+2026-04-13 02:44:33,184 | INFO | Cycle 1593 started
+2026-04-13 02:44:33,184 | INFO | Target end_time=2026-04-13 02:44:33.184364
+2026-04-13 02:44:33,545 | INFO | Fetching BTCUSDT from 2026-04-12 18:40:00 to 2026-04-13 02:44:33.184364
+2026-04-13 02:44:37,015 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241052
+2026-04-13 02:44:37,019 | INFO | [BinanceService] Stats avg_volume=752.55 avg_buy=373.71 avg_sell=378.83 avg_ratio=1.12
+2026-04-13 02:44:38,378 | INFO | Fetching ETHUSDT from 2026-04-12 18:40:00 to 2026-04-13 02:44:33.184364
+2026-04-13 02:44:42,085 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241052
+2026-04-13 02:44:42,088 | INFO | [BinanceService] Stats avg_volume=14318.85 avg_buy=7075.21 avg_sell=7243.64 avg_ratio=1.09
+2026-04-13 02:44:43,441 | INFO | Fetching SOLUSDT from 2026-04-12 18:40:00 to 2026-04-13 02:44:33.184364
+2026-04-13 02:44:46,910 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241052
+2026-04-13 02:44:46,913 | INFO | [BinanceService] Stats avg_volume=79113.32 avg_buy=38903.01 avg_sell=40210.31 avg_ratio=1.07
+2026-04-13 02:44:48,277 | INFO | Fetching DOGEUSDT from 2026-04-12 18:40:00 to 2026-04-13 02:44:33.184364
+2026-04-13 02:44:51,747 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241052
+2026-04-13 02:44:51,750 | INFO | [BinanceService] Stats avg_volume=24247980.48 avg_buy=11849011.41 avg_sell=12398969.07 avg_ratio=1.08
+2026-04-13 02:44:53,127 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 18:40:00 to 2026-04-13 02:44:33.184364
+2026-04-13 02:44:56,676 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241052
+2026-04-13 02:44:56,678 | INFO | [BinanceService] Stats avg_volume=384589533.92 avg_buy=188918746.37 avg_sell=195670787.54 avg_ratio=1.06
+2026-04-13 02:44:57,679 | INFO | Sleeping 300s
+2026-04-13 02:49:57,680 | INFO | Cycle 1594 started
+2026-04-13 02:49:57,681 | INFO | Target end_time=2026-04-13 02:49:57.681617
+2026-04-13 02:49:58,071 | INFO | Fetching BTCUSDT from 2026-04-12 18:45:00 to 2026-04-13 02:49:57.681617
+2026-04-13 02:50:01,569 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241053
+2026-04-13 02:50:01,573 | INFO | [BinanceService] Stats avg_volume=752.55 avg_buy=373.71 avg_sell=378.83 avg_ratio=1.12
+2026-04-13 02:50:02,948 | INFO | Fetching ETHUSDT from 2026-04-12 18:45:00 to 2026-04-13 02:49:57.681617
+2026-04-13 02:50:06,345 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241053
+2026-04-13 02:50:06,348 | INFO | [BinanceService] Stats avg_volume=14318.81 avg_buy=7075.19 avg_sell=7243.62 avg_ratio=1.09
+2026-04-13 02:50:07,708 | INFO | Fetching SOLUSDT from 2026-04-12 18:45:00 to 2026-04-13 02:49:57.681617
+2026-04-13 02:50:11,013 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241053
+2026-04-13 02:50:11,016 | INFO | [BinanceService] Stats avg_volume=79113.06 avg_buy=38902.87 avg_sell=40210.19 avg_ratio=1.07
+2026-04-13 02:50:12,382 | INFO | Fetching DOGEUSDT from 2026-04-12 18:45:00 to 2026-04-13 02:49:57.681617
+2026-04-13 02:50:15,757 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241053
+2026-04-13 02:50:15,761 | INFO | [BinanceService] Stats avg_volume=24247898.03 avg_buy=11848971.17 avg_sell=12398926.86 avg_ratio=1.08
+2026-04-13 02:50:17,137 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 18:45:00 to 2026-04-13 02:49:57.681617
+2026-04-13 02:50:20,629 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241053
+2026-04-13 02:50:20,632 | INFO | [BinanceService] Stats avg_volume=384588373.61 avg_buy=188918231.61 avg_sell=195670142.00 avg_ratio=1.06
+2026-04-13 02:50:21,634 | INFO | Sleeping 300s
+2026-04-13 02:55:21,635 | INFO | Cycle 1595 started
+2026-04-13 02:55:21,635 | INFO | Target end_time=2026-04-13 02:55:21.635090
+2026-04-13 02:55:22,004 | INFO | Fetching BTCUSDT from 2026-04-12 18:50:00 to 2026-04-13 02:55:21.635090
+2026-04-13 02:55:25,430 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241055
+2026-04-13 02:55:25,434 | INFO | [BinanceService] Stats avg_volume=752.54 avg_buy=373.71 avg_sell=378.83 avg_ratio=1.12
+2026-04-13 02:55:26,795 | INFO | Fetching ETHUSDT from 2026-04-12 18:50:00 to 2026-04-13 02:55:21.635090
+2026-04-13 02:55:30,152 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241055
+2026-04-13 02:55:30,155 | INFO | [BinanceService] Stats avg_volume=14318.70 avg_buy=7075.13 avg_sell=7243.57 avg_ratio=1.09
+2026-04-13 02:55:31,507 | INFO | Fetching SOLUSDT from 2026-04-12 18:50:00 to 2026-04-13 02:55:21.635090
+2026-04-13 02:55:34,923 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241055
+2026-04-13 02:55:34,926 | INFO | [BinanceService] Stats avg_volume=79112.44 avg_buy=38902.58 avg_sell=40209.87 avg_ratio=1.07
+2026-04-13 02:55:36,286 | INFO | Fetching DOGEUSDT from 2026-04-12 18:50:00 to 2026-04-13 02:55:21.635090
+2026-04-13 02:55:39,741 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241055
+2026-04-13 02:55:39,744 | INFO | [BinanceService] Stats avg_volume=24247718.03 avg_buy=11848882.62 avg_sell=12398835.41 avg_ratio=1.08
+2026-04-13 02:55:41,125 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 18:50:00 to 2026-04-13 02:55:21.635090
+2026-04-13 02:55:45,090 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241055
+2026-04-13 02:55:45,093 | INFO | [BinanceService] Stats avg_volume=384585933.55 avg_buy=188916904.72 avg_sell=195669028.84 avg_ratio=1.06
+2026-04-13 02:55:46,095 | INFO | Sleeping 300s
+2026-04-13 03:00:46,095 | INFO | Cycle 1596 started
+2026-04-13 03:00:46,095 | INFO | Target end_time=2026-04-13 03:00:46.095689
+2026-04-13 03:00:46,474 | INFO | Fetching BTCUSDT from 2026-04-12 19:00:00 to 2026-04-13 03:00:46.095689
+2026-04-13 03:00:49,926 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241056
+2026-04-13 03:00:49,930 | INFO | [BinanceService] Stats avg_volume=752.54 avg_buy=373.71 avg_sell=378.83 avg_ratio=1.12
+2026-04-13 03:00:51,305 | INFO | Fetching ETHUSDT from 2026-04-12 19:00:00 to 2026-04-13 03:00:46.095689
+2026-04-13 03:00:54,997 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241056
+2026-04-13 03:00:55,002 | INFO | [BinanceService] Stats avg_volume=14318.66 avg_buy=7075.11 avg_sell=7243.55 avg_ratio=1.09
+2026-04-13 03:00:56,349 | INFO | Fetching SOLUSDT from 2026-04-12 19:00:00 to 2026-04-13 03:00:46.095689
+2026-04-13 03:00:59,716 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241056
+2026-04-13 03:00:59,717 | INFO | [BinanceService] Stats avg_volume=79112.18 avg_buy=38902.44 avg_sell=40209.74 avg_ratio=1.07
+2026-04-13 03:01:01,045 | INFO | Fetching DOGEUSDT from 2026-04-12 19:00:00 to 2026-04-13 03:00:46.095689
+2026-04-13 03:01:04,361 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241056
+2026-04-13 03:01:04,365 | INFO | [BinanceService] Stats avg_volume=24247641.04 avg_buy=11848847.81 avg_sell=12398793.23 avg_ratio=1.08
+2026-04-13 03:01:05,747 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 19:00:00 to 2026-04-13 03:00:46.095689
+2026-04-13 03:01:09,301 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241056
+2026-04-13 03:01:09,305 | INFO | [BinanceService] Stats avg_volume=384585140.06 avg_buy=188916432.58 avg_sell=195668707.48 avg_ratio=1.06
+2026-04-13 03:01:10,306 | INFO | Sleeping 300s
+2026-04-13 03:06:10,307 | INFO | Cycle 1597 started
+2026-04-13 03:06:10,307 | INFO | Target end_time=2026-04-13 03:06:10.307975
+2026-04-13 03:06:10,663 | INFO | Fetching BTCUSDT from 2026-04-12 19:05:00 to 2026-04-13 03:06:10.307975
+2026-04-13 03:06:14,407 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241057
+2026-04-13 03:06:14,410 | INFO | [BinanceService] Stats avg_volume=752.53 avg_buy=373.71 avg_sell=378.83 avg_ratio=1.12
+2026-04-13 03:06:15,747 | INFO | Fetching ETHUSDT from 2026-04-12 19:05:00 to 2026-04-13 03:06:10.307975
+2026-04-13 03:06:19,170 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241057
+2026-04-13 03:06:19,173 | INFO | [BinanceService] Stats avg_volume=14318.62 avg_buy=7075.09 avg_sell=7243.53 avg_ratio=1.09
+2026-04-13 03:06:20,523 | INFO | Fetching SOLUSDT from 2026-04-12 19:05:00 to 2026-04-13 03:06:10.307975
+2026-04-13 03:06:23,901 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241057
+2026-04-13 03:06:23,905 | INFO | [BinanceService] Stats avg_volume=79111.89 avg_buy=38902.31 avg_sell=40209.58 avg_ratio=1.07
+2026-04-13 03:06:25,278 | INFO | Fetching DOGEUSDT from 2026-04-12 19:05:00 to 2026-04-13 03:06:10.307975
+2026-04-13 03:06:28,562 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241057
+2026-04-13 03:06:28,566 | INFO | [BinanceService] Stats avg_volume=24247562.67 avg_buy=11848811.60 avg_sell=12398751.08 avg_ratio=1.08
+2026-04-13 03:06:29,955 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 19:05:00 to 2026-04-13 03:06:10.307975
+2026-04-13 03:06:33,874 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241057
+2026-04-13 03:06:33,877 | INFO | [BinanceService] Stats avg_volume=384583937.95 avg_buy=188915861.19 avg_sell=195668076.76 avg_ratio=1.06
+2026-04-13 03:06:34,878 | INFO | Sleeping 300s
+2026-04-13 03:11:34,879 | INFO | Cycle 1598 started
+2026-04-13 03:11:34,879 | INFO | Target end_time=2026-04-13 03:11:34.879815
+2026-04-13 03:11:35,242 | INFO | Fetching BTCUSDT from 2026-04-12 19:10:00 to 2026-04-13 03:11:34.879815
+2026-04-13 03:11:38,764 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241058
+2026-04-13 03:11:38,768 | INFO | [BinanceService] Stats avg_volume=752.53 avg_buy=373.71 avg_sell=378.83 avg_ratio=1.12
+2026-04-13 03:11:40,135 | INFO | Fetching ETHUSDT from 2026-04-12 19:10:00 to 2026-04-13 03:11:34.879815
+2026-04-13 03:11:43,586 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241058
+2026-04-13 03:11:43,589 | INFO | [BinanceService] Stats avg_volume=14318.57 avg_buy=7075.07 avg_sell=7243.50 avg_ratio=1.09
+2026-04-13 03:11:44,937 | INFO | Fetching SOLUSDT from 2026-04-12 19:10:00 to 2026-04-13 03:11:34.879815
+2026-04-13 03:11:48,288 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241058
+2026-04-13 03:11:48,292 | INFO | [BinanceService] Stats avg_volume=79111.72 avg_buy=38902.24 avg_sell=40209.48 avg_ratio=1.07
+2026-04-13 03:11:49,653 | INFO | Fetching DOGEUSDT from 2026-04-12 19:10:00 to 2026-04-13 03:11:34.879815
+2026-04-13 03:11:52,975 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241058
+2026-04-13 03:11:52,979 | INFO | [BinanceService] Stats avg_volume=24247495.72 avg_buy=11848780.82 avg_sell=12398714.90 avg_ratio=1.08
+2026-04-13 03:11:54,358 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 19:10:00 to 2026-04-13 03:11:34.879815
+2026-04-13 03:11:58,039 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241058
+2026-04-13 03:11:58,042 | INFO | [BinanceService] Stats avg_volume=384582930.49 avg_buy=188915459.70 avg_sell=195667470.79 avg_ratio=1.06
+2026-04-13 03:11:59,044 | INFO | Sleeping 300s
+2026-04-13 03:16:59,044 | INFO | Cycle 1599 started
+2026-04-13 03:16:59,044 | INFO | Target end_time=2026-04-13 03:16:59.044799
+2026-04-13 03:16:59,407 | INFO | Fetching BTCUSDT from 2026-04-12 19:15:00 to 2026-04-13 03:16:59.044799
+2026-04-13 03:17:03,096 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241059
+2026-04-13 03:17:03,099 | INFO | [BinanceService] Stats avg_volume=752.53 avg_buy=373.71 avg_sell=378.82 avg_ratio=1.12
+2026-04-13 03:17:04,469 | INFO | Fetching ETHUSDT from 2026-04-12 19:15:00 to 2026-04-13 03:16:59.044799
+2026-04-13 03:17:07,871 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241059
+2026-04-13 03:17:07,874 | INFO | [BinanceService] Stats avg_volume=14318.52 avg_buy=7075.05 avg_sell=7243.48 avg_ratio=1.09
+2026-04-13 03:17:09,228 | INFO | Fetching SOLUSDT from 2026-04-12 19:15:00 to 2026-04-13 03:16:59.044799
+2026-04-13 03:17:12,596 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241059
+2026-04-13 03:17:12,599 | INFO | [BinanceService] Stats avg_volume=79111.48 avg_buy=38902.12 avg_sell=40209.36 avg_ratio=1.07
+2026-04-13 03:17:13,961 | INFO | Fetching DOGEUSDT from 2026-04-12 19:15:00 to 2026-04-13 03:16:59.044799
+2026-04-13 03:17:17,428 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241059
+2026-04-13 03:17:17,432 | INFO | [BinanceService] Stats avg_volume=24247426.06 avg_buy=11848741.34 avg_sell=12398684.72 avg_ratio=1.08
+2026-04-13 03:17:18,794 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 19:15:00 to 2026-04-13 03:16:59.044799
+2026-04-13 03:17:22,607 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241059
+2026-04-13 03:17:22,611 | INFO | [BinanceService] Stats avg_volume=384581678.36 avg_buy=188914796.25 avg_sell=195666882.11 avg_ratio=1.06
+2026-04-13 03:17:23,614 | INFO | Sleeping 300s
+2026-04-13 03:22:23,615 | INFO | Cycle 1600 started
+2026-04-13 03:22:23,615 | INFO | Target end_time=2026-04-13 03:22:23.615242
+2026-04-13 03:22:23,965 | INFO | Fetching BTCUSDT from 2026-04-12 19:20:00 to 2026-04-13 03:22:23.615242
+2026-04-13 03:22:27,388 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241060
+2026-04-13 03:22:27,391 | INFO | [BinanceService] Stats avg_volume=752.53 avg_buy=373.70 avg_sell=378.82 avg_ratio=1.12
+2026-04-13 03:22:28,758 | INFO | Fetching ETHUSDT from 2026-04-12 19:20:00 to 2026-04-13 03:22:23.615242
+2026-04-13 03:22:32,432 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241060
+2026-04-13 03:22:32,435 | INFO | [BinanceService] Stats avg_volume=14318.48 avg_buy=7075.02 avg_sell=7243.46 avg_ratio=1.09
+2026-04-13 03:22:33,800 | INFO | Fetching SOLUSDT from 2026-04-12 19:20:00 to 2026-04-13 03:22:23.615242
+2026-04-13 03:22:37,089 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241060
+2026-04-13 03:22:37,093 | INFO | [BinanceService] Stats avg_volume=79111.22 avg_buy=38901.98 avg_sell=40209.24 avg_ratio=1.07
+2026-04-13 03:22:38,462 | INFO | Fetching DOGEUSDT from 2026-04-12 19:20:00 to 2026-04-13 03:22:23.615242
+2026-04-13 03:22:41,968 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241060
+2026-04-13 03:22:41,971 | INFO | [BinanceService] Stats avg_volume=24247344.98 avg_buy=11848703.14 avg_sell=12398641.83 avg_ratio=1.08
+2026-04-13 03:22:43,336 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 19:20:00 to 2026-04-13 03:22:23.615242
+2026-04-13 03:22:46,964 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241060
+2026-04-13 03:22:46,968 | INFO | [BinanceService] Stats avg_volume=384581149.98 avg_buy=188914390.55 avg_sell=195666759.43 avg_ratio=1.06
+2026-04-13 03:22:47,970 | INFO | Sleeping 300s
+2026-04-13 03:27:47,971 | INFO | Cycle 1601 started
+2026-04-13 03:27:47,971 | INFO | Target end_time=2026-04-13 03:27:47.971077
+2026-04-13 03:27:48,312 | INFO | Fetching BTCUSDT from 2026-04-12 19:25:00 to 2026-04-13 03:27:47.971077
+2026-04-13 03:27:51,984 | INFO | Saved Data/BTCUSDT_futures_volume_5years_5min.csv, rows=241061
+2026-04-13 03:27:51,989 | INFO | [BinanceService] Stats avg_volume=752.53 avg_buy=373.70 avg_sell=378.82 avg_ratio=1.12
+2026-04-13 03:27:53,338 | INFO | Fetching ETHUSDT from 2026-04-12 19:25:00 to 2026-04-13 03:27:47.971077
+2026-04-13 03:27:56,969 | INFO | Saved Data/ETHUSDT_futures_volume_5years_5min.csv, rows=241061
+2026-04-13 03:27:56,973 | INFO | [BinanceService] Stats avg_volume=14318.43 avg_buy=7075.00 avg_sell=7243.44 avg_ratio=1.09
+2026-04-13 03:27:58,323 | INFO | Fetching SOLUSDT from 2026-04-12 19:25:00 to 2026-04-13 03:27:47.971077
+2026-04-13 03:28:01,503 | INFO | Saved Data/SOLUSDT_futures_volume_5years_5min.csv, rows=241061
+2026-04-13 03:28:01,507 | INFO | [BinanceService] Stats avg_volume=79110.92 avg_buy=38901.84 avg_sell=40209.08 avg_ratio=1.07
+2026-04-13 03:28:02,866 | INFO | Fetching DOGEUSDT from 2026-04-12 19:25:00 to 2026-04-13 03:27:47.971077
+2026-04-13 03:28:06,283 | INFO | Saved Data/DOGEUSDT_futures_volume_5years_5min.csv, rows=241061
+2026-04-13 03:28:06,287 | INFO | [BinanceService] Stats avg_volume=24247266.54 avg_buy=11848661.03 avg_sell=12398605.51 avg_ratio=1.08
+2026-04-13 03:28:07,666 | INFO | Fetching 1000PEPEUSDT from 2026-04-12 19:25:00 to 2026-04-13 03:27:47.971077
+2026-04-13 03:28:11,392 | INFO | Saved Data/1000PEPEUSDT_futures_volume_5years_5min.csv, rows=241061
+2026-04-13 03:28:11,395 | INFO | [BinanceService] Stats avg_volume=384579729.91 avg_buy=188913711.22 avg_sell=195666018.69 avg_ratio=1.06
+2026-04-13 03:28:12,397 | INFO | Sleeping 300s

@@ -22,6 +22,7 @@ def _payload(
     profit_per_trade_mean: float,
     trade_count_mean: float,
     total_fees_mean: float,
+    episode_steps_mean: float = 2016.0,
     episode_max_dd_mean: float = 0.15,
     episode_max_dd_std: float = 0.05,
     cost_risk_dense_mean: float = 0.05,
@@ -45,6 +46,12 @@ def _payload(
             "episode_trade_count": {
                 "mean": trade_count_mean,
                 "std": 10.0,
+                "min": 0.0,
+                "max": 0.0,
+            },
+            "episode_steps": {
+                "mean": episode_steps_mean,
+                "std": 0.0,
                 "min": 0.0,
                 "max": 0.0,
             },
@@ -98,6 +105,8 @@ def test_extract_judgment_metrics_counts_low_and_high_churn_examples() -> None:
     assert metrics["negative_profit_episode_count"] == 2
     assert metrics["low_churn_positive_episode_count"] >= 1
     assert metrics["high_churn_negative_episode_count"] >= 1
+    assert metrics["trade_rate"] > 0.0
+    assert metrics["trades_per_day"] > 0.0
 
 
 def test_judge_payload_marks_p0_and_objective_fail_when_high_churn_dominates() -> None:
@@ -156,3 +165,23 @@ def test_format_judgment_summary_renders_all_statuses() -> None:
 
     assert "[Judgment] P0=" in summary
     assert "Recommended next action:" in summary
+
+
+def test_judge_payload_warns_when_trades_per_day_is_very_high_even_if_absolute_trade_count_is_moderate() -> None:
+    payload = _payload(
+        profit_mean=20.0,
+        profit_per_trade_mean=0.2,
+        trade_count_mean=420.0,
+        total_fees_mean=5.0,
+        episode_steps_mean=1440.0,  # 5 天 => 84 trades/day
+        guardrails_enabled=False,
+        results=[
+            {"profit": 20.0, "episode_trade_count": 420, "episode_max_dd": 0.08},
+            {"profit": 18.0, "episode_trade_count": 410, "episode_max_dd": 0.07},
+        ],
+    )
+
+    result = judge_payload(payload)
+
+    assert result.p1_objective.status == JudgmentStatus.WARN
+    assert "頻繁成交" in result.p1_objective.reason

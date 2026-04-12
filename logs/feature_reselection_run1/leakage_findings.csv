@@ -1,0 +1,24 @@
+file_path,line_no,severity,pattern,line_text,reason
+Env\Components\market_data.py,303,high,\.bfill\(,.bfill(),bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,254,high,\.bfill\(,.bfill(),bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,320,high,\.bfill\(,prev_c = c.shift(1).bfill(),bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,408,high,\.bfill\(,recent_swing_low = l.where(swing_low).ffill().bfill(),bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,525,high,\.bfill\(,"body_raw_s = (cs - os) / np.clip(cs.shift(1).bfill(), 1e-12, None)",bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,526,high,\.bfill\(,"range_raw_s = (hs - ls) / np.clip(cs.shift(1).bfill(), 1e-12, None)",bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,537,high,\.bfill\(,recent_swing_high_s = hs.where(swing_high_s).ffill().bfill(),bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,538,high,\.bfill\(,recent_swing_low_s = ls.where(swing_low_s).ffill().bfill(),bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,677,high,\.bfill\(,prev_c = c.shift(1).bfill(),bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,773,high,\.bfill\(,"hl_range_20 = ((h.rolling(20, min_periods=10).max() - l.rolling(20, min_periods=10).min()) / np.clip(c.shift(1).bfill(), 1e-12, None))",bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,1054,high,\.bfill\(,"range_1d = (high_1d - low_1d) / np.maximum(close_1d.shift(1).bfill(), 1e-12)",bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,1055,high,\.bfill\(,"body_1d = (close_1d - open_1d) / np.maximum(close_1d.shift(1).bfill(), 1e-12)",bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,1261,high,\.bfill\(,"range_raw_s = (high_1d_s - low_1d_s) / np.clip(cs_1d.shift(1).bfill(), 1e-12, None)",bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,1262,high,\.bfill\(,"body_raw_s = (cs_1d - os_1d) / np.clip(cs_1d.shift(1).bfill(), 1e-12, None)",bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,1299,high,\.bfill\(,recent_swing_high_1d_s = high_1d_s.where(swing_high_1d_s).ffill().bfill(),bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\feature_transformer.py,1300,high,\.bfill\(,recent_swing_low_1d_s = low_1d_s.where(swing_low_1d_s).ffill().bfill(),bfill 會把未來值往前補，容易造成 look-ahead leakage。
+Env\Components\market_data.py,193,medium,nanpercentile\(,"q_vol = np.nanpercentile(vol, 50.0)",全樣本分位數門檻若直接用在 train/test 比較，可能引入全域統計偏差。
+Env\Components\market_data.py,194,medium,nanpercentile\(,"q_amihud = np.nanpercentile(amihud, 50.0)",全樣本分位數門檻若直接用在 train/test 比較，可能引入全域統計偏差。
+Eval\e2_direction_proxy.py,166,medium,nanpercentile\(,"q = np.nanpercentile(abs_r, (1.0 - keep_rate) * 100.0)",全樣本分位數門檻若直接用在 train/test 比較，可能引入全域統計偏差。
+Eval\e2_direction_proxy.py,184,medium,nanpercentile\(,"q_high = np.nanpercentile(r, (1.0 - keep_rate / 2.0) * 100.0)",全樣本分位數門檻若直接用在 train/test 比較，可能引入全域統計偏差。
+Eval\e2_direction_proxy.py,185,medium,nanpercentile\(,"q_low = np.nanpercentile(r, (keep_rate / 2.0) * 100.0)",全樣本分位數門檻若直接用在 train/test 比較，可能引入全域統計偏差。
+Eval\e2_direction_proxy.py,515,medium,nanpercentile\(,"q_vol = np.nanpercentile(vol, liquidity_vol_quantile * 100.0)",全樣本分位數門檻若直接用在 train/test 比較，可能引入全域統計偏差。
+Eval\e2_direction_proxy.py,516,medium,nanpercentile\(,"q_amihud = np.nanpercentile(amihud, liquidity_amihud_quantile * 100.0)",全樣本分位數門檻若直接用在 train/test 比較，可能引入全域統計偏差。

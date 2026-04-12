@@ -4,6 +4,34 @@ import pandas as pd
 from Env.config import Config
 from Env.feature_transformer import FeatureTransformer
 
+
+def _past_only_long_std(series: pd.Series, *, window: int, min_periods: int, fallback: float = 1e-8) -> pd.Series:
+    """長窗 std 僅使用歷史資料；不足時退化為 expanding std。"""
+    s = series.astype(float)
+    roll_std = s.rolling(int(window), min_periods=int(min_periods)).std().replace(0.0, np.nan)
+    expanding_std = s.expanding(min_periods=max(2, int(min_periods))).std().replace(0.0, np.nan)
+    return roll_std.fillna(expanding_std).fillna(float(fallback))
+
+
+def _past_only_rolling_quantile(
+    series: np.ndarray,
+    *,
+    quantile: float,
+    window: int,
+    min_periods: int,
+) -> np.ndarray:
+    """
+    past-only 分位數門檻。
+
+    - 使用 rolling quantile，並在比較當下值前先 shift(1)。
+    - 初期不足樣本時退化為 expanding quantile，同樣 shift(1)。
+    """
+    s = pd.Series(np.asarray(series, dtype=np.float64))
+    rolling_q = s.rolling(int(window), min_periods=int(min_periods)).quantile(float(quantile)).shift(1)
+    expanding_q = s.expanding(min_periods=max(2, int(min_periods))).quantile(float(quantile)).shift(1)
+    threshold = rolling_q.fillna(expanding_q).fillna(s)
+    return threshold.values.astype(np.float64)
+
 class MarketData:
     """
     負責處理市場數據、特徵計算與緩存。
@@ -190,8 +218,9 @@ class MarketData:
         if idx_vol is not None and idx_amihud is not None:
             vol = self.features_5m_target_arr[:, idx_vol].astype(np.float64)
             amihud = self.features_5m_target_arr[:, idx_amihud].astype(np.float64)
-            q_vol = np.nanpercentile(vol, 50.0)
-            q_amihud = np.nanpercentile(amihud, 50.0)
+            threshold_window = max(20, int(self.feature_lookback))
+            q_vol = _past_only_rolling_quantile(vol, quantile=0.5, window=threshold_window, min_periods=20)
+            q_amihud = _past_only_rolling_quantile(amihud, quantile=0.5, window=threshold_window, min_periods=20)
             liquidity_5m = ((vol > q_vol) & (amihud < q_amihud)).astype(bool)
         else:
             liquidity_5m = np.ones(N, dtype=bool)
@@ -296,13 +325,7 @@ class MarketData:
             log_close = np.log(np.clip(close_series, 1e-12, None))
             log_ret = log_close.diff().fillna(0.0)
             rv_20 = log_ret.rolling(20, min_periods=5).std().fillna(0.0)
-            rv_288 = (
-                log_ret.rolling(288, min_periods=20)
-                .std()
-                .replace(0.0, np.nan)
-                .bfill()
-                .fillna(1e-8)
-            )
+            rv_288 = _past_only_long_std(log_ret, window=288, min_periods=20)
             rv_ratio = (rv_20 / rv_288).replace([np.inf, -np.inf], np.nan).fillna(0.0)
             return rv_ratio.values.astype(np.float32)
         except Exception:

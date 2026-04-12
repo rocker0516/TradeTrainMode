@@ -1,0 +1,216 @@
+{
+  "summary": {
+    "spec_rows": 12,
+    "channel_rows": 195,
+    "leakage_findings": 23
+  },
+  "best_spec": {
+    "window_size": 12,
+    "window_size_1d": 6,
+    "horizon_k": 6,
+    "recent_bars": 6
+  },
+  "candidate_sets": {
+    "baseline_current": {
+      "OBS_STATE_KEYS": [
+        "price_seq_1d_others",
+        "price_seq_1d_target",
+        "price_seq_others",
+        "price_seq_target",
+        "account_state",
+        "gate_flags",
+        "regime_score"
+      ],
+      "OBS_PRICE_SEQ_TARGET_COLS": [
+        "volume_ratio_z_short",
+        "volume_ratio_z_long",
+        "long_short_ratio_z",
+        "sell_volume_roc_12",
+        "sell_volume_roc_1",
+        "sell_volume_ema_12_48_spread",
+        "volume_ratio_ema_12_48_spread",
+        "trades_z_long",
+        "volume_impact_scale",
+        "close_z_long",
+        "volume_log_z_short",
+        "ret_15m_z_short"
+      ],
+      "OBS_PRICE_SEQ_OTHERS_COLS": [
+        "trades_z_short",
+        "long_short_ratio_z_short",
+        "volume_log_z",
+        "sell_volume_z_short",
+        "rsi_14",
+        "buy_volume_z_long",
+        "up_volume_ratio_12",
+        "volume_ratio_z_long",
+        "high_roc_12",
+        "trades_roc_12",
+        "quote_volume_z_long",
+        "volume_impact_scale"
+      ],
+      "OBS_PRICE_SEQ_1D_TARGET_COLS": [
+        "ret_1d_z_short",
+        "ret_3d_z_short",
+        "ret_7d_z_long",
+        "body_1d_z",
+        "oi_close_scale",
+        "funding_close_scale",
+        "ls_account_ratio_z",
+        "liq_long_log_scale",
+        "volume_impact_scale",
+        "open_ema_12_48_spread",
+        "high_z_long",
+        "close_roc_12",
+        "close_ema_12_48_spread",
+        "sell_volume_roc_1",
+        "quote_volume_z_long",
+        "liq_long_ema_12_48_spread"
+      ],
+      "OBS_PRICE_SEQ_1D_OTHERS_COLS": [
+        "ret_1d_scale",
+        "ret_3d_z",
+        "oi_close_scale",
+        "ls_account_ratio_z",
+        "liq_long_log_z",
+        "open_z_short",
+        "high_roc_12",
+        "low_z_short",
+        "low_roc_1",
+        "volume_roc_1",
+        "volume_ema_12_48_spread",
+        "buy_volume_z_long",
+        "buy_volume_roc_12",
+        "volume_ratio_z_long",
+        "trades_z_short",
+        "trades_z_long",
+        "trades_ema_12_48_spread",
+        "quote_volume_z_short",
+        "quote_volume_roc_1",
+        "quote_volume_roc_12",
+        "oi_close_z_long",
+        "oi_close_roc_1",
+        "liq_long_z_long",
+        "liq_long_roc_1",
+        "liq_short_z_short",
+        "liq_short_z_long",
+        "liq_short_roc_1",
+        "ob_imbalance_roc_12",
+        "sopr_z",
+        "fear_greed_roc_12",
+        "altcoin_season_roc_1",
+        "altcoin_season_roc_12",
+        "altcoin_season_ema_12_48_spread",
+        "bmo_ema_12_48_spread",
+        "sopr_roc_12"
+      ],
+      "OBS_ACCOUNT_STATE_COLS": [],
+      "OBS_CONTEXT_STATE_COLS": [],
+      "WINDOW_SIZE": 24,
+      "WINDOW_SIZE_1D": 12
+    },
+    "ultra_minimal": {
+      "OBS_STATE_KEYS": [
+        "price_seq_1d_others",
+        "price_seq_1d_target",
+        "account_state",
+        "gate_flags",
+        "regime_score"
+      ],
+      "OBS_PRICE_SEQ_TARGET_COLS": [],
+      "OBS_PRICE_SEQ_OTHERS_COLS": [],
+      "OBS_PRICE_SEQ_1D_TARGET_COLS": [
+        "body_1d_z",
+        "close_ema_12_48_spread",
+        "funding_close_scale",
+        "high_z_long",
+        "liq_long_ema_12_48_spread",
+        "liq_long_log_scale"
+      ],
+      "OBS_PRICE_SEQ_1D_OTHERS_COLS": [
+        "trades_ema_12_48_spread",
+        "liq_long_z_long"
+      ],
+      "OBS_ACCOUNT_STATE_COLS": [],
+      "OBS_CONTEXT_STATE_COLS": [],
+      "WINDOW_SIZE": 12,
+      "WINDOW_SIZE_1D": 6
+    },
+    "minimal_signal": {
+      "OBS_STATE_KEYS": [
+        "price_seq_1d_others",
+        "price_seq_1d_target",
+        "price_seq_target",
+        "account_state",
+        "gate_flags",
+        "regime_score"
+      ],
+      "OBS_PRICE_SEQ_TARGET_COLS": [
+        "sell_volume_roc_12",
+        "volume_ratio_z_long"
+      ],
+      "OBS_PRICE_SEQ_OTHERS_COLS": [],
+      "OBS_PRICE_SEQ_1D_TARGET_COLS": [
+        "body_1d_z",
+        "close_ema_12_48_spread",
+        "close_roc_12",
+        "funding_close_scale",
+        "high_z_long",
+        "liq_long_ema_12_48_spread",
+        "liq_long_log_scale",
+        "ls_account_ratio_z"
+      ],
+      "OBS_PRICE_SEQ_1D_OTHERS_COLS": [
+        "trades_ema_12_48_spread",
+        "liq_long_z_long",
+        "open_z_short",
+        "ret_1d_scale"
+      ],
+      "OBS_ACCOUNT_STATE_COLS": [],
+      "OBS_CONTEXT_STATE_COLS": [],
+      "WINDOW_SIZE": 12,
+      "WINDOW_SIZE_1D": 6
+    },
+    "minimal_plus_entry_filter": {
+      "OBS_STATE_KEYS": [
+        "price_seq_1d_others",
+        "price_seq_1d_target",
+        "price_seq_others",
+        "price_seq_target",
+        "account_state",
+        "gate_flags",
+        "regime_score"
+      ],
+      "OBS_PRICE_SEQ_TARGET_COLS": [
+        "sell_volume_roc_12",
+        "volume_ratio_z_long",
+        "volume_impact_scale",
+        "close_z_long"
+      ],
+      "OBS_PRICE_SEQ_OTHERS_COLS": [
+        "high_roc_12",
+        "up_volume_ratio_12"
+      ],
+      "OBS_PRICE_SEQ_1D_TARGET_COLS": [
+        "body_1d_z",
+        "close_ema_12_48_spread",
+        "close_roc_12",
+        "funding_close_scale",
+        "high_z_long",
+        "liq_long_ema_12_48_spread",
+        "liq_long_log_scale",
+        "ls_account_ratio_z"
+      ],
+      "OBS_PRICE_SEQ_1D_OTHERS_COLS": [
+        "trades_ema_12_48_spread",
+        "liq_long_z_long",
+        "open_z_short",
+        "ret_1d_scale"
+      ],
+      "OBS_ACCOUNT_STATE_COLS": [],
+      "OBS_CONTEXT_STATE_COLS": [],
+      "WINDOW_SIZE": 12,
+      "WINDOW_SIZE_1D": 6
+    }
+  }
+}

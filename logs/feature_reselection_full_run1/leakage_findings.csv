@@ -1,0 +1,8 @@
+file_path,line_no,severity,pattern,line_text,reason
+Env\Components\market_data.py,30,medium,\.quantile\(,"rolling_q = s.rolling(int(window), min_periods=int(min_periods)).quantile(float(quantile)).shift(1)",分位數若未限制只在 train 區間 fit，可能造成全域統計 leakage。
+Env\Components\market_data.py,31,medium,\.quantile\(,"expanding_q = s.expanding(min_periods=max(2, int(min_periods))).quantile(float(quantile)).shift(1)",分位數若未限制只在 train 區間 fit，可能造成全域統計 leakage。
+Eval\e2_direction_proxy.py,166,medium,nanpercentile\(,"q = np.nanpercentile(abs_r, (1.0 - keep_rate) * 100.0)",全樣本分位數門檻若直接用在 train/test 比較，可能引入全域統計偏差。
+Eval\e2_direction_proxy.py,184,medium,nanpercentile\(,"q_high = np.nanpercentile(r, (1.0 - keep_rate / 2.0) * 100.0)",全樣本分位數門檻若直接用在 train/test 比較，可能引入全域統計偏差。
+Eval\e2_direction_proxy.py,185,medium,nanpercentile\(,"q_low = np.nanpercentile(r, (keep_rate / 2.0) * 100.0)",全樣本分位數門檻若直接用在 train/test 比較，可能引入全域統計偏差。
+Eval\e2_direction_proxy.py,515,medium,nanpercentile\(,"q_vol = np.nanpercentile(vol, liquidity_vol_quantile * 100.0)",全樣本分位數門檻若直接用在 train/test 比較，可能引入全域統計偏差。
+Eval\e2_direction_proxy.py,516,medium,nanpercentile\(,"q_amihud = np.nanpercentile(amihud, liquidity_amihud_quantile * 100.0)",全樣本分位數門檻若直接用在 train/test 比較，可能引入全域統計偏差。
