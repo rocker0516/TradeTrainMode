@@ -1166,12 +1166,20 @@ class TradingEnvironment(gym.Env):
             return np.zeros_like(action)
         return action
 
-    def _apply_regime_action_projection(self, action: np.ndarray) -> np.ndarray:
+    def _apply_regime_action_projection(
+        self,
+        action: np.ndarray,
+        current_price: float,
+        last_equity: float,
+    ) -> np.ndarray:
         """
         依當前 regime（gate A/C/neutral）對 action 做投影：
         - Gate A（1d up）：clamp 到 [0, +1]（只允許多）
         - Gate C（1d down）：clamp 到 [-1, 0]（只允許空）
-        - Neutral：clamp 到 [0, 0] 或極小範圍（實作為 0）
+        - Neutral：
+          - 空倉時只能維持 0，不允許新開倉
+          - 有多單時只允許 [0, current_pos_pct]（可續抱/減倉/平倉，不可加碼/反手）
+          - 有空單時只允許 [current_pos_pct, 0]（可續抱/減倉/平倉，不可加碼/反手）
         """
         gate_flags = self.market_data.get_gate_flags(self.current_step)
         gate_A = float(gate_flags[0])  # 1 when 1d up
@@ -1182,7 +1190,20 @@ class TradingEnvironment(gym.Env):
         elif gate_C <= -0.5:
             a = np.clip(a, -1.0, 0.0)
         else:
-            a = 0.0
+            current_size = float(self.executor.position.size)
+            current_pos_pct = 0.0
+            max_capacity = float(last_equity) * float(self.leverage)
+            if current_price > 0.0 and max_capacity > 0.0:
+                current_pos_pct = float(
+                    np.clip((current_size * current_price) / max_capacity, -1.0, 1.0)
+                )
+
+            if abs(current_pos_pct) <= 1e-8:
+                a = 0.0
+            elif current_pos_pct > 0.0:
+                a = float(np.clip(a, 0.0, current_pos_pct))
+            else:
+                a = float(np.clip(a, current_pos_pct, 0.0))
         return np.array([a], dtype=action.dtype)
 
     def _process_action_and_execute(
@@ -1204,7 +1225,11 @@ class TradingEnvironment(gym.Env):
             (final_pos_pct, expected_fee, prev_wallet, is_flip, action_used, target_pos_pct, action_overridden_flag, trade_freq_blocked)
         """
         action_used = self._apply_stop_loss_cooldown(action, prices.current_price, last_equity)
-        action_used = self._apply_regime_action_projection(action_used)
+        action_used = self._apply_regime_action_projection(
+            action_used,
+            prices.current_price,
+            last_equity,
+        )
         # action 是否被 env 覆寫（cooldown 或 regime projection）
         try:
             action_overridden_flag = bool(abs(float(action_used[0]) - float(action[0])) > 1e-8)

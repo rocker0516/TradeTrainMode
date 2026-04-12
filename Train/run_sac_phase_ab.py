@@ -54,7 +54,12 @@ class TradingEnvPhaseA(TradingEnvironment):
     Phase A 環境：不對 action 做 regime 投影，讓 policy 輸出直接進入 ActionProcessor。
     """
 
-    def _apply_regime_action_projection(self, action: np.ndarray) -> np.ndarray:
+    def _apply_regime_action_projection(
+        self,
+        action: np.ndarray,
+        current_price: float,
+        last_equity: float,
+    ) -> np.ndarray:
         """不做投影，直接回傳 action。"""
         return action
 
@@ -947,7 +952,7 @@ def main() -> None:
     parser.add_argument("--phase", choices=["A", "B"], default="B", help="Phase A=只放寬控制, B=再加 cost_risk 懲罰")
     parser.add_argument("--timesteps", type=int, default=12_000_000) # 288 * 21 * 48 * 20 = 261,360,000
     parser.add_argument("--n-envs", type=int, default=64)
-    parser.add_argument("--lambda-risk", type=float, default=0.1, help="Phase B 時 cost_risk（事件型）的權重")
+    parser.add_argument("--lambda-risk", type=float, default=1.0, help="Phase B 時 cost_risk（事件型）的權重")
     parser.add_argument("--lambda-buffer", type=float, default=0.0001, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
     parser.add_argument("--lambda-turnover", type=float, default=0.0001, help="Phase B 時 cost_turnover（換手成本）的權重")
     parser.add_argument(
@@ -966,13 +971,13 @@ def main() -> None:
     parser.add_argument(
         "--penalize-turnover-reduction",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="turnover 成本線是否連減碼/平倉也計罰（預設只罰加曝險）",
     )
     parser.add_argument(
         "--turnover-anchor-update-steps",
         type=int,
-        default=288,
+        default=288 * 7,
         help="turnover 正規化錨點更新間隔（環境 step 數）；越大越不易因短期獲利稀釋換手懲罰",
     )
     parser.add_argument(
@@ -1081,7 +1086,7 @@ def main() -> None:
             f"_sv{str(args.slip_vol_coeff).replace('.', '')}"
             f"_ss{str(args.slip_size_coeff).replace('.', '')}"
             f"_ad{str(args.adv_lookback_days).replace('.', '')}"
-            f"_ptr{int(bool(args.penalize_turnover_reduction))}"
+            f"_ptr{int(bool(args.penalize_turnover_reduction))}_2"
         )
     if not (getattr(args, "eval_report_path", "") or "").strip():
         args.eval_report_path = f"logs/{_path_prefix()}_eval.json"
