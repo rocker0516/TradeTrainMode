@@ -27,6 +27,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from Eval.train_config import TrainConfig
+from LiveTradingRunner.live_obs_align import default_last_action_effects
 from LiveTradingRunner.live_runner_env_config import LiveRunnerEnvConfig
 from LiveTradingRunner.fee_provider import BinanceFeeRateProvider
 from LiveTradingRunner.live_render import LiveRefreshRenderer
@@ -77,6 +78,8 @@ class LiveRunnerConfig:
     render_pos_delta_eps: float = 0.02
     render_max_visible_kline_bars: int = 500
     render_max_kline_buffer_rows: int = 2000
+    # 預設啟動清空 kline_session_rows，避免還原 state 後圖表時間軸被久遠資料與空段撐開；--keep-kline-buffer 時保留。
+    keep_kline_buffer: bool = False
 
 
 @dataclass
@@ -99,6 +102,22 @@ class LiveRunnerState:
     kline_session_rows: List[Dict[str, Union[str, float]]] = field(default_factory=list)
     # 上一輪 obs 的 gate_flags（A/B/C），供偵測 A/C 變化；None 表示尚未初始化
     last_gate_flags: Optional[Tuple[float, float, float]] = None
+    # ---- 與 TradingEnvironment 對齊：供下一根 K 的 obs（context_state / account 統計）----
+    last_action_effects: Dict[str, float] = field(default_factory=default_last_action_effects)
+    obs_metrics_initialized: bool = False
+    session_initial_balance_usdt: float = 1000.0
+    max_equity_so_far_usdt: float = 1000.0
+    last_trade_decision_step: int = -999999
+    position_entry_decision_step: Optional[int] = None
+    live_risk_budget: float = 1.0
+    live_episode_stop_loss_count: int = 0
+    live_episode_liq_count: int = 0
+    rolling_fee_sum_usdt: float = 0.0
+    last_step_fee_usdt: float = 0.0
+    fee_history_pairs: List[List[float]] = field(default_factory=list)
+    flat_window_flags: List[float] = field(default_factory=list)
+    recent_flat_ratio: float = 0.5
+    stop_loss_cooldown_live: int = 0
 
 
 @dataclass(frozen=True)
@@ -145,6 +164,25 @@ def _state_to_json(state: LiveRunnerState) -> Dict[str, Any]:
             if getattr(state, "last_gate_flags", None) is None
             else [float(x) for x in getattr(state, "last_gate_flags", ())]
         ),
+        "last_action_effects": {str(k): float(v) for k, v in getattr(state, "last_action_effects", {}).items()},
+        "obs_metrics_initialized": bool(getattr(state, "obs_metrics_initialized", False)),
+        "session_initial_balance_usdt": float(getattr(state, "session_initial_balance_usdt", 1000.0)),
+        "max_equity_so_far_usdt": float(getattr(state, "max_equity_so_far_usdt", 1000.0)),
+        "last_trade_decision_step": int(getattr(state, "last_trade_decision_step", -999999)),
+        "position_entry_decision_step": (
+            None
+            if getattr(state, "position_entry_decision_step", None) is None
+            else int(getattr(state, "position_entry_decision_step"))
+        ),
+        "live_risk_budget": float(getattr(state, "live_risk_budget", 1.0)),
+        "live_episode_stop_loss_count": int(getattr(state, "live_episode_stop_loss_count", 0)),
+        "live_episode_liq_count": int(getattr(state, "live_episode_liq_count", 0)),
+        "rolling_fee_sum_usdt": float(getattr(state, "rolling_fee_sum_usdt", 0.0)),
+        "last_step_fee_usdt": float(getattr(state, "last_step_fee_usdt", 0.0)),
+        "fee_history_pairs": list(getattr(state, "fee_history_pairs", []) or []),
+        "flat_window_flags": [float(x) for x in (getattr(state, "flat_window_flags", []) or [])],
+        "recent_flat_ratio": float(getattr(state, "recent_flat_ratio", 0.5)),
+        "stop_loss_cooldown_live": int(getattr(state, "stop_loss_cooldown_live", 0)),
     }
 
 
@@ -190,6 +228,102 @@ def _state_from_json(payload: Dict[str, Any]) -> LiveRunnerState:
         except (TypeError, ValueError):
             last_gate_flags = None
 
+    lae_merged = default_last_action_effects()
+    lae_raw = payload.get("last_action_effects")
+    if isinstance(lae_raw, dict):
+        for _k, _v in lae_raw.items():
+            try:
+                lae_merged[str(_k)] = float(_v)
+            except (TypeError, ValueError):
+                pass
+    try:
+        obs_metrics_initialized = bool(payload.get("obs_metrics_initialized", False))
+    except (TypeError, ValueError):
+        obs_metrics_initialized = False
+    try:
+        session_initial_balance_usdt = float(payload.get("session_initial_balance_usdt", paper_equity_usdt) or paper_equity_usdt)
+    except (TypeError, ValueError):
+        session_initial_balance_usdt = float(paper_equity_usdt)
+    try:
+        max_equity_so_far_usdt = float(payload.get("max_equity_so_far_usdt", session_initial_balance_usdt) or session_initial_balance_usdt)
+    except (TypeError, ValueError):
+        max_equity_so_far_usdt = float(session_initial_balance_usdt)
+    try:
+        last_trade_decision_step = int(payload.get("last_trade_decision_step", -999999) or -999999)
+    except (TypeError, ValueError):
+        last_trade_decision_step = -999999
+    ped_raw = payload.get("position_entry_decision_step", None)
+    position_entry_decision_step: Optional[int] = None
+    if ped_raw is not None:
+        try:
+            position_entry_decision_step = int(ped_raw)
+        except (TypeError, ValueError):
+            position_entry_decision_step = None
+    try:
+        live_risk_budget = float(payload.get("live_risk_budget", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        live_risk_budget = 1.0
+    try:
+        live_episode_stop_loss_count = int(payload.get("live_episode_stop_loss_count", 0) or 0)
+    except (TypeError, ValueError):
+        live_episode_stop_loss_count = 0
+    try:
+        live_episode_liq_count = int(payload.get("live_episode_liq_count", 0) or 0)
+    except (TypeError, ValueError):
+        live_episode_liq_count = 0
+    try:
+        rolling_fee_sum_usdt = float(payload.get("rolling_fee_sum_usdt", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        rolling_fee_sum_usdt = 0.0
+    try:
+        last_step_fee_usdt = float(payload.get("last_step_fee_usdt", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        last_step_fee_usdt = 0.0
+    fee_history_pairs: List[List[float]] = []
+    fh_raw = payload.get("fee_history_pairs", [])
+    if isinstance(fh_raw, list):
+        for item in fh_raw:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                try:
+                    fee_history_pairs.append([float(item[0]), float(item[1])])
+                except (TypeError, ValueError):
+                    pass
+    flat_window_flags: List[float] = []
+    fw_raw = payload.get("flat_window_flags", [])
+    if isinstance(fw_raw, list):
+        for x in fw_raw:
+            try:
+                flat_window_flags.append(float(x))
+            except (TypeError, ValueError):
+                pass
+    try:
+        recent_flat_ratio = float(payload.get("recent_flat_ratio", 0.5) or 0.5)
+    except (TypeError, ValueError):
+        recent_flat_ratio = 0.5
+    try:
+        stop_loss_cooldown_live = int(payload.get("stop_loss_cooldown_live", 0) or 0)
+    except (TypeError, ValueError):
+        stop_loss_cooldown_live = 0
+
+    def _align_kwargs() -> Dict[str, Any]:
+        return {
+            "last_action_effects": lae_merged,
+            "obs_metrics_initialized": obs_metrics_initialized,
+            "session_initial_balance_usdt": session_initial_balance_usdt,
+            "max_equity_so_far_usdt": max_equity_so_far_usdt,
+            "last_trade_decision_step": last_trade_decision_step,
+            "position_entry_decision_step": position_entry_decision_step,
+            "live_risk_budget": live_risk_budget,
+            "live_episode_stop_loss_count": live_episode_stop_loss_count,
+            "live_episode_liq_count": live_episode_liq_count,
+            "rolling_fee_sum_usdt": rolling_fee_sum_usdt,
+            "last_step_fee_usdt": last_step_fee_usdt,
+            "fee_history_pairs": fee_history_pairs,
+            "flat_window_flags": flat_window_flags,
+            "recent_flat_ratio": recent_flat_ratio,
+            "stop_loss_cooldown_live": stop_loss_cooldown_live,
+        }
+
     if raw is None:
         return LiveRunnerState(
             last_processed_closed_ts=None,
@@ -202,6 +336,7 @@ def _state_from_json(payload: Dict[str, Any]) -> LiveRunnerState:
             cumulative_fee_usdt=cumulative_fee_usdt,
             kline_session_rows=kline_session_rows,
             last_gate_flags=last_gate_flags,
+            **_align_kwargs(),
         )
     try:
         return LiveRunnerState(
@@ -215,6 +350,7 @@ def _state_from_json(payload: Dict[str, Any]) -> LiveRunnerState:
             cumulative_fee_usdt=cumulative_fee_usdt,
             kline_session_rows=kline_session_rows,
             last_gate_flags=last_gate_flags,
+            **_align_kwargs(),
         )
     except (TypeError, ValueError):
         return LiveRunnerState(
@@ -228,6 +364,7 @@ def _state_from_json(payload: Dict[str, Any]) -> LiveRunnerState:
             cumulative_fee_usdt=cumulative_fee_usdt,
             kline_session_rows=kline_session_rows,
             last_gate_flags=last_gate_flags,
+            **_align_kwargs(),
         )
 
 
@@ -458,6 +595,11 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Max rows persisted in session K-line buffer (state JSON).",
     )
     parser.add_argument(
+        "--keep-kline-buffer",
+        action="store_true",
+        help="保留 state 還原的 kline_session_rows；預設啟動時清空，下次 update 會自 API 尾端重種連續 K 線。",
+    )
+    parser.add_argument(
         "--render_pos_delta_eps",
         type=float,
         default=0.02,
@@ -529,6 +671,7 @@ def _build_config(args: argparse.Namespace) -> LiveRunnerConfig:
         render_pos_delta_eps=float(getattr(args, "render_pos_delta_eps", 0.02)),
         render_max_visible_kline_bars=int(max(10, int(getattr(args, "render_max_visible_bars", 500)))),
         render_max_kline_buffer_rows=int(max(50, int(getattr(args, "render_max_kline_buffer_rows", 2000)))),
+        keep_kline_buffer=bool(getattr(args, "keep_kline_buffer", False)),
     )
 
 
@@ -545,6 +688,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     runner = LiveRunner(cfg, fee_provider=fee_provider)
     state_path = str(getattr(args, "state_path", os.path.join(_PROJECT_ROOT, ".live_runner_state.json")))
     state = _load_state(state_path)
+    if not bool(cfg.keep_kline_buffer):
+        state.kline_session_rows = []
 
     record_dir = str(getattr(args, "record_dir", "")).strip()
     state_csv_path = str(getattr(args, "state_csv_path", os.path.join(_PROJECT_ROOT, "logs", "live_state_history.csv")))

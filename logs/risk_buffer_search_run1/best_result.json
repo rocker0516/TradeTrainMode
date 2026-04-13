@@ -1,0 +1,32 @@
+{
+  "status": "no_success_found",
+  "best_result": {
+    "candidate": "config_default",
+    "profit_mean": 0.0,
+    "profit_per_trade_mean": 0.0,
+    "trade_count_mean": 0.0,
+    "episode_steps_mean": 3463.8,
+    "total_fees_mean": 0.0,
+    "fees_profit_ratio": 0.0,
+    "trade_rate": 0.0,
+    "trades_per_day": 0.0,
+    "episode_max_dd_mean": 0.0,
+    "termination_balance_insufficient_count": 0.0,
+    "termination_liq_count": 0.0,
+    "lambda_risk": 1.0,
+    "lambda_buffer": 0.0001,
+    "seed": 42
+  },
+  "best_score": [
+    2.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "criteria": {
+    "max_dd": 0.4,
+    "max_fees_profit_ratio": 1.0
+  }
+}

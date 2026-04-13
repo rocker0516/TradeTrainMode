@@ -952,9 +952,19 @@ def main() -> None:
     parser.add_argument("--phase", choices=["A", "B"], default="B", help="Phase A=只放寬控制, B=再加 cost_risk 懲罰")
     parser.add_argument("--timesteps", type=int, default=12_000_000) # 288 * 21 * 48 * 20 = 261,360,000
     parser.add_argument("--n-envs", type=int, default=64)
-    parser.add_argument("--lambda-risk", type=float, default=1.0, help="Phase B 時 cost_risk（事件型）的權重")
-    parser.add_argument("--lambda-buffer", type=float, default=0.0001, help="Phase B 時 cost_risk_dense（dense 緩衝懲罰）的權重")
-    parser.add_argument("--lambda-turnover", type=float, default=0.0001, help="Phase B 時 cost_turnover（換手成本）的權重")
+    parser.add_argument(
+        "--lambda-risk",
+        type=float,
+        default=5.0,
+        help="Phase B 時 cost_risk（死亡／強平事件）權重；偏高較厭惡早死",
+    )
+    parser.add_argument(
+        "--lambda-buffer",
+        type=float,
+        default=0.001,
+        help="Phase B 時 cost_risk_dense（貼近 min_balance 的每步懲罰）權重；偏高較早遠離爆倉帶",
+    )
+    parser.add_argument("--lambda-turnover", type=float, default=0.0002, help="Phase B 時 cost_turnover（換手成本）的權重")
     parser.add_argument(
         "--turnover-quadratic-coef",
         type=float,

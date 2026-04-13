@@ -69,6 +69,37 @@ def test_update_kline_session_buffer_seeds_then_appends() -> None:
     assert state.kline_session_rows[-1]["timestamp"] != last_ts
 
 
+def test_update_kline_session_buffer_resyncs_on_large_time_gap() -> None:
+    """緩衝末根與 API 最新收盤相隔超過 10 分鐘時應清空並重種（避免停機後只 append 造成時間斷層）。"""
+    merged = _dummy_merged_plus(n=6)
+    state = LiveRunnerState()
+    update_kline_session_buffer(
+        state,
+        df_5m=merged,
+        symbol="BTCUSDT",
+        window_size_5m=3,
+        max_buffer_rows=100,
+    )
+    assert len(state.kline_session_rows) == 3
+
+    closed_only = merged.iloc[:-1].copy()
+    closed_only.loc[closed_only.index[-1], "timestamp"] = closed_only["timestamp"].iloc[-1] + pd.Timedelta(hours=24)
+    last_ts_far = closed_only["timestamp"].iloc[-1]
+    dummy = closed_only.iloc[[-1]].copy()
+    dummy.loc[:, "timestamp"] = last_ts_far + pd.Timedelta(minutes=5)
+    merged_far = pd.concat([closed_only, dummy], ignore_index=True)
+
+    update_kline_session_buffer(
+        state,
+        df_5m=merged_far,
+        symbol="BTCUSDT",
+        window_size_5m=3,
+        max_buffer_rows=100,
+    )
+    assert len(state.kline_session_rows) == 3
+    assert state.kline_session_rows[-1]["timestamp"] == str(pd.Timestamp(last_ts_far))[:19]
+
+
 def test_state_roundtrip_keeps_kline_and_gate_flags(tmp_path) -> None:  # type: ignore[no-untyped-def]
     from LiveTradingRunner.live_trading_loop import _save_state, _load_state
 

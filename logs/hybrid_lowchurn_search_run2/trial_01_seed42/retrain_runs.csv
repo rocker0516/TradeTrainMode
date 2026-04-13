@@ -1,0 +1,2 @@
+candidate,seed,window_size,window_size_1d,no_trade_entry_threshold,no_trade_exit_threshold,min_position_change,max_step_pos_change_pct,lambda_turnover,profit_mean,profit_per_trade_mean,trade_count_mean,episode_steps_mean,total_fees_mean,episode_max_dd_mean,termination_balance_insufficient_count,fees_profit_ratio,trade_rate,trades_per_day
+hybrid_minimal_signal,42,12,6,0.24,0.11,0.22,0.35,0.0001,-12.67741489656604,-0.16821863194773612,83.8,3277.0,6.687000553074375,0.07874623800172065,0,0.5274735115662814,0.0255721696673787,7.364784864205066

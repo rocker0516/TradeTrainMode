@@ -11,5 +11,11 @@ def test_cli_defaults_are_safe() -> None:
     assert isinstance(bool(args.loop), bool)
     assert isinstance(bool(args.once), bool)
     assert isinstance(bool(getattr(args, "print_obs_account_context", False)), bool)
+    assert getattr(args, "keep_kline_buffer", None) is False
+
+
+def test_cli_keep_kline_buffer_flag() -> None:
+    args = _parse_args(["--keep-kline-buffer"])
+    assert args.keep_kline_buffer is True
 
 

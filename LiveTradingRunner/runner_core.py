@@ -20,6 +20,18 @@ from Env.Executors.trade_executor import TradeExecutor
 from Env.config import Config
 from LiveTradingRunner.binance_market_data import LatestBarsResult, fetch_latest_multi_symbol_5m
 from LiveTradingRunner.fee_provider import BinanceFeeRateProvider
+from LiveTradingRunner.live_obs_align import (
+    append_flat_window,
+    build_account_metrics_live,
+    default_episode_max_steps_cap,
+    default_flat_window_steps,
+    default_min_balance_usdt,
+    estimate_expected_fee_usdt,
+    merge_completed_last_action_effects,
+    paper_position_qty,
+    sync_executor_snapshot_for_obs_cache,
+    update_fee_rolling_live,
+)
 from LiveTradingRunner.live_trading_loop import LiveRunnerConfig, LiveRunnerState, TickDecision
 from LiveTradingRunner.local_1d_loader import load_local_1d_data
 from LiveTradingRunner.obs_builder import LiveObsBuilder
@@ -81,6 +93,7 @@ def update_kline_session_buffer(
 
     - 緩衝為空時：填入最近 ``window_size_5m`` 根已收盤 K（與 LiveObsBuilder window 對齊）。
     - 之後每根新收盤 bar：若時間戳與緩衝最後一根不同則 append。
+    - 若緩衝最後一根與 API 最新已收盤時間相差超過 10 分鐘（超過單根 5m 間隔容忍），視為停機／缺資料，清空並改以尾端重種。
     - 超過 ``max_buffer_rows`` 時由左側截斷。
 
     Args:
@@ -96,6 +109,18 @@ def update_kline_session_buffer(
     w = int(max(1, window_size_5m))
     w_eff = int(min(w, len(closed_df)))
     buf = state.kline_session_rows
+    latest_ts = pd.Timestamp(closed_df.iloc[-1]["timestamp"])
+    if buf:
+        buf_last_ts = pd.to_datetime(str(buf[-1].get("timestamp", "")), errors="coerce")
+        if pd.isna(buf_last_ts):
+            state.kline_session_rows = []
+            buf = state.kline_session_rows
+        else:
+            gap = latest_ts - pd.Timestamp(buf_last_ts)
+            max_gap = pd.Timedelta(minutes=10)
+            if gap < pd.Timedelta(0) or gap > max_gap:
+                state.kline_session_rows = []
+                buf = state.kline_session_rows
     if not buf:
         tail = closed_df.iloc[-w_eff:]
         state.kline_session_rows = [_kline_row_to_dict(tail.iloc[i]) for i in range(len(tail))]
@@ -284,10 +309,55 @@ class LiveRunner:
             current_pos_qty = float(tc.get_current_position_size(cfg.symbol))
             filters = tc.get_symbol_filters(symbol=cfg.symbol, default_min_notional=float(cfg.default_min_notional_usdt))
 
+        equity_for_obs = float(equity) if equity is not None else float(getattr(state, "paper_equity_usdt", 1000.0))
+        price_obs = float(latest.latest_closed_price)
+        prev_final_pos_pct = float(getattr(state, "last_final_pos_pct", 0.0))
+        qty_for_action: Optional[float] = (
+            float(current_pos_qty) if current_pos_qty is not None else None
+        )
+        if qty_for_action is None:
+            qty_for_action = float(
+                paper_position_qty(
+                    equity_usdt=float(equity_for_obs),
+                    leverage=float(cfg.leverage),
+                    pos_pct=float(prev_final_pos_pct),
+                    price=float(price_obs),
+                )
+            )
+
+        if not bool(getattr(state, "obs_metrics_initialized", False)):
+            state.session_initial_balance_usdt = float(equity_for_obs)
+            state.max_equity_so_far_usdt = float(equity_for_obs)
+            state.obs_metrics_initialized = True
+        state.max_equity_so_far_usdt = float(max(float(state.max_equity_so_far_usdt), float(equity_for_obs)))
+
+        if int(getattr(state, "stop_loss_cooldown_live", 0) or 0) > 0:
+            state.stop_loss_cooldown_live = int(max(0, int(state.stop_loss_cooldown_live) - 1))
+
+        trade_freq_blocked_last = float(getattr(state, "last_action_effects", {}).get("trade_freq_blocked", 0.0))
+        account_metrics_live = build_account_metrics_live(
+            session_initial_balance=float(state.session_initial_balance_usdt),
+            max_equity_so_far=float(state.max_equity_so_far_usdt),
+            episode_stop_loss_count=int(state.live_episode_stop_loss_count),
+            episode_liq_count=int(state.live_episode_liq_count),
+            risk_budget=float(state.live_risk_budget),
+            decision_step_completed=int(getattr(state, "decision_step", 0)),
+            episode_max_steps_cap=int(default_episode_max_steps_cap()),
+            last_trade_decision_step=int(state.last_trade_decision_step),
+            position_entry_decision_step=getattr(state, "position_entry_decision_step", None),
+            last_step_fee=float(state.last_step_fee_usdt),
+            rolling_fee_sum=float(state.rolling_fee_sum_usdt),
+            cooldown_remaining=float(getattr(state, "stop_loss_cooldown_live", 0) or 0),
+            min_balance=float(default_min_balance_usdt(session_initial_balance=float(state.session_initial_balance_usdt))),
+            window_size_5m=int(cfg.window_size_5m),
+            recent_flat_ratio=float(getattr(state, "recent_flat_ratio", 0.5)),
+            trade_freq_blocked_last=float(trade_freq_blocked_last),
+        )
+
         # ---- build a lightweight executor for action processing alignment (same as Train/Eval env) ----
         # - 不負責真的下單（真下單走 ITradingClient）
         # - 只用來複用 ActionProcessor 的 max_step_pos_change / hysteresis 邏輯
-        init_balance = float(equity) if equity is not None else float(getattr(Config, "INITIAL_BALANCE", 1000.0))
+        init_balance = float(equity_for_obs)
         exec_for_action = TradeExecutor(
             initial_balance=float(init_balance),
             fee_rate=float(fee_pct_live),
@@ -300,8 +370,18 @@ class LiveRunner:
             min_position_change=float(getattr(cfg, "min_position_change", 0.0)),
         )
         exec_for_action.wallet_balance = float(init_balance)
-        if current_pos_qty is not None:
-            exec_for_action.position.size = float(current_pos_qty)
+        exec_for_action.position.size = float(qty_for_action)
+        if abs(float(exec_for_action.position.size)) > 1e-12 and float(exec_for_action.position.entry_price) <= 0.0:
+            exec_for_action.position.entry_price = float(price_obs)
+        if abs(float(exec_for_action.position.size)) > 1e-12 and float(exec_for_action.position.entry_price) > 0.0:
+            exec_for_action.used_margin = float(
+                max(
+                    0.0,
+                    abs(float(exec_for_action.position.size))
+                    * float(exec_for_action.position.entry_price)
+                    / float(cfg.leverage),
+                )
+            )
 
         # obs
         obs_builder = LiveObsBuilder(
@@ -316,8 +396,10 @@ class LiveRunner:
         obs_result = obs_builder.build(
             df_5m=latest.df_5m,
             df_1d=self._df_1d,
-            equity_usdt=equity,
-            current_position_qty=current_pos_qty,
+            equity_usdt=float(equity_for_obs),
+            current_position_qty=float(qty_for_action),
+            last_action_effects=dict(getattr(state, "last_action_effects", {})),
+            account_metrics=account_metrics_live,
         )
         obs_named: Optional[Dict[str, Dict[str, float]]] = None
         if bool(getattr(cfg, "print_obs_account_context", False)):
@@ -375,9 +457,91 @@ class LiveRunner:
             float(state.risk_base_usdt) if state.risk_base_usdt is not None else float(init_balance),
         )
 
+        decision_step_before = int(getattr(state, "decision_step", 0))
+        traded = bool(abs(float(final_pos_pct) - float(prev_final_pos_pct)) > 1e-8)
+        action_overridden = bool(
+            abs(float(action_raw) - float(action_clipped)) > 1e-6
+            or abs(float(target_pos_pct) - float(final_pos_pct)) > 1e-5
+        )
+        expected_fee = float(
+            estimate_expected_fee_usdt(
+                final_pos_pct=float(final_pos_pct),
+                last_equity=float(equity_for_obs),
+                current_price=float(price_obs),
+                current_size=float(qty_for_action),
+                leverage=float(cfg.leverage),
+                fee_rate_pct=float(fee_pct_live),
+            )
+        )
+        new_qty = float(
+            paper_position_qty(
+                equity_usdt=float(equity_for_obs),
+                leverage=float(cfg.leverage),
+                pos_pct=float(final_pos_pct),
+                price=float(price_obs),
+            )
+        )
+        entry_px = float(price_obs) if abs(new_qty) > 1e-12 else 0.0
+        sync_executor_snapshot_for_obs_cache(
+            exec_for_action,
+            wallet_balance=float(equity_for_obs),
+            position_qty=float(new_qty),
+            entry_price=float(entry_px),
+        )
+        cd_max = float(max(1, int(getattr(Config, "STOP_LOSS_COOLDOWN_STEPS", 0) or 0)))
+        cd_rem = float(getattr(state, "stop_loss_cooldown_live", 0) or 0)
+        cooldown_norm = float(np.clip(cd_rem / cd_max, 0.0, 1.0)) if cd_max > 0 else 0.0
+
+        state.last_action_effects = merge_completed_last_action_effects(
+            base=dict(getattr(state, "last_action_effects", {})),
+            executor=exec_for_action,
+            expected_fee=float(expected_fee),
+            current_price=float(price_obs),
+            action_raw=float(action_raw),
+            action_used_scalar=float(action_clipped),
+            target_pos_pct=float(target_pos_pct),
+            final_pos_pct=float(final_pos_pct),
+            traded=bool(traded),
+            action_overridden_flag=bool(action_overridden),
+            trade_freq_blocked=False,
+            cooldown_remaining_norm=float(cooldown_norm),
+        )
+
+        if traded:
+            state.last_trade_decision_step = int(decision_step_before)
+        next_ds = int(decision_step_before + 1)
+        if abs(float(final_pos_pct)) < 1e-8:
+            state.position_entry_decision_step = None
+        elif float(prev_final_pos_pct) * float(final_pos_pct) < 0.0 or abs(float(prev_final_pos_pct)) < 1e-8:
+            state.position_entry_decision_step = int(next_ds)
+
+        turnover_pct = abs(float(final_pos_pct) - float(prev_final_pos_pct))
+        step_fee_est = float(max(0.0, float(equity_for_obs) * turnover_pct * (float(fee_pct_live) / 100.0)))
+        fh_tuples = [(int(p[0]), float(p[1])) for p in getattr(state, "fee_history_pairs", []) if len(p) >= 2]
+        fh_new, roll_sum, last_sf = update_fee_rolling_live(
+            fee_history=fh_tuples,
+            rolling_fee_sum=float(state.rolling_fee_sum_usdt),
+            decision_step=int(next_ds),
+            step_fee=float(step_fee_est),
+            fee_window=int(getattr(Config, "FEE_ROLLING_WINDOW", 288)),
+        )
+        state.fee_history_pairs = [[float(a), float(b)] for a, b in fh_new]
+        state.rolling_fee_sum_usdt = float(roll_sum)
+        state.last_step_fee_usdt = float(last_sf)
+
+        flat_th = float(0.02)
+        is_flat = bool(abs(float(final_pos_pct)) < flat_th)
+        fw_new, flat_ratio = append_flat_window(
+            list(getattr(state, "flat_window_flags", []) or []),
+            is_flat=bool(is_flat),
+            max_len=int(default_flat_window_steps()),
+        )
+        state.flat_window_flags = fw_new
+        state.recent_flat_ratio = float(flat_ratio)
+
         # 更新 state：供 action_repeat / risk_base 用
         state.last_final_pos_pct = float(final_pos_pct)
-        state.decision_step = int(getattr(state, "decision_step", 0) + 1)
+        state.decision_step = int(next_ds)
         state.steps_since_risk_base_update = int(getattr(state, "steps_since_risk_base_update", 0) + 1)
 
         target_qty = None

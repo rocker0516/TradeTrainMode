@@ -32,15 +32,16 @@ class LiveRefreshRenderer:
         self._max_visible = int(max(10, self.max_visible_bars))
         self._csv_path = os.path.join(self.data_dir, f"{self.symbol}_futures_volume_5years_5min.csv")
         plt.ion()
+        # 不在此處 tight_layout：refresh 會動態加 twinx / legend / suptitle，初次 layout 會與後續衝突而跑版。
+        # 勿用 sharex：mplfinance 在部分設定下會用「棒號」座標，與 mdates.date2num 混用會整張圖跑版。
         self._fig, axes = plt.subplots(
             nrows=4,
             ncols=1,
             figsize=(13, 11),
-            sharex=True,
+            sharex=False,
             gridspec_kw={"height_ratios": [3, 1, 1, 1]},
         )
         self._ax_price, self._ax_gate_conv, self._ax_pos, self._ax_equity = axes
-        self._fig.tight_layout(pad=1.2)
 
     def _load_recent_klines_csv_fallback(self) -> pd.DataFrame:
         """當 session OHLC 緩衝為空時，以本機 CSV 作 offline fallback。"""
@@ -123,6 +124,58 @@ class LiveRefreshRenderer:
                     color=color,
                 )
 
+    def _draw_price_matplotlib_ohlc(self, df_price: pd.DataFrame) -> None:
+        """
+        以 matplotlib 手動畫 K 線，x 一律為 mdates.date2num(timestamp)。
+
+        避免 mplfinance 在 show_nontrading=False 等情況使用「棒號」座標，與下方子圖的
+        date2num 不一致而導致 sharex 時整張圖壓縮到左側。
+        """
+        ts_raw = pd.to_datetime(df_price["timestamp"], errors="coerce")
+        df = df_price.loc[ts_raw.notna()].copy().reset_index(drop=True)
+        if df.empty:
+            return
+        ts = pd.to_datetime(df["timestamp"], errors="coerce")
+        if not bool(ts.notna().all()):
+            return
+        x = np.asarray(mdates.date2num(ts), dtype=float)
+        o = df["open"].astype(float).to_numpy()
+        h = df["high"].astype(float).to_numpy()
+        l = df["low"].astype(float).to_numpy()
+        c = df["close"].astype(float).to_numpy()
+        n = int(len(x))
+        if n >= 2:
+            width = float(np.median(np.diff(np.sort(x)))) * 0.68
+        else:
+            width = 3.0 / (24.0 * 60.0)
+        width = max(width, 1e-9)
+        for i in range(n):
+            self._ax_price.plot(
+                [x[i], x[i]],
+                [l[i], h[i]],
+                color="black",
+                linewidth=0.85,
+                solid_capstyle="round",
+                zorder=1,
+            )
+            up = bool(c[i] >= o[i])
+            col = "#26a69a" if up else "#ef5350"
+            body_bot = float(min(o[i], c[i]))
+            body_h = max(abs(float(c[i] - o[i])), max(float(h[i] - l[i]), 1e-12) * 1e-5)
+            self._ax_price.bar(
+                x[i],
+                body_h,
+                width=width,
+                bottom=body_bot,
+                color=col,
+                edgecolor=col,
+                linewidth=0.35,
+                align="center",
+                zorder=2,
+            )
+        self._ax_price.set_ylabel("Price")
+        self._ax_price.xaxis_date()
+
     def _draw_price(
         self,
         df_price: pd.DataFrame,
@@ -135,30 +188,7 @@ class LiveRefreshRenderer:
         if df_price.empty:
             self._ax_price.set_title(f"{self.symbol} - waiting for 5m data")
             return
-        try:
-            import mplfinance as mpf
-
-            plot_df = df_price.set_index("timestamp").rename(
-                columns={
-                    "open": "Open",
-                    "high": "High",
-                    "low": "Low",
-                    "close": "Close",
-                }
-            )
-            mpf.plot(
-                plot_df,
-                type="candle",
-                ax=self._ax_price,
-                volume=False,
-                style="charles",
-                show_nontrading=True,
-                warn_too_much_data=max(2000, int(len(plot_df) + 10)),
-            )
-        except Exception:
-            self._ax_price.plot(df_price["timestamp"], df_price["close"], color="tab:blue", linewidth=1.0)
-        self._ax_price.set_ylabel("Price")
-        self._ax_price.xaxis_date()
+        self._draw_price_matplotlib_ohlc(df_price)
         if sideway_mask_tail is not None and take > 0 and len(df_price) >= take:
             ts_tail = pd.to_datetime(df_price["timestamp"].iloc[-take:])
             side = np.asarray(sideway_mask_tail, dtype=bool).reshape(-1)
@@ -237,12 +267,12 @@ class LiveRefreshRenderer:
         self._ax_gate_conv.axhline(0.0, color="gray", linewidth=0.6, linestyle="--", alpha=0.6)
         self._ax_gate_conv.set_ylim(-1.15, 1.15)
         self._ax_gate_conv.set_ylabel("Regime / 5m trend")
+        # 標題過長會佔滿子圖上方、擠壓曲線；改短標題 + 圖例放邊外避免與資料重疊
         self._ax_gate_conv.set_title(
-            "Navy step=1d Gate A/C (piecewise by day); green=Gate B liq (5m); "
-            "cyan dotted=tanh(scale*trend) signed; right axis=|tanh| (reward strength)",
+            "1d A/C (step) | Gate B band | 5m tanh (dotted) | R: |tanh| strength",
             fontsize=8,
         )
-        self._ax_gate_conv.legend(loc="upper left", fontsize=6)
+        self._ax_gate_conv.legend(loc="upper left", fontsize=6, framealpha=0.92)
 
         ax_r = self._ax_gate_conv.twinx()
         self._ax_conv_r = ax_r
@@ -256,13 +286,44 @@ class LiveRefreshRenderer:
         )
         ax_r.set_ylim(0.0, 1.05)
         ax_r.set_ylabel("Conv strength")
-        ax_r.legend(loc="upper right", fontsize=7)
+        ax_r.legend(loc="upper right", fontsize=6, framealpha=0.92)
 
     def _apply_datetime_xaxis(self) -> None:
         """四圖共用實際日期時間刻度（與資料 timestamp 一致，通常為交易所 UTC）。"""
         for ax in (self._ax_price, self._ax_gate_conv, self._ax_pos, self._ax_equity):
             ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=5, maxticks=16))
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d %H:%M"))
+
+    def _apply_shared_xlim_from_ohlc(self, df_price: pd.DataFrame) -> None:
+        """
+        強制四子圖 x 軸與 OHLC 可視區間一致（與手動 OHLC / date2num 同一座標系）。
+
+        以「最後一根 K」為錨點、寬度約 ``min(n_rows, max_visible) × 5m``，避免 session
+        內 timestamp 不連續時用全域 min/max 把中間空段撐滿視窗。
+        """
+        if df_price.empty or "timestamp" not in df_price.columns:
+            return
+        ts = pd.to_datetime(df_price["timestamp"], errors="coerce")
+        ts = ts.dropna()
+        if len(ts) == 0:
+            return
+        n_bars = int(min(len(ts), self._max_visible))
+        t1 = pd.Timestamp(ts.iloc[-1])
+        t0 = t1 - pd.Timedelta(minutes=5 * max(0, n_bars - 1))
+        try:
+            x0 = float(mdates.date2num(t0))
+            x1 = float(mdates.date2num(t1))
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not (np.isfinite(x0) and np.isfinite(x1)):
+            return
+        span = max(float(x1 - x0), 1.0 / (24.0 * 60.0))
+        pad = float(span * 0.03)
+        lo, hi = x0 - pad, x1 + pad
+        for ax in (self._ax_price, self._ax_gate_conv, self._ax_pos, self._ax_equity):
+            ax.set_xlim(lo, hi)
+            # 避免後續事件 / autoscale 再次把 x 軸收成單點
+            ax.set_autoscalex_on(False)
 
     def refresh(
         self,
@@ -383,7 +444,17 @@ class LiveRefreshRenderer:
             ts_tail = pd.to_datetime(df_use["timestamp"].iloc[-take:])
             xp = mdates.date2num(ts_tail)
             yp = np.asarray(list(position_history)[-take:], dtype=float)
-            self._ax_pos.plot(xp, yp, color="tab:orange", linewidth=1.2)
+            if take <= 3:
+                self._ax_pos.plot(
+                    xp,
+                    yp,
+                    color="tab:orange",
+                    linewidth=1.2,
+                    marker="o",
+                    markersize=7,
+                )
+            else:
+                self._ax_pos.plot(xp, yp, color="tab:orange", linewidth=1.2)
         m = float(max(0.01, abs(max_position_pct)))
         self._ax_pos.set_ylim(-1.05 * m, 1.05 * m)
         self._ax_pos.set_ylabel("Pos %")
@@ -393,7 +464,17 @@ class LiveRefreshRenderer:
             ts_tail = pd.to_datetime(df_use["timestamp"].iloc[-take:])
             xp = mdates.date2num(ts_tail)
             ye = np.asarray(list(equity_history)[-take:], dtype=float)
-            self._ax_equity.plot(xp, ye, color="tab:green", linewidth=1.2)
+            if take <= 3:
+                self._ax_equity.plot(
+                    xp,
+                    ye,
+                    color="tab:green",
+                    linewidth=1.2,
+                    marker="o",
+                    markersize=7,
+                )
+            else:
+                self._ax_equity.plot(xp, ye, color="tab:green", linewidth=1.2)
         self._ax_equity.set_ylabel("Equity")
         self._ax_equity.set_xlabel("Time (YYYY-MM-DD HH:MM, bar timestamps, typically UTC)")
 
@@ -401,9 +482,26 @@ class LiveRefreshRenderer:
             f"{self.symbol} | bar={closed_bar_ts} | equity={paper_equity_usdt:.2f} "
             f"| profit={paper_profit_usdt:.2f} | fee={fee_rate_pct:.4f}% | pos={final_pos_pct:.3f}"
         )
-        self._fig.suptitle(title, fontsize=11)
+        self._fig.suptitle(title, fontsize=11, y=0.995)
         self._apply_datetime_xaxis()
-        self._fig.autofmt_xdate(rotation=18)
+        # autofmt_xdate 會自行 subplots_adjust，常與 twinx / 多子圖疊加後跑版；改手動旋轉 + 統一 tight_layout
+        for ax in (self._ax_price, self._ax_gate_conv, self._ax_pos, self._ax_equity):
+            for lbl in ax.get_xticklabels():
+                lbl.set_rotation(18)
+                lbl.set_ha("right")
+        try:
+            self._fig.tight_layout(
+                rect=(0.02, 0.02, 0.98, 0.92),
+                pad=0.6,
+                h_pad=0.85,
+                w_pad=0.4,
+            )
+        except Exception:
+            # 極端情況（例如某軸無資料）tight_layout 可能失敗，仍嘗試畫出
+            self._fig.subplots_adjust(left=0.08, right=0.96, top=0.90, bottom=0.08, hspace=0.28)
+        # 必須在 layout 之後：修正 sharex +「決策序列比 K 線根數短」時的 x 軸被壓扁
+        if not df_use.empty:
+            self._apply_shared_xlim_from_ohlc(df_use)
         self._fig.canvas.draw_idle()
         plt.pause(0.001)
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -93,7 +94,17 @@ def _build_model(vec_env: VecEnv, device: str) -> SAC:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="低成本 observation 候選重訓驗證")
-    parser.add_argument("--candidate-json", type=str, required=True)
+    parser.add_argument(
+        "--candidate-json",
+        type=str,
+        default="",
+        help="candidate_feature_sets.json 路徑；與 --config-only 擇一：後者不需此檔",
+    )
+    parser.add_argument(
+        "--config-only",
+        action="store_true",
+        help="不覆寫 observation，直接使用 Env.config.Config 與 PhaseABEnvConfig 當前設定重訓",
+    )
     parser.add_argument(
         "--candidate-names",
         type=str,
@@ -120,9 +131,16 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    candidate_names = _parse_csv(args.candidate_names)
+    if bool(args.config_only):
+        candidate_names = ["config_default"]
+        candidates: dict[str, dict[str, Any]] = {"config_default": {}}
+    else:
+        if not str(args.candidate_json or "").strip():
+            raise SystemExit("需要 --candidate-json，或使用 --config-only")
+        candidate_names = _parse_csv(args.candidate_names)
+        candidates = _load_candidates(str(args.candidate_json), candidate_names)
+
     seeds = _parse_int_csv(args.seeds)
-    candidates = _load_candidates(args.candidate_json, candidate_names)
 
     rows: list[dict[str, Any]] = []
 
@@ -132,7 +150,12 @@ def main() -> None:
             continue
         for seed in seeds:
             print(f"[Retrain] candidate={candidate_name} seed={seed}", flush=True)
-            with temporary_observation_config(candidate):
+            obs_ctx: contextlib.AbstractContextManager[Any] = (
+                contextlib.nullcontext()
+                if bool(args.config_only)
+                else temporary_observation_config(candidate)
+            )
+            with obs_ctx:
                 env_kwargs_train = get_phase_ab_env_kwargs(
                     data_split_enabled=True,
                     holdout_months=int(args.holdout_months),
@@ -192,10 +215,13 @@ def main() -> None:
                         print_per_episode=False,
                     )
                     summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+                    term_counts = payload.get("termination_reason_counts") or {}
                     rows.append(
                         {
                             "candidate": candidate_name,
                             "seed": int(seed),
+                            "lambda_risk": float(args.lambda_risk),
+                            "lambda_buffer": float(args.lambda_buffer),
                             "window_size": int(candidate.get("WINDOW_SIZE", PhaseABEnvConfig.WINDOW_SIZE)),
                             "window_size_1d": int(candidate.get("WINDOW_SIZE_1D", PhaseABEnvConfig.WINDOW_SIZE_1D)),
                             "no_trade_entry_threshold": float(env_kwargs_train.get("no_trade_entry_threshold", 0.0)),
@@ -206,11 +232,13 @@ def main() -> None:
                             "profit_mean": float(((summary.get("profit") or {}).get("mean")) or 0.0),
                             "profit_per_trade_mean": float(((summary.get("profit_per_trade") or {}).get("mean")) or 0.0),
                             "trade_count_mean": float(((summary.get("episode_trade_count") or {}).get("mean")) or 0.0),
+                            "episode_steps_mean": float(((summary.get("episode_steps") or {}).get("mean")) or 0.0),
                             "total_fees_mean": float(((summary.get("total_fees") or {}).get("mean")) or 0.0),
                             "episode_max_dd_mean": float(((summary.get("episode_max_dd") or {}).get("mean")) or 0.0),
                             "termination_balance_insufficient_count": int(
-                                ((payload.get("termination_reason_counts") or {}).get("balance_insufficient")) or 0
+                                term_counts.get("balance_insufficient", 0) or 0
                             ),
+                            "termination_liq_count": int(term_counts.get("liq_triggered", 0) or 0),
                         }
                     )
                 finally:
@@ -218,16 +246,26 @@ def main() -> None:
 
     df_runs = pd.DataFrame(rows)
     df_runs["fees_profit_ratio"] = df_runs["total_fees_mean"] / df_runs["profit_mean"].abs().clip(lower=1e-8)
+    df_runs["trade_rate"] = df_runs["trade_count_mean"] / df_runs["episode_steps_mean"].clip(lower=1e-8)
+    df_runs["trades_per_day"] = df_runs["trade_count_mean"] / (df_runs["episode_steps_mean"] / 288.0).clip(lower=1e-8)
+    group_cols = ["candidate"]
+    for col in ("lambda_risk", "lambda_buffer"):
+        if col in df_runs.columns and df_runs[col].nunique(dropna=False) > 1:
+            group_cols.append(col)
     df_summary = (
-        df_runs.groupby("candidate", as_index=False)
+        df_runs.groupby(group_cols, as_index=False)
         .agg(
             profit_mean=("profit_mean", "mean"),
             profit_per_trade_mean=("profit_per_trade_mean", "mean"),
             trade_count_mean=("trade_count_mean", "mean"),
+            episode_steps_mean=("episode_steps_mean", "mean"),
             total_fees_mean=("total_fees_mean", "mean"),
             fees_profit_ratio=("fees_profit_ratio", "mean"),
+            trade_rate=("trade_rate", "mean"),
+            trades_per_day=("trades_per_day", "mean"),
             episode_max_dd_mean=("episode_max_dd_mean", "mean"),
             termination_balance_insufficient_count=("termination_balance_insufficient_count", "mean"),
+            termination_liq_count=("termination_liq_count", "mean"),
         )
         .sort_values(by=["profit_per_trade_mean", "fees_profit_ratio"], ascending=[False, True])
     )

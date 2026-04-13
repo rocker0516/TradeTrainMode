@@ -1,0 +1,2 @@
+candidate,profit_mean,profit_per_trade_mean,trade_count_mean,episode_steps_mean,total_fees_mean,fees_profit_ratio,trade_rate,trades_per_day,episode_max_dd_mean,termination_balance_insufficient_count,termination_liq_count
+config_default,0.0,0.0,0.0,3463.8,0.0,0.0,0.0,0.0,0.0,0.0,0.0

@@ -1,0 +1,2 @@
+candidate,profit_mean,profit_per_trade_mean,trade_count_mean,episode_steps_mean,total_fees_mean,fees_profit_ratio,trade_rate,trades_per_day,episode_max_dd_mean,termination_balance_insufficient_count
+hybrid_minimal_signal,-5.689673010929027,-0.1275549013178972,43.8,4138.2,3.8264393834415658,0.6725236012845619,0.010584312019718718,3.048281861678991,0.03037155024340743,0.0

@@ -14,14 +14,14 @@ class PhaseABEnvConfig:
 
     ENV_ID: int = 0
     RANDOM_START: bool = True
-    WINDOW_SIZE: int = 24
-    WINDOW_SIZE_1D: int = 12
+    WINDOW_SIZE: int = 12
+    WINDOW_SIZE_1D: int = 6
     DEFAULT_MAX_EPISODE_STEPS: int = 288 * 31
 
-    NO_TRADE_ENTRY_THRESHOLD: float = 0.2
-    NO_TRADE_EXIT_THRESHOLD: float = 0.1
-    MAX_STEP_POS_CHANGE_PCT: float = 0.4
-    MIN_POSITION_CHANGE: float = 0.2
+    NO_TRADE_ENTRY_THRESHOLD: float = 0.24
+    NO_TRADE_EXIT_THRESHOLD: float = 0.12
+    MAX_STEP_POS_CHANGE_PCT: float = 0.3
+    MIN_POSITION_CHANGE: float = 0.25
     # 目標持倉比例上限 |w|<=MAX_POSITION_PCT（與 ActionProcessor clip、action_space 一致）；Phase A/B 訓練／eval 由 get_phase_ab_env_kwargs 傳入。
     MAX_POSITION_PCT: float = 0.8
 

@@ -78,9 +78,11 @@ def test_phase_ab_numeric_anchors() -> None:
 
 
 def test_phase_ab_env_config_fields_mirror_documented_recipe() -> None:
-    assert PhaseABEnvConfig.WINDOW_SIZE == 14
-    assert PhaseABEnvConfig.WINDOW_SIZE_1D == 12
-    assert PhaseABEnvConfig.NO_TRADE_ENTRY_THRESHOLD == 0.2
-    assert PhaseABEnvConfig.MAX_STEP_POS_CHANGE_PCT == 0.4
+    assert PhaseABEnvConfig.WINDOW_SIZE == 12
+    assert PhaseABEnvConfig.WINDOW_SIZE_1D == 6
+    assert PhaseABEnvConfig.NO_TRADE_ENTRY_THRESHOLD == 0.24
+    assert PhaseABEnvConfig.NO_TRADE_EXIT_THRESHOLD == 0.12
+    assert PhaseABEnvConfig.MIN_POSITION_CHANGE == 0.25
+    assert PhaseABEnvConfig.MAX_STEP_POS_CHANGE_PCT == 0.3
     assert PhaseABEnvConfig.DEFAULT_MAX_EPISODE_STEPS == 288 * 31
-    assert PhaseABEnvConfig.NEUTRAL_TRADE_PENALTY_WEIGHT == 0.0
+    assert PhaseABEnvConfig.NEUTRAL_TRADE_PENALTY_WEIGHT == 0.005

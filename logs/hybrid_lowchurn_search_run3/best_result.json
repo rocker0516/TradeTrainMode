@@ -1,0 +1,48 @@
+{
+  "status": "success_confirmed",
+  "search_seed_result": {
+    "candidate": "hybrid_minimal_signal",
+    "profit_mean": 4.7306957307700825,
+    "profit_per_trade_mean": 0.1047349270062403,
+    "trade_count_mean": 45.2,
+    "episode_steps_mean": 4138.2,
+    "total_fees_mean": 3.798489957690074,
+    "fees_profit_ratio": 0.8029453116131271,
+    "trade_rate": 0.0109226233628147,
+    "trades_per_day": 3.1457155284906486,
+    "episode_max_dd_mean": 0.061988516386132,
+    "termination_balance_insufficient_count": 0.0,
+    "no_trade_entry_threshold": 0.24,
+    "no_trade_exit_threshold": 0.12,
+    "min_position_change": 0.25,
+    "max_step_pos_change_pct": 0.3,
+    "lambda_turnover": 0.0002,
+    "seed": 42
+  },
+  "confirm_seed_result": {
+    "candidate": "hybrid_minimal_signal",
+    "profit_mean": 3.765290567322973,
+    "profit_per_trade_mean": 0.4706613209153715,
+    "trade_count_mean": 8.0,
+    "episode_steps_mean": 3979.2,
+    "total_fees_mean": 0.6600029526847273,
+    "fees_profit_ratio": 0.1752860611641913,
+    "trade_rate": 0.0020104543626859,
+    "trades_per_day": 0.5790108564535585,
+    "episode_max_dd_mean": 0.0045722966473468,
+    "termination_balance_insufficient_count": 0.0,
+    "no_trade_entry_threshold": 0.24,
+    "no_trade_exit_threshold": 0.12,
+    "min_position_change": 0.25,
+    "max_step_pos_change_pct": 0.3,
+    "lambda_turnover": 0.0002,
+    "seed": 43
+  },
+  "params": {
+    "no_trade_entry_threshold": 0.24,
+    "no_trade_exit_threshold": 0.12,
+    "min_position_change": 0.25,
+    "max_step_pos_change_pct": 0.3,
+    "lambda_turnover": 0.0002
+  }
+}

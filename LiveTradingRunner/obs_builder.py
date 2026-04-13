@@ -20,29 +20,12 @@ from Env.Components.market_data import MarketData
 from Env.Components.observer import TradingObserver
 from Env.Executors.trade_executor import TradeExecutor
 
+from LiveTradingRunner.live_obs_align import default_last_action_effects
 from LiveTradingRunner.render_history_utils import (
     conviction_strength_from_trend_score,
     gate_flags_to_regime_indicator,
     trend_tanh_signed_from_trend_score,
 )
-
-
-def _default_last_action_effects() -> Dict[str, float]:
-    """與 `TradingEnvironment.reset()` 初始化欄位對齊（全部歸零）。"""
-    return {
-        "expected_fee_if_trade": 0.0,
-        "predicted_used_margin_after_action": 0.0,
-        "predicted_available_balance_after_action": 0.0,
-        "predicted_liq_distance_after_action": 0.0,
-        "predicted_stop_distance_after_action": 0.0,
-        "cooldown_remaining_norm": 0.0,
-        "action_overridden_flag": 0.0,
-        "last_action_raw": 0.0,
-        "last_action_used": 0.0,
-        "last_target_pos_pct": 0.0,
-        "last_final_pos_pct": 0.0,
-        "trade_executed_flag": 0.0,
-    }
 
 
 @dataclass(frozen=True)
@@ -90,6 +73,8 @@ class LiveObsBuilder:
         df_1d: pd.DataFrame,
         equity_usdt: Optional[float],
         current_position_qty: Optional[float],
+        last_action_effects: Optional[Dict[str, float]] = None,
+        account_metrics: Optional[Dict[str, Any]] = None,
     ) -> LiveObsBuildResult:
         """建立與 Env 相容的 Dict observation。
 
@@ -98,6 +83,8 @@ class LiveObsBuilder:
             df_1d: 本機 1d wide table（至少含 timestamp）。
             equity_usdt: 若 trading API 開啟，建議填入真實帳戶 equity；否則可為 None。
             current_position_qty: 若 trading API 開啟，填入目前持倉數量（>0 long, <0 short）；否則 None。
+            last_action_effects: 上一決策步的執行摘要（對齊 env 的 `_last_action_effects`）；None 則全零重置。
+            account_metrics: 與 `TradingEnvironment._get_observation` 相同 key；None 則使用向後相容的簡化預設。
         """
         if df_5m.empty:
             raise ValueError("df_5m is empty")
@@ -156,6 +143,10 @@ class LiveObsBuilder:
         # entry_price 用 current_price 近似（TODO：若要更準確可從交易所拿 entryPrice）
         if abs(float(executor.position.size)) > 1e-12 and executor.position.entry_price <= 0.0:
             executor.position.entry_price = float(current_price)
+        if abs(float(executor.position.size)) > 1e-12 and float(executor.position.entry_price) > 0.0:
+            executor.used_margin = float(
+                max(0.0, abs(float(executor.position.size)) * float(executor.position.entry_price) / float(self.leverage))
+            )
 
         atr_ratio = float(metrics.get("atr_ratio", 0.0))
         atr_est = float(atr_ratio) * float(current_price)
@@ -168,26 +159,37 @@ class LiveObsBuilder:
             total_steps=len(df_5m),
         )
 
-        account_metrics: Dict[str, Any] = {
-            "initial_balance": init_balance,
-            "max_equity_so_far": init_balance,
-            "episode_stop_loss_count": 0,
-            "episode_liq_count": 0,
-            "risk_budget": 1.0,
-            "steps_since_trade": float(self.window_size_5m),
-            "holding_steps": 0.0,
-            "last_step_fee": 0.0,
-            "rolling_fee_sum": 0.0,
-            "recent_flat_ratio": 0.5,  # 實盤可依滑窗自行計算後傳入
-        }
+        if account_metrics is not None:
+            am = dict(account_metrics)
+        else:
+            am = {
+                "initial_balance": init_balance,
+                "max_equity_so_far": init_balance,
+                "episode_stop_loss_count": 0,
+                "episode_liq_count": 0,
+                "risk_budget": 1.0,
+                "steps_since_trade": float(self.window_size_5m),
+                "holding_steps": 0.0,
+                "last_step_fee": 0.0,
+                "rolling_fee_sum": 0.0,
+                "cooldown_remaining": 0.0,
+                "min_balance": float(getattr(Config, "MIN_BALANCE", init_balance * 0.6)),
+                "episode_steps": 0,
+                "episode_max_steps": int(getattr(Config, "MAX_EPISODE_STEPS", 1)),
+                "trade_freq_remaining_ratio": 1.0,
+                "trade_freq_blocked_last": 0.0,
+                "recent_flat_ratio": 0.5,
+            }
+
+        lae = default_last_action_effects() if last_action_effects is None else dict(last_action_effects)
 
         obs = observer.get_observation(
             step_idx=step_idx,
             executor=executor,
             market_data=market_data,
-            account_metrics=account_metrics,
+            account_metrics=am,
             risk_signals=risk_signals,
-            last_action_effects=_default_last_action_effects(),
+            last_action_effects=lae,
         )
 
         trend_score_live = float(metrics.get("trend_score", 0.0))

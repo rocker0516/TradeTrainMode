@@ -16,8 +16,8 @@ from Env.config import Config
 class LiveRunnerEnvConfig:
     """Live 與 Env 對齊的常數容器（可由 `Eval.train_config.TrainConfig` 選擇性覆寫）。"""
 
-    WINDOW_SIZE_5M_DEFAULT: int = 24
-    WINDOW_SIZE_1D_DEFAULT: int = 12
+    WINDOW_SIZE_5M_DEFAULT: int = 12
+    WINDOW_SIZE_1D_DEFAULT: int = 6
     ACTION_REPEAT: int = 1
 
     MAX_STEP_POS_CHANGE_PCT: float = float(Config.MAX_STEP_POS_CHANGE_PCT)

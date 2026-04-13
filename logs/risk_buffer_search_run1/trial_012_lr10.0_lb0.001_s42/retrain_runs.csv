@@ -1,0 +1,2 @@
+candidate,seed,lambda_risk,lambda_buffer,window_size,window_size_1d,no_trade_entry_threshold,no_trade_exit_threshold,min_position_change,max_step_pos_change_pct,lambda_turnover,profit_mean,profit_per_trade_mean,trade_count_mean,episode_steps_mean,total_fees_mean,episode_max_dd_mean,termination_balance_insufficient_count,termination_liq_count,fees_profit_ratio,trade_rate,trades_per_day
+config_default,42,10.0,0.001,12,6,0.24,0.12,0.25,0.3,0.0002,0.0,0.0,0.0,4291.8,0.0,0.0,0,0,0.0,0.0,0.0
